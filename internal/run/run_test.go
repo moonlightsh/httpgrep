@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -243,5 +245,54 @@ func TestRunShardMemoryLimit(t *testing.T) {
 			}
 			check(t, errOut.String(), tc.stderr)
 		})
+	}
+}
+
+// 200 个命中的交互交错在 50 条连接上：--cpus 1 和 --cpus 4 输出的块集合相同（排序后比较），
+// 合并后的统计也相同。
+func TestRunShardsSameBlocks(t *testing.T) {
+	in := capture(t, func(w *pcapgen.Writer) {
+		var conns []*pcapgen.Conn
+		k := 0.0
+		next := func() time.Time { k++; return ms(k) }
+		for j := range 50 {
+			c := pcapgen.NewConn(w, netip.AddrPortFrom(cli1.Addr(), uint16(40000+j)), srv)
+			c.Handshake(next())
+			conns = append(conns, c)
+		}
+		for r := range 4 {
+			for j, c := range conns {
+				c.ClientSend(next(), fmt.Appendf(nil, "GET /c%d/r%d HTTP/1.1\r\nX: HIT\r\n\r\n", j, r))
+			}
+			for j, c := range conns {
+				c.ServerSend(next(), fmt.Appendf(nil, "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nc%02dr%d\n", j, r))
+			}
+		}
+	})
+	blocks := map[string][]string{}
+	for _, cpus := range []string{"1", "4"} {
+		var out bytes.Buffer
+		matched, st, err := run.Run(run.Config{Input: bytes.NewReader(in), Stdout: &out, Opts: opts(t, "--cpus", cpus, "HIT")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !matched || st.Exchanges != 200 || st.Matched != 200 || st.Complete != 200 || st.Connections != 50 {
+			t.Fatalf("cpus=%s: matched %v, stats %+v", cpus, matched, st)
+		}
+		b := strings.Split(out.String(), "--\n")
+		slices.Sort(b)
+		blocks[cpus] = b
+	}
+	if len(blocks["1"]) != 200 {
+		t.Fatalf("cpus=1: %d blocks, want 200", len(blocks["1"]))
+	}
+	// 第 7 条连接第 2 轮：请求在第 50+100*2+7+1 毫秒，响应在其后 50 毫秒。
+	want := "2026-09-28 15:30:12.603 10.0.0.1:40007 -> 10.0.0.2:80 complete 50.0ms\n" +
+		"GET /c7/r2 HTTP/1.1\r\nX: HIT\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nc07r2\n"
+	if !slices.Contains(blocks["1"], want) {
+		t.Fatalf("cpus=1 output lacks %q", want)
+	}
+	if !slices.Equal(blocks["1"], blocks["4"]) {
+		t.Fatalf("block sets differ\ncpus=1: %q\ncpus=4: %q", blocks["1"], blocks["4"])
 	}
 }

@@ -147,7 +147,7 @@ func (m *multi) abort() engine.Stats {
 	return st
 }
 
-// shardOf 按不区分方向的连接键选分片：两个端点排序后做 FNV-1a 哈希，
+// shardOf 按不区分方向的连接键选分片：两个端点排序后做哈希，
 // 同一连接两个方向的包总是落到同一分片。
 func shardOf(seg *decode.Segment, n int) int {
 	a, b := seg.Src, seg.Dst
@@ -156,6 +156,12 @@ func shardOf(seg *decode.Segment, n int) int {
 	}
 	h := hashEndpoint(fnvOffset, a)
 	h = hashEndpoint(h, b)
+	// FNV-1a 的低位混合得差（端口只差低位时取模 4 分不开），先用 murmur3 的 fmix64 打散
+	h ^= h >> 33
+	h *= 0xff51afd7ed558ccd
+	h ^= h >> 33
+	h *= 0xc4ceb9fe1a85ec53
+	h ^= h >> 33
 	return int(h % uint64(n))
 }
 
