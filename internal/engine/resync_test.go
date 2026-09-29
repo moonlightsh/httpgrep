@@ -72,3 +72,57 @@ func TestRequestHeadGapDesync(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 服务端响应头里有缺口：响应方向失步。Unparsed 字节归入正在解析的响应（队首请求的），
+// 这个交互 incomplete，重新对齐（看到下一个状态行）时结束；下一个响应和下一个请求配对。
+// 缺口在 ms5 客户端的纯 ACK 越过时认定，/a 的响应最后一个包按 ms5 算。
+func TestResponseHeadGapDesync(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\n\r\n"))
+		c.ClientSend(ms(1), []byte("GET /b HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(3), []byte("HTTP/1.1 200 OK\r\n"))
+		c.SkipServer(len("Content-Length: 2\r\n"))
+		c.ServerSend(ms(4), []byte("X-Id: TOKEN-1\r\n\r\nr\n"))
+		c.ClientAck(ms(5))
+		c.ServerSend(ms(6), []byte("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-2"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 5.0ms\n"+
+		"GET /a HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\n"+
+		"[gap: 19 bytes missing]\n"+
+		"X-Id: TOKEN-1\r\n\r\nr\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 complete 5.0ms\n"+
+		"GET /b HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-2\n")
+	if st.Incomplete != 1 || st.Complete != 1 || st.Desyncs != 1 || st.Gaps != 1 || st.GapBytes != 19 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 服务端丢了一整个响应（缺口正好落在两个响应之间）：缺口作为 Orphan 归入队首请求的响应，
+// 这个交互 incomplete，响应一个字节都没抓到，不输出耗时；下一个响应和下一个请求配对，不错位。
+// 缺口在 ms4 客户端的纯 ACK 越过时认定，缓存的第二个响应随之交付，/TOKEN-b 耗时 4-1=3.0ms。
+func TestWholeResponseLost(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /TOKEN-a HTTP/1.1\r\n\r\n"))
+		c.ClientSend(ms(1), []byte("GET /TOKEN-b HTTP/1.1\r\n\r\n"))
+		c.SkipServer(len("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nbody--1"))
+		c.ServerSend(ms(3), []byte("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nbody--2"))
+		c.ClientAck(ms(4))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 incomplete\n"+
+		"GET /TOKEN-a HTTP/1.1\r\n\r\n"+
+		"[gap: 45 bytes missing]\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 complete 3.0ms\n"+
+		"GET /TOKEN-b HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nbody--2\n")
+	if st.Incomplete != 1 || st.Complete != 1 || st.Orphans != 0 || st.Gaps != 1 || st.GapBytes != 45 {
+		t.Fatalf("stats: %+v", st)
+	}
+}

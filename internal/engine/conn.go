@@ -311,11 +311,10 @@ func (s *reqSink) Desync(off int64) { s.c.e.stats.Desyncs++ }
 
 // Begin 实现 http1.Sink：响应按顺序归入第一个还没收完最终响应的交互。
 // 通常就是队首；队首的请求还没发完、响应却已收完时，它还留在队列里。
+// 失步后没有正在解析的响应时，Orphan 消息（缺口和 Unparsed 字节）同样归入这个交互的响应，
+// 交互标为不完整，重新对齐时结束。
 func (s *resSink) Begin(b http1.Begin) {
 	s.cur = nil
-	if b.Orphan {
-		return
-	}
 	var x *exchange
 	for _, q := range s.c.queue {
 		if !q.resDone {
@@ -327,6 +326,10 @@ func (s *resSink) Begin(b http1.Begin) {
 		return
 	}
 	x.hasRes = true
+	x.resOrphan = b.Orphan
+	if b.Orphan {
+		x.incomplete = true
+	}
 	x.resMsg = x.addMessage(dirRes)
 	s.cur = x
 }

@@ -138,7 +138,7 @@ func (e *Engine) emit(c *conn, x *exchange, st output.Status) {
 	b.Time = x.start
 	b.Client, b.Server = c.cliAddr, c.srvAddr
 	b.Status = st
-	b.HasDuration = x.hasReq && x.hasRes
+	b.HasDuration = x.hasReq && x.hasRes && !x.resOrphan
 	b.Duration = 0
 	if b.HasDuration {
 		// 服务端在请求发完之前就回完了响应时，耗时记 0，不输出负数。

@@ -69,6 +69,7 @@ type exchange struct {
 
 	hasReq     bool
 	hasRes     bool // 收到过最终响应（或没收完、还不知道是不是 1xx 的响应）
+	resOrphan  bool // 响应是失步后归入的 Orphan 消息，没有状态行，不输出耗时
 	reqDone    bool // 请求已结束
 	resDone    bool // 最终响应已结束
 	incomplete bool
