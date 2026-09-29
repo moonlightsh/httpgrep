@@ -16,6 +16,7 @@ const (
 	stChunkData              // 读 chunk 数据
 	stChunkEnd               // 读 chunk 数据后面的 CRLF
 	stTrailer                // 读 trailer
+	stBodyClose              // 读到关闭为止的 body
 )
 
 const (
@@ -107,6 +108,11 @@ func (p *Parser) step(off int64, b []byte, ack int64, ts time.Time) int {
 			}
 		}
 		return k
+
+	case stBodyClose:
+		p.sink.Raw(SecBody, b)
+		p.sink.Body(b)
+		return len(b)
 
 	case stChunkSize:
 		line, n, _ := p.line(off, b, ack, ts, maxChunkLine)

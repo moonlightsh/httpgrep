@@ -362,3 +362,85 @@ func TestChunked(t *testing.T) {
 		})
 	}
 }
+
+// methodFn 返回一个固定方法的 Options.Method，并统计调用次数。
+func methodFn(m string, calls *int) func() string {
+	return func() string {
+		*calls++
+		return m
+	}
+}
+
+func TestBodyLength(t *testing.T) {
+	const next = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+	tests := []struct {
+		name   string
+		kind   http1.Kind
+		method string // Options.Method 的返回值
+		in     string
+		want   []string
+	}{
+		{
+			"request content-length 0", http1.Request, "",
+			"POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n",
+			[]string{"begin off=0", "raw head POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n", "head POST / HTTP/1.1", "end true"},
+		},
+		{
+			"request without length has no body", http1.Request, "",
+			"POST / HTTP/1.1\r\n\r\nGET / HTTP/1.1\r\n\r\n",
+			[]string{
+				"begin off=0", "raw head POST / HTTP/1.1\r\n\r\n", "head POST / HTTP/1.1", "end true",
+				"begin off=19", "raw head GET / HTTP/1.1\r\n\r\n", "head GET / HTTP/1.1", "end true",
+			},
+		},
+		{
+			"response 204 ignores content-length", http1.Response, "GET",
+			"HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n",
+			[]string{"begin off=0", "raw head HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n", "head 204 HTTP/1.1", "end true"},
+		},
+		{
+			"response 304 ignores chunked", http1.Response, "GET",
+			"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\n",
+			[]string{"begin off=0", "raw head HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\n", "head 304 HTTP/1.1", "end true"},
+		},
+		{
+			"response to HEAD", http1.Response, "HEAD",
+			"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n" + next,
+			[]string{
+				"begin off=0", "raw head HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n", "head 200 HTTP/1.1", "end true",
+				"begin off=40", "raw head " + next, "head 200 HTTP/1.1", "end true",
+			},
+		},
+		{
+			"unknown method is GET", http1.Response, "",
+			"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc",
+			[]string{"begin off=0", "raw head HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n", "head 200 HTTP/1.1", "raw body abc", "body abc", "end true"},
+		},
+		{
+			"response without length reads to close", http1.Response, "GET",
+			"HTTP/1.1 200 OK\r\n\r\nabc" + next,
+			[]string{"begin off=0", "raw head HTTP/1.1 200 OK\r\n\r\n", "head 200 HTTP/1.1", "raw body abc" + next, "body abc" + next},
+		},
+		{
+			"response non-chunked coding reads to close", http1.Response, "GET",
+			"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\nContent-Length: 3\r\n\r\nabcdef",
+			[]string{"begin off=0", "raw head HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\nContent-Length: 3\r\n\r\n", "head 200 HTTP/1.1", "raw body abcdef", "body abcdef"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			opt := http1.Options{}
+			if tt.kind == http1.Response {
+				opt.Method = methodFn(tt.method, &calls)
+			}
+			checkAllChunkings(t, tt.kind, opt, tt.want, data(tt.in))
+		})
+	}
+}
+
+// 没有设置 Options.Method 时，响应按 GET 处理。
+func TestNilMethodIsGET(t *testing.T) {
+	want := []string{"begin off=0", "raw head HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n", "head 200 HTTP/1.1", "raw body x", "body x", "end true"}
+	checkAllChunkings(t, http1.Response, http1.Options{}, want, data("HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx"))
+}

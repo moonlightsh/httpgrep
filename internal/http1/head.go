@@ -43,19 +43,57 @@ func (p *Parser) headLine(line []byte, ts time.Time) {
 	p.sink.Raw(SecHead, line)
 }
 
-// finishHead 在头部结束的空行之后决定 body 的长度。
+// finishHead 在头部结束的空行之后决定 body 的长度（RFC 9112 第 6.3 节）。
 func (p *Parser) finishHead(ts time.Time) {
+	next := p.bodyState()
 	p.sink.Head(&p.h)
+	if next == stStart {
+		p.end(true, ts)
+		return
+	}
+	p.st = next
+}
+
+// bodyState 返回头部之后的状态；没有 body 时返回 stStart。
+func (p *Parser) bodyState() state {
+	if p.kind == Response {
+		st := p.h.Status
+		if st < 200 || st == 204 || st == 304 {
+			return stStart
+		}
+		m := ""
+		if p.opt.Method != nil {
+			m = p.opt.Method()
+		}
+		if m == "HEAD" {
+			return stStart
+		}
+		if p.hasTE {
+			if p.chunked {
+				return stChunkSize
+			}
+			return stBodyClose
+		}
+		if p.hasCL {
+			return p.clState()
+		}
+		return stBodyClose
+	}
 	if p.hasTE && p.chunked {
-		p.st = stChunkSize
-		return
+		return stChunkSize
 	}
-	if p.hasCL && p.cl > 0 {
-		p.rem = p.cl
-		p.st = stBodyCL
-		return
+	if p.hasCL {
+		return p.clState()
 	}
-	p.end(true, ts)
+	return stStart
+}
+
+func (p *Parser) clState() state {
+	if p.cl == 0 {
+		return stStart
+	}
+	p.rem = p.cl
+	return stBodyCL
 }
 
 // end 结束当前消息。
