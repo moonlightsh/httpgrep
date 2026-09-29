@@ -543,3 +543,35 @@ func TestFinishEndsInFlight(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 没有 body 的消息即使带 Content-Encoding 也不输出占位行：占位行替换的是 body。
+func TestContentEncodingWithoutBody(t *testing.T) {
+	cases := []struct{ name, req, res string }{
+		{
+			name: "HEAD",
+			req:  "HEAD /TOKEN HTTP/1.1\r\n\r\n",
+			res:  "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 1000\r\n\r\n",
+		},
+		{
+			name: "304",
+			req:  "GET /TOKEN HTTP/1.1\r\n\r\n",
+			res:  "HTTP/1.1 304 Not Modified\r\nContent-Encoding: gzip\r\n\r\n",
+		},
+		{
+			name: "Content-Length 0",
+			req:  "GET /TOKEN HTTP/1.1\r\n\r\n",
+			res:  "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 0\r\n\r\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _ := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				c.ClientSend(ms(0), []byte(tc.req))
+				c.ServerSend(ms(1), []byte(tc.res))
+			})
+			check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\n"+tc.req+tc.res)
+		})
+	}
+}
