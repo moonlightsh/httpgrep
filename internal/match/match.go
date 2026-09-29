@@ -25,6 +25,8 @@ type Matcher struct {
 
 // Compile 编译关键词。patterns 已经按换行拆好；regex 为真时按 RE2 解释。
 // 多个正则合并成 (?:a)|(?:b) 编译；正则不合法时返回的错误里包含该关键词。
+// 关键词里有空串时匹配任何一行：Break 等同于写入 \n，所以即使没写入任何数据，
+// 调用 Break 之后 Matched 也为真。
 func Compile(patterns []string, regex bool) (*Matcher, error) {
 	for _, p := range patterns {
 		if strings.ContainsRune(p, '\n') {
@@ -136,6 +138,7 @@ func (m *Matcher) NewScanner() *Scanner {
 }
 
 // Scanner 流式扫描文本，按 \n 分行后逐行匹配。
+// 必须通过 Matcher.NewScanner 创建，零值不可用（调用方法会 panic）。
 type Scanner struct {
 	m        *Matcher
 	matched  bool
