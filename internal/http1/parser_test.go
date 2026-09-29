@@ -186,3 +186,98 @@ func TestContentLengthRequest(t *testing.T) {
 	}
 	checkAllChunkings(t, http1.Request, http1.Options{}, want, data(req))
 }
+
+// nonOrphanBegins 返回非 Orphan 的 Begin。
+func nonOrphanBegins(r *rec) []http1.Begin {
+	var out []http1.Begin
+	for _, b := range r.begins {
+		if !b.Orphan {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+func TestStartLine(t *testing.T) {
+	tests := []struct {
+		name  string
+		kind  http1.Kind
+		in    string
+		valid bool
+		head  string // 合法时 Head 事件的记录
+	}{
+		{"get crlf", http1.Request, "GET / HTTP/1.1\r\n\r\n", true, "head GET / HTTP/1.1"},
+		{"get lf", http1.Request, "GET /a?b=c HTTP/1.0\n\n", true, "head GET /a?b=c HTTP/1.0"},
+		{"dash method", http1.Request, "M-SEARCH * HTTP/1.1\r\n\r\n", true, "head M-SEARCH * HTTP/1.1"},
+		{"20 letter method", http1.Request, "ABCDEFGHIJKLMNOPQRST / HTTP/1.1\r\n\r\n", true, "head ABCDEFGHIJKLMNOPQRST / HTTP/1.1"},
+		{"21 letter method", http1.Request, "ABCDEFGHIJKLMNOPQRSTU / HTTP/1.1\r\n\r\n", false, ""},
+		{"lowercase method", http1.Request, "get / HTTP/1.1\r\n\r\n", false, ""},
+		{"digit in method", http1.Request, "GET2 / HTTP/1.1\r\n\r\n", false, ""},
+		{"http2", http1.Request, "GET / HTTP/2.0\r\n\r\n", false, ""},
+		{"http1.2", http1.Request, "GET / HTTP/1.2\r\n\r\n", false, ""},
+		{"no proto", http1.Request, "GET /\r\n\r\n", false, ""},
+		{"empty target", http1.Request, "GET  HTTP/1.1\r\n\r\n", false, ""},
+		{"space in target", http1.Request, "GET /a b HTTP/1.1\r\n\r\n", false, ""},
+		{"trailing space", http1.Request, "GET / HTTP/1.1 \r\n\r\n", false, ""},
+		{"status reason", http1.Response, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", true, "head 200 HTTP/1.1"},
+		{"status no reason", http1.Response, "HTTP/1.0 404\nContent-Length: 0\n\n", true, "head 404 HTTP/1.0"},
+		{"status empty reason", http1.Response, "HTTP/1.1 204 \r\n\r\n", true, "head 204 HTTP/1.1"},
+		{"status long reason", http1.Response, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n", true, "head 500 HTTP/1.1"},
+		{"status 2 digits", http1.Response, "HTTP/1.1 20 OK\r\n\r\n", false, ""},
+		{"status 4 digits", http1.Response, "HTTP/1.1 2000\r\n\r\n", false, ""},
+		{"status no space", http1.Response, "HTTP/1.1 200OK\r\n\r\n", false, ""},
+		{"status http2", http1.Response, "HTTP/2 200 OK\r\n\r\n", false, ""},
+		{"status letters", http1.Response, "HTTP/1.1 2x0 OK\r\n\r\n", false, ""},
+		{"request on response side", http1.Response, "GET / HTTP/1.1\r\n\r\n", false, ""},
+		{"response on request side", http1.Request, "HTTP/1.1 200 OK\r\n\r\n", false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, c := range []int{0, 1} {
+				r := run(tt.kind, http1.Options{}, c, data(tt.in))
+				bs := nonOrphanBegins(r)
+				if !tt.valid {
+					if len(bs) != 0 {
+						t.Fatalf("chunk=%d: invalid start line began a message: %q", c, r.ev)
+					}
+					continue
+				}
+				if len(bs) != 1 || bs[0].Off != 0 {
+					t.Fatalf("chunk=%d: begins = %+v, events %q", c, bs, r.ev)
+				}
+				if len(r.ev) < 3 || r.ev[2] != tt.head {
+					t.Fatalf("chunk=%d: events %q, want head %q", c, r.ev, tt.head)
+				}
+			}
+		})
+	}
+}
+
+// Begin 只在起始行完整之后才出现。
+func TestBeginAfterCompleteStartLine(t *testing.T) {
+	r := &rec{}
+	p := http1.NewParser(http1.Request, r, http1.Options{})
+	p.Feed(0, []byte("GET / HTTP/1.1"), 7, t0)
+	if len(r.ev) != 0 {
+		t.Fatalf("events before line end: %q", r.ev)
+	}
+	p.Feed(14, []byte("\r\n\r\n"), 9, t0.Add(time.Second))
+	if len(r.begins) != 1 {
+		t.Fatalf("begins = %+v", r.begins)
+	}
+	// Begin 的时间和 peerAck 取起始行第一个字节所在的包。
+	want := http1.Begin{Off: 0, TS: t0, PeerAck: 7}
+	if r.begins[0] != want {
+		t.Errorf("begin = %+v, want %+v", r.begins[0], want)
+	}
+}
+
+func TestSkipBlankLinesBeforeStartLine(t *testing.T) {
+	want := []string{
+		"begin off=3",
+		"raw head GET / HTTP/1.1\r\n\r\n",
+		"head GET / HTTP/1.1",
+		"end true",
+	}
+	checkAllChunkings(t, http1.Request, http1.Options{}, want, data("\r\n\nGET / HTTP/1.1\r\n\r\n"))
+}

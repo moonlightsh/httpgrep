@@ -54,8 +54,52 @@ func (p *Parser) end(complete bool, ts time.Time) {
 }
 
 // validStart 判断 line（含行尾）是不是合法的起始行。
+//
+//	请求行：方法 SP 目标 SP HTTP/1.0|HTTP/1.1，方法是 1 到 20 个大写字母或 '-'，目标非空且不含空格。
+//	状态行：HTTP/1.0|HTTP/1.1 SP 三位数字，后面直接换行或跟 SP 原因短语。
 func validStart(kind Kind, line []byte) bool {
-	return len(trimEOL(line)) > 0
+	s := trimEOL(line)
+	if kind == Request {
+		i := methodLen(s)
+		if i == 0 || i >= len(s) || s[i] != ' ' {
+			return false
+		}
+		j := bytes.LastIndexByte(s, ' ')
+		return j > i+1 && bytes.IndexByte(s[i+1:j], ' ') < 0 && isProto(s[j+1:])
+	}
+	if len(s) < 12 || !isProto(s[:8]) || s[8] != ' ' {
+		return false
+	}
+	for _, c := range s[9:12] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return len(s) == 12 || s[12] == ' '
+}
+
+// methodLen 返回 s 开头由大写字母和 '-' 组成的方法名长度；超过 20 个时返回 0。
+func methodLen(s []byte) int {
+	i := 0
+	for i < len(s) && (('A' <= s[i] && s[i] <= 'Z') || s[i] == '-') {
+		i++
+		if i > 20 {
+			return 0
+		}
+	}
+	return i
+}
+
+func isProto(s []byte) bool {
+	return string(s) == "HTTP/1.1" || string(s) == "HTTP/1.0"
+}
+
+// proto 返回协议版本的常量字符串，避免分配。
+func proto(s []byte) string {
+	if string(s) == "HTTP/1.0" {
+		return "HTTP/1.0"
+	}
+	return "HTTP/1.1"
 }
 
 // parseStart 把合法的起始行（不含行尾）解析进 h。
@@ -63,10 +107,36 @@ func parseStart(kind Kind, s []byte, h *Head) {
 	if kind == Request {
 		i := bytes.IndexByte(s, ' ')
 		j := bytes.LastIndexByte(s, ' ')
-		h.Method = string(s[:i])
+		h.Method = method(s[:i])
 		h.Target = string(s[i+1 : j])
-		h.Proto = string(s[j+1:])
+		h.Proto = proto(s[j+1:])
+		return
 	}
+	h.Proto = proto(s[:8])
+	h.Status = int(s[9]-'0')*100 + int(s[10]-'0')*10 + int(s[11]-'0')
+}
+
+// method 返回方法名字符串；常见方法用常量，避免分配。
+func method(s []byte) string {
+	switch string(s) {
+	case "GET":
+		return "GET"
+	case "POST":
+		return "POST"
+	case "HEAD":
+		return "HEAD"
+	case "PUT":
+		return "PUT"
+	case "DELETE":
+		return "DELETE"
+	case "OPTIONS":
+		return "OPTIONS"
+	case "PATCH":
+		return "PATCH"
+	case "CONNECT":
+		return "CONNECT"
+	}
+	return string(s)
 }
 
 // parseCL 解析 Content-Length 的值：只允许十进制数字。
