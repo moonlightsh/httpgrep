@@ -472,6 +472,40 @@ func TestUpgrade(t *testing.T) {
 				"HTTP/1.1 204 No Content\r\n\r\n",
 			exchanges: 2,
 		},
+		{
+			// 400 和下一个请求的响应在同一个段里：下一个请求要在 204 开始之前排进队列。
+			name: "400 and next response in one segment",
+			build: func(c *pcapgen.Conn) {
+				c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+				c.ClientSend(ms(1), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+				c.ServerSend(ms(2), []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"+
+					"HTTP/1.1 204 No Content\r\n\r\n"))
+			},
+			want: "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\n" +
+				"GET /TOKEN HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 204 No Content\r\n\r\n",
+			exchanges: 2,
+		},
+		{
+			// h2c 升级被拒（普通 200），后面管道化的两个请求按序配对。
+			name: "h2c refused, pipelined requests after it",
+			build: func(c *pcapgen.Conn) {
+				c.ClientSend(ms(0), []byte("GET / HTTP/1.1\r\nUpgrade: h2c\r\n\r\n"))
+				c.ClientSend(ms(1), []byte("GET /TOKEN-2 HTTP/1.1\r\n\r\n"))
+				c.ClientSend(ms(2), []byte("GET /TOKEN-3 HTTP/1.1\r\n\r\n"))
+				c.ServerSend(ms(3), []byte("HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n1"+
+					"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nbody-2"))
+				c.ServerSend(ms(4), []byte("HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nbody-3"))
+			},
+			want: "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 complete 2.0ms\n" +
+				"GET /TOKEN-2 HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nbody-2\n" +
+				"--\n" +
+				"2026-09-28 15:30:12.347 10.0.0.1:52814 -> 10.0.0.2:80 complete 2.0ms\n" +
+				"GET /TOKEN-3 HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nbody-3\n",
+			exchanges: 3,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
