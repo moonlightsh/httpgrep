@@ -82,7 +82,7 @@ func Parse(args []string) (Options, error) {
 						return opts, err
 					}
 				}
-				opts.Timeout, err = parseDuration(val)
+				opts.Timeout, err = parseDuration("--timeout", val)
 				if err != nil {
 					return opts, err
 				}
@@ -93,7 +93,7 @@ func Parse(args []string) (Options, error) {
 						return opts, err
 					}
 				}
-				opts.MaxMemory, err = parseSize(val)
+				opts.MaxMemory, err = parseSize("--max-memory", val)
 				if err != nil {
 					return opts, err
 				}
@@ -104,7 +104,7 @@ func Parse(args []string) (Options, error) {
 						return opts, err
 					}
 				}
-				opts.MaxMessage, err = parseSize(val)
+				opts.MaxMessage, err = parseSize("--max-message", val)
 				if err != nil {
 					return opts, err
 				}
@@ -115,7 +115,7 @@ func Parse(args []string) (Options, error) {
 						return opts, err
 					}
 				}
-				opts.CPUs, err = parseInt(val)
+				opts.CPUs, err = parseInt("--cpus", val)
 				if err != nil {
 					return opts, err
 				}
@@ -217,9 +217,10 @@ func splitLines(s string) []string {
 }
 
 // parseSize 解析大小：纯数字是字节，可带 K/M/G 后缀（1024 进位）。
-func parseSize(s string) (int64, error) {
+func parseSize(name, orig string) (int64, error) {
+	s := orig
 	if s == "" {
-		return 0, &Error{"invalid size: " + s}
+		return 0, &Error{"invalid size for " + name + ": " + orig}
 	}
 	mult := int64(1)
 	switch s[len(s)-1] {
@@ -231,11 +232,11 @@ func parseSize(s string) (int64, error) {
 		mult, s = 1<<30, s[:len(s)-1]
 	}
 	if !isDigits(s) {
-		return 0, &Error{"invalid size: " + s}
+		return 0, &Error{"invalid size for " + name + ": " + orig}
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || n <= 0 || n > (1<<63-1)/mult {
-		return 0, &Error{"invalid size: " + s}
+		return 0, &Error{"invalid size for " + name + ": " + orig}
 	}
 	return n * mult, nil
 }
@@ -254,22 +255,22 @@ func isDigits(s string) bool {
 }
 
 // parseInt 解析不小于 1 的纯数字整数。
-func parseInt(s string) (int, error) {
+func parseInt(name, s string) (int, error) {
 	if !isDigits(s) {
-		return 0, &Error{"invalid value: " + s}
+		return 0, &Error{"invalid value for " + name + ": " + s}
 	}
 	n, err := strconv.Atoi(s)
 	if err != nil || n < 1 {
-		return 0, &Error{"invalid value: " + s}
+		return 0, &Error{"invalid value for " + name + ": " + s}
 	}
 	return n, nil
 }
 
 // parseDuration 解析必须大于 0 的时长。
-func parseDuration(s string) (time.Duration, error) {
+func parseDuration(name, s string) (time.Duration, error) {
 	d, err := time.ParseDuration(s)
 	if err != nil || d <= 0 {
-		return 0, &Error{"invalid duration: " + s}
+		return 0, &Error{"invalid duration for " + name + ": " + s}
 	}
 	return d, nil
 }

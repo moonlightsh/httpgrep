@@ -219,6 +219,12 @@ func TestParseSizes(t *testing.T) {
 		_, err := cli.Parse([]string{"--max-memory=" + bad, "kw"})
 		if err == nil {
 			t.Errorf("--max-memory %q 应报错", bad)
+			continue
+		}
+		// 错误消息带选项名和原始输入。
+		want := "invalid size for --max-memory: " + bad
+		if err.Error() != want {
+			t.Errorf("err = %q, want %q", err.Error(), want)
 		}
 	}
 	// MaxMessage 大于 MaxMemory 时报错；相等则合法。
