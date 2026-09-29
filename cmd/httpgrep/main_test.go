@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,5 +232,27 @@ func TestPatternOptions(t *testing.T) {
 			}
 			want(t, runBin(t, bytes.NewReader(twoExchanges(t)), tc.args...), tc.stdout, "", code)
 		})
+	}
+}
+
+// --help 把帮助写到 stdout，退出码 0，不需要关键词、不读输入。
+// 帮助覆盖设计文档第 2 节的全部选项，并写明 --max-memory 是近似上限、哪些缓存不计入。
+func TestHelp(t *testing.T) {
+	got := runBin(t, nil, "--help")
+	if got.code != 0 || got.stderr != "" {
+		t.Fatalf("code %d, stderr %q", got.code, got.stderr)
+	}
+	for _, s := range []string{
+		"Usage: httpgrep [OPTION]... PATTERN [FILE]",
+		"-e PATTERN", "-E ", "--timeout DUR", "(default 30s)",
+		"--max-memory SIZE", "Approximate limit for buffered data (default 256M)",
+		"-E line buffers", "Upgrade", "resync",
+		"--max-message SIZE", "(default 8M)", "--cpus N", "(default 1)",
+		"--stats", "--help", "--version",
+		"K, M, G", "Exit status is 0 if an exchange matched, 1 if none matched, 2 on error.",
+	} {
+		if !strings.Contains(got.stdout, s) {
+			t.Errorf("help lacks %q", s)
+		}
 	}
 }

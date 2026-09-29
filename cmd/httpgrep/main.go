@@ -21,6 +21,10 @@ func httpgrep(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "httpgrep: %v\nTry 'httpgrep --help' for more information.\n", err)
 		return 2
 	}
+	if opts.Help {
+		io.WriteString(stdout, cli.Usage)
+		return 0
+	}
 	f := stdin
 	if opts.File != "" && opts.File != "-" {
 		f, err = os.Open(opts.File)
