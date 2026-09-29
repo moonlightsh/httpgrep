@@ -204,6 +204,8 @@ func (s *resSink) Raw(sec http1.Section, b []byte) {
 func (s *resSink) Head(h *http1.Head) {
 	if x := s.cur; x != nil {
 		x.head(x.resMsg, h)
+		// 1xx 中间响应（101 除外）归入所属交互，之后还有最终响应。
+		x.msgs[x.resMsg].interim = h.Status >= 100 && h.Status < 200 && h.Status != 101
 	}
 }
 
@@ -226,6 +228,9 @@ func (s *resSink) End(complete bool, ts time.Time) {
 		x.incomplete = true
 	}
 	x.lineBreak()
+	if complete && x.msgs[x.resMsg].interim {
+		return // 等最终响应
+	}
 	s.c.finish(x)
 }
 

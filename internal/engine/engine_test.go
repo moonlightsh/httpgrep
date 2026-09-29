@@ -137,3 +137,22 @@ func TestMatchSplitAcrossSegments(t *testing.T) {
 		"POST /a HTTP/1.1\r\nContent-Length: 12\r\n\r\nid=TOKEN-42\n"+
 		"HTTP/1.1 204 No Content\r\n\r\n")
 }
+
+// 100 Continue 之后再 200：输出一块，依次是请求、100 响应、200 响应。
+func TestContinueThenFinal(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN-42")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("PUT /a HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 8\r\n\r\n"))
+		c.ServerSend(ms(1), []byte("HTTP/1.1 100 Continue\r\n\r\n"))
+		c.ClientSend(ms(2), []byte("TOKEN-42"))
+		c.ServerSend(ms(9), []byte("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 7.0ms\n"+
+		"PUT /a HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 8\r\n\r\nTOKEN-42\n"+
+		"HTTP/1.1 100 Continue\r\n\r\n"+
+		"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
+	if st.Exchanges != 1 || st.Complete != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
