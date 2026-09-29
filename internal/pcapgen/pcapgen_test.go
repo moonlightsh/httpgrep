@@ -3,6 +3,7 @@ package pcapgen_test
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -643,5 +644,68 @@ func TestConnRaw(t *testing.T) {
 	}
 	if !reflect.DeepEqual(rows, want) {
 		t.Errorf("srcport/dstport/seq/ack/flags/len = %v，想要 %v", rows, want)
+	}
+}
+
+// failWriter 第 failAt 次调用 Write 时返回 errBoom，之前的调用都成功；
+// calls 记录一共被调用了几次。
+type failWriter struct {
+	failAt int
+	calls  int
+}
+
+var errBoom = errors.New("boom")
+
+func (f *failWriter) Write(p []byte) (int, error) {
+	f.calls++
+	if f.calls == f.failAt {
+		return 0, errBoom
+	}
+	return len(p), nil
+}
+
+// 写出出错后 Writer 记住第一个错误：Err() 和之后的 Record 都返回它，
+// 并且不再调用底层 Write。每条记录调用两次 Write（记录头、帧）。
+func TestWriterError(t *testing.T) {
+	client := netip.MustParseAddrPort("10.0.0.1:50007")
+	server := netip.MustParseAddrPort("10.0.0.2:80")
+	ts := time.Unix(1700000000, 0)
+	frame := pcapgen.Frame(pcap.LinkEthernet, pcapgen.TCP(client, server, 1, 0, decode.SYN, nil))
+	cases := []struct {
+		name   string
+		failAt int
+		gen    func(w *pcapgen.Writer) error // 返回最后一次 Record 的错误，Conn 场景返回 nil
+		calls  int                           // 期望的 Write 调用次数，手算
+	}{
+		// 文件头失败：之后的 Record 直接返回错误，不写任何东西。
+		{"header", 1, func(w *pcapgen.Writer) error { return w.Record(ts, frame, 0) }, 1},
+		// 第一条记录的帧失败（第 3 次 Write）：第二条记录不再写。
+		{"record", 3, func(w *pcapgen.Writer) error {
+			_ = w.Record(ts, frame, 0)
+			return w.Record(ts, frame, 0)
+		}, 3},
+		// Conn：握手第二个包的记录头失败（第 4 次 Write），之后的包全部不写。
+		{"conn", 4, func(w *pcapgen.Writer) error {
+			c := pcapgen.NewConn(w, client, server)
+			c.Handshake(ts)
+			c.ClientSend(ts, []byte("hello"))
+			c.ClientFin(ts)
+			return nil
+		}, 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fw := &failWriter{failAt: tc.failAt}
+			w := pcapgen.NewWriter(fw, pcap.LinkEthernet)
+			if err := tc.gen(w); tc.name != "conn" && !errors.Is(err, errBoom) {
+				t.Errorf("Record 返回 %v，想要 %v", err, errBoom)
+			}
+			if err := w.Err(); !errors.Is(err, errBoom) {
+				t.Errorf("Err() = %v，想要 %v", err, errBoom)
+			}
+			if fw.calls != tc.calls {
+				t.Errorf("Write 调用 %d 次，想要 %d 次", fw.calls, tc.calls)
+			}
+		})
 	}
 }
