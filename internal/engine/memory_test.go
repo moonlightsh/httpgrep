@@ -481,11 +481,12 @@ func placeholderReleasesBuffer(t *testing.T, m *match.Matcher) {
 	}
 }
 
-// 因内存上限释放连接时，请求解析器缓存的 Upgrade 请求之后的字节随连接一起丢弃，
-// 不回放成新的交互再输出：它们和被丢弃的在途交互一样是为了不超限而放弃的数据。
-// 上限 2600。C1 的 Upgrade 请求 U 后面跟着管道化的 GET /TOKEN（缓存着等决定）；
-// C2 握手后计量 2048 + 512 + 44 超限，丢弃 U；C3 握手后 3072 超限，释放最久没有包的 C1。
-func TestEvictedConnectionDropsHeld(t *testing.T) {
+// 丢弃 Upgrade 请求时回放出的请求照常计入，仍然超限时同样被丢弃，不会等到连接释放时
+// 再以 no-response(closed) 输出。上限 2600。C1 的 Upgrade 请求 U 后面跟着管道化的
+// GET /TOKEN（缓存着等决定）；C2 的 SYN 使计量到 2048 + 512 + 44 = 2604，超限：
+// 丢弃 U（得 2048 + 384），回放出 GET /TOKEN（再加 512 + 23，得 2967），仍超限，
+// 丢弃它（已命中，不输出，得 2816），仍超限，释放最久没有包的 C1。
+func TestEvictedUpgradeReplayEvicted(t *testing.T) {
 	cli3 := netip.MustParseAddrPort("10.0.0.1:52816")
 	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 2600}, func(w *pcapgen.Writer) {
 		c1 := pcapgen.NewConn(w, cli1, srv)
@@ -495,7 +496,7 @@ func TestEvictedConnectionDropsHeld(t *testing.T) {
 		pcapgen.NewConn(w, cli3, srv).Handshake(ms(3))
 	})
 	check(t, out, "")
-	if st.Exchanges != 1 || st.Evicted != 1 || st.NoResponseClosed != 0 || st.NoResponseEOF != 0 {
+	if st.Exchanges != 2 || st.Evicted != 2 || st.EvictedMatched != 1 || st.NoResponseClosed != 0 || st.NoResponseEOF != 0 {
 		t.Fatalf("stats: %+v", st)
 	}
 }
@@ -603,5 +604,68 @@ func TestPlaceholdersCounted(t *testing.T) {
 	}
 	if st.NoResponseTimeout != 3 || st.Evicted != 1 || st.Connections != 1 {
 		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 因内存上限丢弃的 Upgrade 请求像超时的一样按被拒处理：它后面管道化的请求马上照常解析、
+// 从丢弃时起计时，不等到连接关闭或输入结束。
+//   - 头部收到一半时被丢弃（上限 7400）：计量同 TestEvictedUpgradeRequestKeepsHeld，t=2 时丢弃 U；
+//     t=4 请求发完，GET /TOKEN 随即开始，t=30.004 超时输出。
+//   - 请求发完、后面的 GET /TOKEN 已经缓存着时被丢弃（上限 8000）：U 带 1000 字节的 X-Pad，1043 字节。
+//     B 的响应第三个包之后计量是 2048 + (512+1043) + (512+19) + 4380 = 8514，超限，丢弃 U，
+//     得 8514 - 1555 + 384 = 7343；回放出 GET /TOKEN（512 + 23），得 7878，不再超限。
+//     GET /TOKEN 从 t=2 起计时，t=30.002 超时输出；定位行时间是它所在包的时间 t=0。
+func TestEvictedUpgradeGivesUpDecision(t *testing.T) {
+	pad := "X-Pad: " + strings.Repeat("p", 991) + "\r\n" // 1000 字节
+	cases := []struct {
+		name  string
+		limit int64
+		u     func(u *pcapgen.Conn) // U 在 t=0 发出的请求
+		rest  func(u *pcapgen.Conn) // B 的响应之后 U 再发的
+		tick  time.Time
+		want  string
+	}{
+		{
+			name:  "evicted while head in progress",
+			limit: 7400,
+			u: func(u *pcapgen.Conn) {
+				u.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n"))
+			},
+			rest: func(u *pcapgen.Conn) {
+				u.ClientSend(ms(4), []byte("\r\nGET /TOKEN HTTP/1.1\r\n\r\n"))
+			},
+			tick: ms(30004),
+			want: "2026-09-28 15:30:12.349 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n" +
+				"GET /TOKEN HTTP/1.1\r\n\r\n",
+		},
+		{
+			name:  "evicted while holding",
+			limit: 8000,
+			rest:  func(*pcapgen.Conn) {},
+			u: func(u *pcapgen.Conn) {
+				u.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n"+pad+"\r\nGET /TOKEN HTTP/1.1\r\n\r\n"))
+			},
+			tick: ms(30002),
+			want: "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n" +
+				"GET /TOKEN HTTP/1.1\r\n\r\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snaps, _, st := replayTicks(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: tc.limit}, func(w *pcapgen.Writer) {
+				u := pcapgen.NewConn(w, cli1, srv)
+				b := pcapgen.NewConn(w, cli2, srv)
+				u.Handshake(ms(-1))
+				b.Handshake(ms(-1))
+				tc.u(u)
+				b.ClientSend(ms(1), []byte("GET /b HTTP/1.1\r\n\r\n"))
+				b.ServerSend(ms(2), []byte("HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n"+strings.Repeat("x", 5000)))
+				tc.rest(u)
+			}, tc.tick)
+			check(t, snaps[0], tc.want)
+			if st.Evicted != 1 || st.Exchanges != 3 || st.NoResponseTimeout != 1 || st.NoResponseEOF != 0 {
+				t.Fatalf("stats: %+v", st)
+			}
+		})
 	}
 }

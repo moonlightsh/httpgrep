@@ -318,6 +318,8 @@ func (c *conn) Reset(ts time.Time) {
 // 空闲释放不是线上看到的关闭：在途交互是等不到数据而结束的，按超时标记。
 // 排在后面、还没轮到计时的请求也一样：按排队规则它们本该更晚才超时，但连接已经
 // 连续 2 倍交互超时没有任何包，同样是等不到响应。
+// 因内存上限释放（CloseEvicted）时在途交互已经都丢弃了，队列里只剩占位；
+// 等决定的 Upgrade 请求在丢弃时已经放弃（见 giveUp），请求解析器没有缓存。
 func (c *conn) Closed(reason tcp.CloseReason, ts time.Time) {
 	why := noRespClosed
 	switch reason {
@@ -325,10 +327,6 @@ func (c *conn) Closed(reason tcp.CloseReason, ts time.Time) {
 		why = noRespEOF
 	case tcp.CloseIdle:
 		why = noRespTimeout
-	case tcp.CloseEvicted:
-		// 因内存上限释放：在途交互已经都丢弃了，请求解析器缓存的 Upgrade 请求之后的字节
-		// 也随连接一起丢弃（请求解析器在缓存状态下关闭时直接丢掉缓存），不回放成新的交互。
-		c.held, c.cliFin = false, false
 	}
 	c.close(why, ts)
 }
@@ -390,19 +388,27 @@ func (c *conn) timeout(x *exchange, at time.Time) {
 	}
 	c.e.end(c, x)
 	c.e.bury(x)
-	if !x.decided && (x.upgrade || !x.reqDone) {
-		// Upgrade 请求等不到决定了，按被拒处理：缓存在它后面的请求回放出来照常排队，
-		// 从现在起计时。请求还没发完时 Resume 只记下决定，发完后直接继续解析。
-		// 请求头还没收完时还不知道是不是 Upgrade 请求（Head 还没来），也先记下：
-		// http1 只在 Begin 时清掉决定，不是 Upgrade 请求时这个决定不起作用。
-		x.decided = true
-		if c.held {
-			c.resumeHeld()
-		} else if !x.reqDone {
-			c.req.Resume()
-		}
-	}
+	c.giveUp(x)
 	c.rearm(at)
+}
+
+// giveUp 在交互 x 超时或因内存上限被丢弃时调用：如果它是（或者可能是）还在等决定的
+// Upgrade 请求，按被拒处理。缓存在它后面的请求回放出来照常排队，从现在起计时。
+// 请求还没发完时 Resume 只记下决定，发完后直接继续解析。请求头还没收完时还不知道
+// 是不是 Upgrade 请求（Head 还没来），也先记下：http1 只在 Begin 时清掉决定，
+// 不是 Upgrade 请求时这个决定不起作用。
+// 被丢弃的交互之后也许还会等到决定（比如 101），这里同样放弃：占位不再缓存数据，
+// 缓存的请求不能一直留着不计量；决定真的到了时，101 仍然让请求解析器停下（见 resSink.Head）。
+func (c *conn) giveUp(x *exchange) {
+	if x.decided || !x.upgrade && x.reqDone {
+		return
+	}
+	x.decided = true
+	if c.held {
+		c.resumeHeld()
+	} else if !x.reqDone {
+		c.req.Resume()
+	}
 }
 
 // markLate 在迟到响应的字节或缺口到达占位 x 时计数，每个占位只计一次。
@@ -556,21 +562,9 @@ func (s *reqSink) End(complete bool, ts time.Time) {
 	}
 	s.cur = nil
 	x.reqDone = true
-	// 占位也要记下：请求发到一半时因内存上限被丢弃的 Upgrade 请求还在等决定
-	// （超时的占位已经记下了决定，不会走到这里）。
-	if complete && x.upgrade && !x.decided {
-		if s.c.srvClosed {
-			// 服务端已经关闭，决定不会再来：现在就按被拒处理。解析器还没结束这条消息，
-			// Resume 只记下决定，随后直接继续解析，不缓存后面的字节。
-			x.decided = true
-			s.c.req.Resume()
-		} else {
-			// 请求解析器在 Upgrade 请求正常结束、还没有决定时开始缓存后面的字节。
-			s.c.held = true
-		}
-	}
 	if x.ghost {
 		// 请求发到一半就超时或被丢弃的占位：它的响应已经收完或不会再来时回收。
+		// 占位已经就 Upgrade 做过决定（见 giveUp），解析器不会缓存后面的字节。
 		if x.resDone || s.c.srvClosed {
 			s.c.drop(x)
 		}
@@ -578,6 +572,17 @@ func (s *reqSink) End(complete bool, ts time.Time) {
 	}
 	if complete {
 		x.reqLast = ts
+		if x.upgrade && !x.decided {
+			if s.c.srvClosed {
+				// 服务端已经关闭，决定不会再来：现在就按被拒处理。解析器还没结束这条消息，
+				// Resume 只记下决定，随后直接继续解析，不缓存后面的字节。
+				x.decided = true
+				s.c.req.Resume()
+			} else {
+				// 请求解析器在 Upgrade 请求正常结束、还没有决定时开始缓存后面的字节。
+				s.c.held = true
+			}
+		}
 	} else {
 		x.incomplete = true
 	}

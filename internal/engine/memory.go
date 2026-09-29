@@ -166,6 +166,9 @@ func (c *conn) evict(x *exchange, now time.Time) {
 	e.buffered -= int64(len(x.buf))
 	x.evicted = true
 	e.bury(x)
+	// 和超时一样，还在等决定的 Upgrade 请求按被拒处理，缓存在它后面的请求回放出来。
+	// 回放出的交互照常计入，上限由调用方（shrink）继续执行。
+	c.giveUp(x)
 	// 排在它后面的请求轮到队首，从现在起计时。
 	c.rearm(now)
 }
