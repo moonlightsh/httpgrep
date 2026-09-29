@@ -86,7 +86,11 @@ func (e *Engine) newExchange() *exchange {
 		e.free[n-1] = nil
 		e.free = e.free[:n-1]
 	} else {
-		x = &exchange{sc: e.cfg.Matcher.NewScanner(), alt: e.cfg.Matcher.NewScanner()}
+		x = &exchange{}
+		for i := range x.dirs {
+			x.dirs[i].sc = e.cfg.Matcher.NewScanner()
+			x.dirs[i].alt = e.cfg.Matcher.NewScanner()
+		}
 	}
 	x.reset()
 	e.stats.Exchanges++
@@ -99,7 +103,7 @@ func (e *Engine) newExchange() *exchange {
 
 // finish 结束交互：计入统计，命中的输出，然后回收。
 func (e *Engine) finish(c *conn, x *exchange) {
-	x.lineBreak()
+	x.breakAll()
 	st := x.status()
 	switch {
 	case st == output.Status{}:
@@ -120,7 +124,7 @@ func (e *Engine) finish(c *conn, x *exchange) {
 			e.stats.NoResponseEOF++
 		}
 	}
-	if x.sc.Matched() {
+	if x.matched() {
 		e.stats.Matched++
 		e.emit(c, x, st)
 	}

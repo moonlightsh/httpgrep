@@ -35,12 +35,30 @@ type piece struct {
 
 // message 是交互里的一条消息：请求、1xx 响应或最终响应。
 type message struct {
-	interim     bool // 1xx 中间响应（不含 101）
+	dir         uint8 // dirReq 或 dirRes
+	interim     bool  // 1xx 中间响应（不含 101）
 	binary      bool
 	ct, ce      string
 	bodySize    int64
 	bodyMatched bool
-	bodyAlt     bool // body 开始时主扫描器已命中，改用 alt 判断 body 是否命中
+	bodyAlt     bool // body 开始时这个方向的主扫描器已命中，改用 alt 判断 body 是否命中
+}
+
+// 消息所在的方向，也是 exchange.dirs 的下标。
+const (
+	dirReq = 0
+	dirRes = 1
+)
+
+// scanDir 是一个方向的匹配状态。请求和响应的字节可能交错到达
+// （比如服务端提前回响应时请求 body 还在发），两个方向各自按行续接，互不打断。
+// 同一方向上的消息（1xx 和最终响应）依次到达，共用一份状态。
+type scanDir struct {
+	sc  *match.Scanner // 这个方向的全部内容
+	alt *match.Scanner // sc 已命中后，只用来判断某个 body 是否命中
+
+	fedMsg int // 上一次喂入的消息下标，-1 表示还没喂过
+	fedSec uint8
 }
 
 // exchange 是一个交互：一个请求和它的响应（含 1xx）。
@@ -60,11 +78,7 @@ type exchange struct {
 
 	reqMsg, resMsg int // 正在接收的请求、响应消息的下标
 
-	sc  *match.Scanner // 整个交互的扫描器
-	alt *match.Scanner // 主扫描器已命中后，只用来判断某个 body 是否命中
-
-	fedMsg int
-	fedSec uint8
+	dirs [2]scanDir // 按方向的匹配状态，下标是 dirReq、dirRes
 
 	buf    []byte
 	pieces []piece
@@ -89,23 +103,30 @@ func (x *exchange) status() output.Status {
 // reset 清空交互以便复用。
 func (x *exchange) reset() {
 	*x = exchange{
-		sc:     x.sc,
-		alt:    x.alt,
+		dirs:   x.dirs,
 		buf:    x.buf[:0],
 		pieces: x.pieces[:0],
 		msgs:   x.msgs[:0],
-		fedMsg: -1,
 	}
 	if cap(x.buf) > maxKeepBuf {
 		x.buf = nil
 	}
-	x.sc.Reset()
-	x.alt.Reset()
+	for i := range x.dirs {
+		d := &x.dirs[i]
+		d.sc.Reset()
+		d.alt.Reset()
+		d.fedMsg, d.fedSec = -1, feedNone
+	}
 }
 
-// addMessage 追加一条消息，返回下标。
-func (x *exchange) addMessage() int {
-	x.msgs = append(x.msgs, message{})
+// matched 报告交互是否命中。alt 只在 sc 已命中后使用，不用看。
+func (x *exchange) matched() bool {
+	return x.dirs[dirReq].sc.Matched() || x.dirs[dirRes].sc.Matched()
+}
+
+// addMessage 在方向 dir 上追加一条消息，返回下标。
+func (x *exchange) addMessage(dir uint8) int {
+	x.msgs = append(x.msgs, message{dir: dir})
 	return len(x.msgs) - 1
 }
 
@@ -156,49 +177,60 @@ func (x *exchange) body(mi int, b []byte) {
 	x.feed(mi, feedBody, b)
 }
 
-// feed 把 b 喂给扫描器。消息或分类变化时先结束当前行。
-// body 开始时主扫描器已经命中的，改用 alt 扫描器判断这个 body 是否命中。
+// feed 把消息 mi 的 b 喂给它所在方向的扫描器。同一方向上消息或分类变化时先结束当前行。
+// 交互已经命中后只剩“这个 body 是否命中”要判断：body 开始时已经命中的，
+// 改用 alt 扫描器判断；body 以外的内容不再扫描。
 func (x *exchange) feed(mi int, sec uint8, b []byte) {
-	if x.fedMsg != mi || x.fedSec != sec {
-		x.lineBreak()
-		x.fedMsg, x.fedSec = mi, sec
-		if m := &x.msgs[mi]; sec == feedBody && !m.bodyAlt && x.sc.Matched() {
+	m := &x.msgs[mi]
+	d := &x.dirs[m.dir]
+	if d.fedMsg != mi || d.fedSec != sec {
+		x.lineBreak(m.dir)
+		d.fedMsg, d.fedSec = mi, sec
+		if sec == feedBody && !m.bodyAlt && x.matched() {
 			m.bodyAlt = true
-			x.alt.Reset()
+			d.alt.Reset()
 		}
 	}
 	if sec != feedBody {
-		x.sc.Write(b)
+		if !x.matched() {
+			d.sc.Write(b)
+		}
 		return
 	}
-	m := &x.msgs[mi]
 	if m.bodyAlt {
 		if !m.bodyMatched {
-			x.alt.Write(b)
-			m.bodyMatched = x.alt.Matched()
+			d.alt.Write(b)
+			m.bodyMatched = d.alt.Matched()
 		}
 		return
 	}
-	x.sc.Write(b)
-	m.bodyMatched = x.sc.Matched()
+	d.sc.Write(b)
+	m.bodyMatched = d.sc.Matched()
 }
 
-// lineBreak 结束扫描器的当前行；正在喂 body 时顺带更新 body 是否命中。
-func (x *exchange) lineBreak() {
-	if x.fedSec == feedBody {
-		m := &x.msgs[x.fedMsg]
-		if m.bodyAlt {
-			if !m.bodyMatched {
-				x.alt.Break()
-				m.bodyMatched = x.alt.Matched()
-			}
-			return
-		}
-		x.sc.Break()
-		m.bodyMatched = x.sc.Matched()
+// lineBreak 结束方向 dir 的当前行；正在喂 body 时顺带更新 body 是否命中。
+func (x *exchange) lineBreak(dir uint8) {
+	d := &x.dirs[dir]
+	if d.fedSec != feedBody {
+		d.sc.Break()
 		return
 	}
-	x.sc.Break()
+	m := &x.msgs[d.fedMsg]
+	if m.bodyAlt {
+		if !m.bodyMatched {
+			d.alt.Break()
+			m.bodyMatched = d.alt.Matched()
+		}
+		return
+	}
+	d.sc.Break()
+	m.bodyMatched = d.sc.Matched()
+}
+
+// breakAll 结束两个方向的当前行，交互结束时调用。
+func (x *exchange) breakAll() {
+	x.lineBreak(dirReq)
+	x.lineBreak(dirRes)
 }
 
 // hasControl 判断 b 里有没有 \t \r \n 以外的 C0 控制字符或 DEL。

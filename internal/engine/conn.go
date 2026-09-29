@@ -187,7 +187,7 @@ func (s *reqSink) Begin(b http1.Begin) {
 	x := c.e.newExchange()
 	x.hasReq = true
 	x.start, x.reqLast = b.TS, b.TS
-	x.reqMsg = x.addMessage()
+	x.reqMsg = x.addMessage(dirReq)
 	c.queue = append(c.queue, x)
 	s.cur = x
 }
@@ -236,7 +236,7 @@ func (s *reqSink) End(complete bool, ts time.Time) {
 	} else {
 		x.incomplete = true
 	}
-	x.lineBreak()
+	x.lineBreak(dirReq)
 	switch {
 	case x.resDone:
 		// 服务端在请求发完之前就回了最终响应，现在请求也发完了。
@@ -270,7 +270,7 @@ func (s *resSink) Begin(b http1.Begin) {
 		return
 	}
 	x.hasRes = true
-	x.resMsg = x.addMessage()
+	x.resMsg = x.addMessage(dirRes)
 	s.cur = x
 }
 
@@ -324,7 +324,7 @@ func (s *resSink) End(complete bool, ts time.Time) {
 		// 没收完的响应，耗时算到最后一次收到响应数据。
 		x.incomplete = true
 	}
-	x.lineBreak()
+	x.lineBreak(dirRes)
 	if complete && x.msgs[x.resMsg].interim {
 		// 等最终响应；只有 1xx 的交互不算有响应，不输出耗时。
 		x.hasRes = false

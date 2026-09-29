@@ -629,3 +629,35 @@ func TestResponseBeforeRequestEnds(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 请求和响应交错到达时各自按行匹配：请求 body 里跨段的关键词不会被响应打断，
+// 响应 body 是否命中也不受请求影响。
+func TestInterleavedDirectionsMatch(t *testing.T) {
+	t.Run("keyword split around early response", func(t *testing.T) {
+		out, _ := replay(t, engine.Config{Matcher: matcher(t, "TOKEN-42")}, func(w *pcapgen.Writer) {
+			c := pcapgen.NewConn(w, cli1, srv)
+			c.Handshake(ms(-1))
+			c.ClientSend(ms(0), []byte("POST /a HTTP/1.1\r\nContent-Length: 8\r\n\r\nTOK"))
+			c.ServerSend(ms(1), []byte("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"))
+			c.ClientSend(ms(2), []byte("EN-42"))
+		})
+		check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 0.0ms\n"+
+			"POST /a HTTP/1.1\r\nContent-Length: 8\r\n\r\nTOKEN-42\n"+
+			"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n")
+	})
+	t.Run("keyword split in binary response body", func(t *testing.T) {
+		// 响应的二进制 body 里关键词被请求的字节隔开：占位行要带 matched。
+		out, _ := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+			c := pcapgen.NewConn(w, cli1, srv)
+			c.Handshake(ms(-1))
+			c.ClientSend(ms(0), []byte("POST /a HTTP/1.1\r\nContent-Length: 4\r\n\r\nab"))
+			c.ServerSend(ms(1), []byte("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 6\r\n\r\n\x00TOK"))
+			c.ClientSend(ms(2), []byte("cd"))
+			c.ServerSend(ms(3), []byte("EN"))
+		})
+		check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\n"+
+			"POST /a HTTP/1.1\r\nContent-Length: 4\r\n\r\nabcd\n"+
+			"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 6\r\n\r\n"+
+			"[binary body omitted: 6 B, matched]\n")
+	})
+}
