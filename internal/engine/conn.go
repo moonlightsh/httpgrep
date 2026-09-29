@@ -141,7 +141,9 @@ func (c *conn) close(why string, ts time.Time) {
 	c.closeQueue(why, true)
 }
 
-// closeQueue 以无响应结束队列里的交互。all 为假时只结束请求已经发完的。
+// closeQueue 结束队列里的交互：没收到最终响应的标为无响应，原因是 why。
+// all 为假时只结束请求已经发完的。all 为真时调用方已经关闭了请求解析器，
+// 没发完的请求都已经以 End(false) 结束并标为不完整。
 func (c *conn) closeQueue(why string, all bool) {
 	for i := 0; i < len(c.queue); {
 		x := c.queue[i]
@@ -149,7 +151,9 @@ func (c *conn) closeQueue(why string, all bool) {
 			i++
 			continue
 		}
-		x.noResp = why
+		if !x.hasRes {
+			x.noResp = why
+		}
 		c.finish(x)
 	}
 }
@@ -233,23 +237,38 @@ func (s *reqSink) End(complete bool, ts time.Time) {
 		x.incomplete = true
 	}
 	x.lineBreak()
-	if s.c.srvClosed {
+	switch {
+	case x.resDone:
+		// 服务端在请求发完之前就回了最终响应，现在请求也发完了。
+		s.c.finish(x)
+	case s.c.srvClosed:
 		// 服务端已经关闭，这个请求不会再有响应。
-		x.noResp = noRespClosed
+		if !x.hasRes {
+			x.noResp = noRespClosed
+		}
 		s.c.finish(x)
 	}
 }
 
 func (s *reqSink) Desync(off int64) {}
 
-// Begin 实现 http1.Sink：响应按顺序归入队首的交互。
+// Begin 实现 http1.Sink：响应按顺序归入第一个还没收完最终响应的交互。
+// 通常就是队首；队首的请求还没发完、响应却已收完时，它还留在队列里。
 func (s *resSink) Begin(b http1.Begin) {
-	c := s.c
-	if b.Orphan || len(c.queue) == 0 {
-		s.cur = nil
+	s.cur = nil
+	if b.Orphan {
 		return
 	}
-	x := c.queue[0]
+	var x *exchange
+	for _, q := range s.c.queue {
+		if !q.resDone {
+			x = q
+			break
+		}
+	}
+	if x == nil {
+		return
+	}
 	x.hasRes = true
 	x.resMsg = x.addMessage()
 	s.cur = x
@@ -309,6 +328,11 @@ func (s *resSink) End(complete bool, ts time.Time) {
 	if complete && x.msgs[x.resMsg].interim {
 		// 等最终响应；只有 1xx 的交互不算有响应，不输出耗时。
 		x.hasRes = false
+		return
+	}
+	x.resDone = true
+	if !x.reqDone {
+		// 请求还没发完：等它发完再结束，免得丢掉请求剩下的字节。
 		return
 	}
 	s.c.finish(x)

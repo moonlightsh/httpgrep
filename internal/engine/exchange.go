@@ -52,6 +52,7 @@ type exchange struct {
 	hasReq     bool
 	hasRes     bool // 收到过最终响应（或没收完、还不知道是不是 1xx 的响应）
 	reqDone    bool // 请求已结束
+	resDone    bool // 最终响应已结束
 	incomplete bool
 	noResp     string // 无响应的原因
 	method     uint8

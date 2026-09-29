@@ -137,7 +137,8 @@ func (e *Engine) emit(c *conn, x *exchange, st output.Status) {
 	b.HasDuration = x.hasReq && x.hasRes
 	b.Duration = 0
 	if b.HasDuration {
-		b.Duration = x.resLast.Sub(x.reqLast)
+		// 服务端在请求发完之前就回完了响应时，耗时记 0，不输出负数。
+		b.Duration = max(x.resLast.Sub(x.reqLast), 0)
 	}
 	// 片段按到达顺序缓存，两个方向可能交错：按消息分组后再切给各条消息。
 	e.pieces, e.starts = e.pieces[:0], e.starts[:0]

@@ -303,6 +303,36 @@ func TestConnectionClosed(t *testing.T) {
 			closed: 2, incomplete: 0,
 		},
 		{
+			// 请求 body 发到一半时服务端 FIN：等请求发完再以 no-response(closed) 结束。
+			name: "server FIN in the middle of a request",
+			build: func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				c.ClientSend(ms(0), []byte("POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabcde"))
+				c.ServerFin(ms(2))
+				c.ClientSend(ms(3), []byte("fghij"))
+				c.ClientFin(ms(4))
+			},
+			want: "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(closed)\n" +
+				"POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabcdefghij\n",
+			closed: 1, incomplete: 0,
+		},
+		{
+			// 服务端提前回完响应，请求没发完连接就断了：incomplete。
+			name: "RST after early response, request unfinished",
+			build: func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				c.ClientSend(ms(0), []byte("POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabcde"))
+				c.ServerSend(ms(2), []byte("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"))
+				c.ClientRst(ms(3))
+			},
+			want: "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 2.0ms\n" +
+				"POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabcde\n" +
+				"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n",
+			closed: 0, incomplete: 1,
+		},
+		{
 			name: "RST before response",
 			build: func(w *pcapgen.Writer) {
 				c := pcapgen.NewConn(w, cli1, srv)
@@ -573,5 +603,29 @@ func TestContentEncodingWithoutBody(t *testing.T) {
 			})
 			check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\n"+tc.req+tc.res)
 		})
+	}
+}
+
+// 请求 body 还没发完，服务端就回了最终响应（上传时提前回 413、401 很常见）：
+// 等请求发完再结束交互，输出完整的请求。响应在请求发完之前就收完，耗时记 0。
+func TestResponseBeforeRequestEnds(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabcde"))
+		c.ServerSend(ms(2), []byte("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"))
+		c.ClientSend(ms(5), []byte("fghij"))
+		c.ClientSend(ms(6), []byte("GET /next HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(7), []byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nTOKEN"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 0.0ms\n"+
+		"POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabcdefghij\n"+
+		"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.351 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\n"+
+		"GET /next HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nTOKEN\n")
+	if st.Complete != 2 {
+		t.Fatalf("stats: %+v", st)
 	}
 }
