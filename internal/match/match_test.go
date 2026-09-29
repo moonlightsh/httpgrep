@@ -628,6 +628,38 @@ func TestSlowPathNoUnboundedBuffer(t *testing.T) {
 	}
 }
 
+// 行缓存到上限后，超出的字节不应先拷进缓存再截断：
+// 既不能为它们扩容，也不能为超过上限的单块整块分配。
+func TestLineBufferNoCopyPastCap(t *testing.T) {
+	const miB = 1 << 20
+	allocated := func(f func()) int64 {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		f()
+		runtime.ReadMemStats(&after)
+		return int64(after.TotalAlloc) - int64(before.TotalAlloc)
+	}
+	m, _ := match.Compile([]string{"never-here"}, true)
+
+	// 缓存为空时写入 16 MiB 的未完成行：只应分配约 8 MiB 的缓存。
+	big := make([]byte, 16*miB)
+	s := m.NewScanner()
+	if grew := allocated(func() { s.Write(big) }); grew > 10*miB {
+		t.Fatalf("holdLine allocated %d bytes for a 16 MiB chunk, want about 8 MiB", grew)
+	}
+
+	// 缓存已满后，再来以 \n 结束的 4 MiB 块：不应再分配。
+	tail := make([]byte, 4*miB+1)
+	tail[len(tail)-1] = '\n'
+	if grew := allocated(func() { s.Write(tail) }); grew > miB {
+		t.Fatalf("full buffer grew by %d bytes on a line-ending chunk, want none", grew)
+	}
+	if s.Matched() {
+		t.Fatal("unexpected match")
+	}
+}
+
 // 关键词含 \n 时 Compile 报错（契约要求调用方已按换行拆好）。
 func TestCompileRejectsNewlinePattern(t *testing.T) {
 	for _, regex := range []bool{false, true} {

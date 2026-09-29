@@ -166,7 +166,7 @@ func (s *Scanner) Write(b []byte) {
 	for len(b) > 0 {
 		i := bytes.IndexByte(b, '\n')
 		if i < 0 {
-			s.holdLine(b)
+			s.appendCapped(b)
 			return
 		}
 		if len(s.buf) == 0 {
@@ -177,10 +177,7 @@ func (s *Scanner) Write(b []byte) {
 			}
 			s.processLine(line)
 		} else {
-			s.buf = append(s.buf, b[:i]...)
-			if len(s.buf) > lineBufCap {
-				s.buf = s.buf[:lineBufCap]
-			}
+			s.appendCapped(b[:i])
 			s.processLine(s.buf)
 			s.buf = s.buf[:0]
 		}
@@ -188,15 +185,13 @@ func (s *Scanner) Write(b []byte) {
 	}
 }
 
-// holdLine 缓存没写完的行，上限 lineBufCap，超出后新到的字节不参与匹配。
-func (s *Scanner) holdLine(b []byte) {
-	if len(s.buf) >= lineBufCap {
-		return // 已到上限，超出的部分不参与匹配
+// appendCapped 把 b 追加到没写完的行的缓存，上限 lineBufCap：
+// 只追加上限内的部分，超出的字节不参与匹配，既不拷贝也不为它们扩容。
+func (s *Scanner) appendCapped(b []byte) {
+	if room := lineBufCap - len(s.buf); len(b) > room {
+		b = b[:room]
 	}
 	s.buf = append(s.buf, b...)
-	if len(s.buf) > lineBufCap {
-		s.buf = s.buf[:lineBufCap]
-	}
 }
 
 // fastScan 快速路径：对整块数据直接扫描，不按行切分。
