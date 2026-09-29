@@ -40,10 +40,9 @@ func (c *fuzzConn) check(side tcp.Side, off, n int64, what string) {
 
 func (c *fuzzConn) Data(side tcp.Side, off int64, b []byte, peerAck int64, ts time.Time) {
 	c.check(side, off, int64(len(b)), "Data")
-	// 注意：文档说不知道时为 -1，但序号落后 2³¹ 左右的 FIN 会让 finOff 为负，
-	// peerAckOf 里 limit 之后得到小于 -1 的值（引擎按 >= 0 判断，当作不知道）。
-	// 这里不把它当成失败，见评审报告。
-	_ = peerAck
+	if peerAck < -1 {
+		c.t.Fatalf("Data side %d off=%d: peerAck %d < -1", side, off, peerAck)
+	}
 	// 生成的负载字节等于所在序号的低 8 位，所以字节与偏移之差在一个方向上恒定。
 	for i, x := range b {
 		d := x - byte(off+int64(i))

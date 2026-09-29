@@ -90,7 +90,7 @@ func TestMaxMessageGapAfterTruncation(t *testing.T) {
 	}
 }
 
-// 内存计量：缓存的消息字节、乱序缓存、每条连接 1 KiB、每个在途交互 512 字节。
+// 内存计量：缓存的消息字节、乱序缓存（每段另计 128 字节）、每条连接 1 KiB、每个在途交互 512 字节。
 // 响应是 150 字节（40 字节头部加 110 字节 body），后 50 字节先到、进乱序缓存，
 // 前 100 字节补上后整个响应交付，交互结束。之后再开一条连接。
 func TestMemoryAccounting(t *testing.T) {
@@ -109,10 +109,10 @@ func TestMemoryAccounting(t *testing.T) {
 	}, func(e *engine.Engine, _ time.Time) { got = append(got, e.Memory()) })
 	want := []int64{
 		1024, 1024, 1024, // 握手：一条连接
-		1024 + 512 + 18,      // 请求 18 字节在途
-		1024 + 512 + 18 + 50, // 乱序缓存 50 字节
-		1024,                 // 响应收完，交互结束
-		2048, 2048, 2048,     // 第二条连接
+		1024 + 512 + 18,            // 请求 18 字节在途
+		1024 + 512 + 18 + 50 + 128, // 乱序缓存 50 字节，外加每段 128 字节
+		1024,                       // 响应收完，交互结束
+		2048, 2048, 2048,           // 第二条连接
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("Memory after each packet = %v, want %v", got, want)

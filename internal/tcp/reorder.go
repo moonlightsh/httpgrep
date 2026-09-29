@@ -1,6 +1,9 @@
 package tcp
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // chunk 是乱序缓存里的一段 [off, off+n)。data 为 nil 时这段是因截断而没抓到的字节，
 // 交付时认定为缺口。缓存按偏移排序，互不重叠。
@@ -15,14 +18,29 @@ type chunk struct {
 
 func (k *chunk) end() int64 { return k.off + k.n }
 
+// chunkOverhead 是每段乱序缓存在负载之外计入的固定开销：chunk 本身（64 位下 72 字节）、
+// 切片扩容留的余量和负载拷贝的分配取整。只记缺口、没有负载的段同样计入。
+const chunkOverhead = 128
+
+// cost 是 k 计入乱序缓存计量的字节数。
+func (k *chunk) cost() int64 { return int64(len(k.data)) + chunkOverhead }
+
+// arrival 是按到达先后排队的一段 [off, end)，用来找最早到达、还没交付的缓存段，
+// 不用每次扫描全部缓存。段交付后对应的记录过时（end <= next），在队首时顺带丢掉。
+type arrival struct {
+	off, end int64
+	ts       time.Time
+}
+
 // buffer 把 [off, off+len(b)+missing) 中缓存里还没有的部分放进乱序缓存：
 // 负载部分拷贝，截断的 missing 部分记为缺口段。重叠部分以先到的为准。
 func (a *Assembler) buffer(d *dir, off int64, b []byte, missing int64, ack uint32, hasAck bool, ts time.Time) {
 	dataEnd := off + int64(len(b))
 	cur, end := off, dataEnd+missing
-	i := 0
-	for i < len(d.buf) && d.buf[i].end() <= cur {
-		i++
+	// 第一个结束在 cur 之后的段。常见情况是追加到末尾，不用查找。
+	i := len(d.buf)
+	if i > 0 && d.buf[i-1].end() > cur {
+		i = sort.Search(len(d.buf), func(j int) bool { return d.buf[j].end() > cur })
 	}
 	for cur < end {
 		if i < len(d.buf) && d.buf[i].off <= cur {
@@ -41,8 +59,14 @@ func (a *Assembler) buffer(d *dir, off int64, b []byte, missing int64, ack uint3
 			cur = ds
 		}
 		if cur < stop {
-			a.insert(d, i, chunk{off: cur, n: stop - cur, ack: ack, hasAck: hasAck, ts: ts})
-			i++
+			if i > 0 && d.buf[i-1].data == nil && d.buf[i-1].end() == cur {
+				// 和前面相接的缺口段合并，只计一次固定开销；合并后的段保留较早的到达时间，
+				// 到达记录也只留原来那一条。
+				d.buf[i-1].n += stop - cur
+			} else {
+				a.insert(d, i, chunk{off: cur, n: stop - cur, ack: ack, hasAck: hasAck, ts: ts})
+				i++
+			}
 			cur = stop
 		}
 	}
@@ -50,11 +74,57 @@ func (a *Assembler) buffer(d *dir, off int64, b []byte, missing int64, ack uint3
 
 // insert 把 k 插到缓存的第 i 个位置。
 func (a *Assembler) insert(d *dir, i int, k chunk) {
-	d.buf = append(d.buf, chunk{})
-	copy(d.buf[i+1:], d.buf[i:])
-	d.buf[i] = k
-	d.bufLen += int64(len(k.data))
-	a.buffered += int64(len(k.data))
+	if i == len(d.buf) {
+		d.buf = append(d.buf, k)
+	} else {
+		d.buf = append(d.buf, chunk{})
+		copy(d.buf[i+1:], d.buf[i:])
+		d.buf[i] = k
+	}
+	d.bufLen += k.cost()
+	a.buffered += k.cost()
+	d.arrive(k.off, k.end(), k.ts)
+}
+
+// arrive 记下 [off, end) 在 ts 到达。每个缓存段正好一条没过时的记录；过时的记录
+// 超过缓存段数的两倍时整体清理一次，队列长度和缓存段数成正比，摊还 O(1)。
+func (d *dir) arrive(off, end int64, ts time.Time) {
+	if len(d.arr)-d.arrHead > 2*len(d.buf)+32 {
+		live := d.arr[:0]
+		for _, r := range d.arr[d.arrHead:] {
+			if r.end > d.next {
+				live = append(live, r)
+			}
+		}
+		clear(d.arr[len(live):])
+		d.arr, d.arrHead = live, 0
+	}
+	d.arr = append(d.arr, arrival{off: off, end: end, ts: ts})
+}
+
+// oldest 返回最早到达、还没交付的缓存段的记录，缓存为空时返回 false。
+func (d *dir) oldest() (arrival, bool) {
+	if len(d.buf) == 0 {
+		d.arr, d.arrHead = d.arr[:0], 0
+		return arrival{}, false
+	}
+	for d.arrHead < len(d.arr) && d.arr[d.arrHead].end <= d.next {
+		d.arrHead++
+	}
+	if d.arrHead > len(d.arr)/2 {
+		// 过时的记录占了一半以上时压缩，队列长度不超过缓存段数的两倍左右。
+		n := copy(d.arr, d.arr[d.arrHead:])
+		d.arr, d.arrHead = d.arr[:n], 0
+	}
+	if d.arrHead == len(d.arr) {
+		return arrival{}, false
+	}
+	return d.arr[d.arrHead], true
+}
+
+// clearBuf 丢弃这个方向的乱序缓存。
+func (d *dir) clearBuf() {
+	d.buf, d.bufLen, d.arr, d.arrHead = nil, 0, nil, 0
 }
 
 // limitReorder 在 side 方向乱序缓存超过 MaxReorderBytes 时，
@@ -73,8 +143,8 @@ func (a *Assembler) drain(c *conn, s Side, ts time.Time) {
 		k := d.buf[0]
 		d.buf[0] = chunk{}
 		d.buf = d.buf[1:]
-		d.bufLen -= int64(len(k.data))
-		a.buffered -= int64(len(k.data))
+		d.bufLen -= k.cost()
+		a.buffered -= k.cost()
 		if k.end() <= d.next {
 			continue
 		}
@@ -93,7 +163,10 @@ func peerAckOf(peer *dir, ack uint32, hasAck bool) int64 {
 		return -1
 	}
 	if off := peer.offset(ack); off >= 0 {
-		return peer.limit(off) // 确认 FIN 的那个序号不算流里的字节
+		// 确认 FIN 的那个序号不算流里的字节。FIN 的偏移不小于 0（见 segment），这里只是兜底。
+		if off = peer.limit(off); off >= 0 {
+			return off
+		}
 	}
 	return -1
 }
@@ -119,17 +192,15 @@ func (a *Assembler) skipTo(c *conn, s Side, limit int64, ts time.Time) {
 // 仍没补上时，把它之前的空洞认定为缺口。
 func (a *Assembler) expireReorder(c *conn, s Side, now time.Time) {
 	d := &c.d[s]
-	for len(d.buf) > 0 {
-		oldest := 0
-		for i := range d.buf {
-			if d.buf[i].ts.Before(d.buf[oldest].ts) {
-				oldest = i
-			}
+	for {
+		k, ok := d.oldest()
+		if !ok {
+			break
 		}
-		if now.Sub(d.buf[oldest].ts) < a.cfg.ReorderTimeout {
+		if now.Sub(k.ts) < a.cfg.ReorderTimeout {
 			return
 		}
-		a.skipTo(c, s, d.buf[oldest].off, now)
+		a.skipTo(c, s, k.off, now)
 	}
 	// FIN 之前的空洞也按 FIN 到达的时间计时。
 	if d.finSeen && d.next < d.finOff && now.Sub(d.finTs) >= a.cfg.ReorderTimeout {

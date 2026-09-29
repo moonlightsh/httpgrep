@@ -8,7 +8,7 @@ import (
 	"httpgrep/internal/tcp"
 )
 
-// 第 20 条：BufferedBytes 等于乱序缓存里的字节数，交付后减少。
+// 第 20 条：BufferedBytes 等于乱序缓存里的字节数加每段 128 字节，交付后减少。
 func TestBufferedBytes(t *testing.T) {
 	h := newHarness(t, defaultConfig())
 	h.handshake(at(0))
@@ -20,17 +20,17 @@ func TestBufferedBytes(t *testing.T) {
 	}
 	check(0)
 	h.add(c2s(1005, 5001, pshAck, "efgh"), at(1))
-	check(4)
+	check(4 + 128)
 	h.add(c2s(1011, 5001, pshAck, "kl"), at(1))
-	check(6)
+	check(6 + 2*128)
 	h.add(c2s(1007, 5001, pshAck, "ghij"), at(1)) // 只有 "ij" 是新的
-	check(8)
+	check(8 + 3*128)
 	h.add(s2c(5003, 1001, pshAck, "CDE"), at(1)) // 另一方向
-	check(11)
+	check(11 + 4*128)
 	h.add(c2s(1001, 5001, pshAck, "abcd"), at(2)) // 交付 efghijkl
-	check(3)
+	check(3 + 128)
 	h.add(c2s(1011, 5001, pshAck, "kl"), at(2)) // 重传不进缓存
-	check(3)
+	check(3 + 128)
 	h.a.Release(tcp.Key{A: cli, B: srv}, at(3)) // 释放时丢弃缓存
 	check(0)
 }
