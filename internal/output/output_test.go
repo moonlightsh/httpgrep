@@ -326,6 +326,17 @@ func TestBinaryBodyOmitted(t *testing.T) {
 			want: "[binary body omitted: 100 B]\njunk\r\n[gap: 9 bytes missing]\ntail\n",
 		},
 		{
+			// 带 Content-Encoding 即二进制：没有任何 body 类 Piece（比如空 body）也写占位行
+			name: "没有 body 类 Piece 仍写占位",
+			msg: output.Message{
+				Binary: true, ContentEncoding: "gzip", BodySize: 0,
+				Pieces: []output.Piece{
+					{Kind: output.PieceHead, Data: []byte("HTTP/1.1 204 No Content\r\nContent-Encoding: gzip\r\n\r\n")},
+				},
+			},
+			want: "HTTP/1.1 204 No Content\r\nContent-Encoding: gzip\r\n\r\n[binary body omitted: gzip, 0 B]\n",
+		},
+		{
 			name: "非二进制不动",
 			msg: output.Message{
 				Binary: false, ContentType: "text/plain", BodySize: 100, BodyMatched: true,

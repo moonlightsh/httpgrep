@@ -326,7 +326,8 @@ func (w *Writer) writeLocationLine(b *Block) {
 }
 
 // writeBinaryMessage 写二进制 body 的消息：从第一个 body 类 Piece 起的连续一段
-// 换成一行占位，其余 Piece 原样输出。
+// 换成一行占位，其余 Piece 原样输出。没有任何 body 类 Piece 时（比如带
+// Content-Encoding 的空 body）占位行仍然写在所有 Piece 之后。
 func (w *Writer) writeBinaryMessage(m *Message) {
 	i := 0
 	for ; i < len(m.Pieces); i++ {
