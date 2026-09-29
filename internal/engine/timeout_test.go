@@ -303,3 +303,27 @@ func TestTimeoutNoRequest(t *testing.T) {
 		})
 	}
 }
+
+// 请求发到一半时超时：incomplete,no-response(timeout)。请求剩下的字节超时之后才到，
+// 由占位收下，不缓存、不输出；它的响应迟到，计入 Late；之后的请求排在占位后面，和自己的响应配对。
+// 缓存峰值是第二个交互的 25 + 27 = 52 字节：剩下的 "fghij" 不计入（计入的话是 57）。
+func TestTimeoutPartialRequest(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabcde"))
+		c.ClientSend(ms(35000), []byte("fghij"))
+		c.ClientSend(ms(36000), []byte("GET /TOKEN-2 HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(37000), []byte("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"))
+		c.ServerSend(ms(37100), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 incomplete,no-response(timeout)\n"+
+		"POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabcde\n"+
+		"--\n"+
+		"2026-09-28 15:30:48.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 1100.0ms\n"+
+		"GET /TOKEN-2 HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 204 No Content\r\n\r\n")
+	if st.Late != 1 || st.Incomplete != 1 || st.NoResponseTimeout != 1 || st.Complete != 1 || st.PeakBuffered != 52 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
