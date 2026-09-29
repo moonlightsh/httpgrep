@@ -47,9 +47,11 @@ func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 		return
 	}
 	off := d.offset(seg.Seq)
-	if off == d.next {
-		c.h.Data(s, off, seg.Payload, peerAck, ts)
-		d.next += int64(len(seg.Payload))
+	end := off + int64(len(seg.Payload))
+	if off <= d.next && end > d.next {
+		// 重叠的前缀已经交付过，只交付新的部分。
+		c.h.Data(s, d.next, seg.Payload[d.next-off:], peerAck, ts)
+		d.next = end
 	}
 }
 
