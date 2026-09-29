@@ -28,7 +28,7 @@ type Engine struct {
 	stats Stats
 
 	free     []*exchange // 回收的交互，连同缓存和扫描器一起复用，见 recycle
-	freeBuf  int64       // free 里的交互留着的缓存容量之和
+	freeBuf  int64       // free 里的交互留着的内存估计之和，见 recycle
 	timers   timers      // 正在计时的在途交互，按到期时间排序
 	inFlight int
 	buffered int64 // 在途交互缓存的消息字节数
@@ -132,15 +132,11 @@ func (e *Engine) newExchange(c *conn) *exchange {
 		x = e.free[n-1]
 		e.free[n-1] = nil
 		e.free = e.free[:n-1]
-		e.freeBuf -= int64(cap(x.buf))
+		e.freeBuf -= x.keep
 	} else {
 		x = &exchange{}
-		for i := range x.dirs {
-			x.dirs[i].sc = e.cfg.Matcher.NewScanner()
-			x.dirs[i].alt = e.cfg.Matcher.NewScanner()
-		}
 	}
-	x.reset()
+	x.reset(e.cfg.Matcher)
 	x.c = c
 	e.stats.Exchanges++
 	e.inFlight++

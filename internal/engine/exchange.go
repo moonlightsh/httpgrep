@@ -2,6 +2,7 @@ package engine
 
 import (
 	"time"
+	"unsafe"
 
 	"httpgrep/internal/http1"
 	"httpgrep/internal/match"
@@ -66,6 +67,10 @@ type scanDir struct {
 
 	fedMsg int // 上一次喂入的消息下标，-1 表示还没喂过
 	fedSec uint8
+	// fed 是 Reset 以来写给 sc 和 alt 的字节数。正则模式（以及含 \r 的字面关键词）下
+	// 扫描器缓存没写完的行，Reset 不释放容量，两个扫描器的行缓存容量之和不超过 fed。
+	// 回收交互时按它估计扫描器留着的内存，见 Engine.recycle。
+	fed int64
 }
 
 // exchange 是一个交互：一个请求和它的响应（含 1xx）。
@@ -116,6 +121,8 @@ type exchange struct {
 	buf    []byte
 	pieces []piece
 	msgs   []message
+
+	keep int64 // 在回收列表里时计入 Engine.freeBuf 的字节数，见 Engine.recycle
 }
 
 // maxKeepBuf 是交互复用时保留的缓存容量上限，超过就释放。
@@ -138,10 +145,46 @@ func (x *exchange) touch(ts time.Time) {
 }
 
 // bury 把已经结束的交互变成占位：丢掉缓存（已经不计入缓存计量），只留配对要用的状态。
-// 缓存交给 GC：占位可能要等很久（等迟到的响应或连接关闭），不能一直留着不计量的内存。
+// 缓存、片段和扫描器都交给 GC：占位可能要等很久（等迟到的响应或连接关闭），
+// 不能一直留着不计量的内存；正则模式下扫描器的行缓存可能和缓存的 body 一样大。
+// 占位不再喂入、也不再判断是否命中，复用时由 reset 重新创建扫描器。
 func (x *exchange) bury() {
 	x.ghost = true
-	x.buf, x.pieces, x.msgs = nil, x.pieces[:0], x.msgs[:0]
+	x.buf, x.pieces, x.msgs = nil, nil, nil
+	for i := range x.dirs {
+		x.dirs[i].dropScanners()
+	}
+}
+
+// dropScanners 丢弃这个方向的扫描器，交给 GC。
+func (d *scanDir) dropScanners() {
+	d.sc, d.alt, d.fed = nil, nil, 0
+}
+
+// retained 估计交互复用时留着的内存：缓存、片段和消息的容量，加上扫描器的行缓存（按 fed 估计）。
+func (x *exchange) retained() int64 {
+	n := int64(cap(x.buf)) + int64(cap(x.pieces))*int64(unsafe.Sizeof(piece{})) +
+		int64(cap(x.msgs))*int64(unsafe.Sizeof(message{}))
+	for i := range x.dirs {
+		n += x.dirs[i].fed
+	}
+	return n
+}
+
+// shed 丢掉复用时不值得留着的部分：容量超过 maxKeepBuf 的缓存，喂入超过 maxKeepBuf 的
+// 方向的扫描器。all 为真时缓存、片段和扫描器全部丢掉，只留交互对象。
+func (x *exchange) shed(all bool) {
+	if all || cap(x.buf) > maxKeepBuf {
+		x.buf = nil
+	}
+	if all {
+		x.pieces, x.msgs = nil, nil
+	}
+	for i := range x.dirs {
+		if d := &x.dirs[i]; all || d.fed > maxKeepBuf {
+			d.dropScanners()
+		}
+	}
 }
 
 // status 返回交互结束时的状态。
@@ -149,22 +192,23 @@ func (x *exchange) status() output.Status {
 	return output.Status{NoRequest: x.noReq, Incomplete: x.incomplete, NoResponse: x.noResp}
 }
 
-// reset 清空交互以便复用。
-func (x *exchange) reset() {
+// reset 清空交互以便复用。被丢掉的扫描器用 m 重新创建。
+func (x *exchange) reset(m *match.Matcher) {
 	*x = exchange{
 		dirs:   x.dirs,
 		buf:    x.buf[:0],
 		pieces: x.pieces[:0],
 		msgs:   x.msgs[:0],
 	}
-	if cap(x.buf) > maxKeepBuf {
-		x.buf = nil
-	}
 	for i := range x.dirs {
 		d := &x.dirs[i]
-		d.sc.Reset()
-		d.alt.Reset()
-		d.fedMsg, d.fedSec = -1, feedNone
+		if d.sc == nil {
+			d.sc, d.alt = m.NewScanner(), m.NewScanner()
+		} else {
+			d.sc.Reset()
+			d.alt.Reset()
+		}
+		d.fedMsg, d.fedSec, d.fed = -1, feedNone, 0
 	}
 }
 
@@ -305,17 +349,20 @@ func (x *exchange) feed(mi int, sec uint8, b []byte) {
 	if sec != feedBody {
 		if !x.matched() {
 			d.sc.Write(b)
+			d.fed += int64(len(b))
 		}
 		return
 	}
 	if m.bodyAlt {
 		if !m.bodyMatched {
 			d.alt.Write(b)
+			d.fed += int64(len(b))
 			m.bodyMatched = d.alt.Matched()
 		}
 		return
 	}
 	d.sc.Write(b)
+	d.fed += int64(len(b))
 	m.bodyMatched = d.sc.Matched()
 }
 

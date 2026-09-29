@@ -18,10 +18,11 @@ func (e *Engine) Memory() int64 {
 		int64(e.asm.Len())*connOverhead + int64(e.inFlight)*exchangeOverhead
 }
 
-// 回收的交互不计入内存计量，所以限量：最多留 maxFree 个；它们留着的缓存容量之和
-// 不超过 MaxMemory 的 1/freeBufShare（MaxMemory 不大于 0 表示不限，缓存容量也不限），
-// 放不下的交互只留对象和扫描器，缓存交给 GC。
-// 峰值过后，多出来的交互和缓存不会一直留着。
+// 回收的交互不计入内存计量，所以限量：最多留 maxFree 个；它们留着的内存
+// （缓存、片段的容量和扫描器的行缓存，见 exchange.retained）之和不超过 MaxMemory 的
+// 1/freeBufShare（MaxMemory 不大于 0 表示不限）。单个交互超过 maxKeepBuf 的缓存或
+// 扫描器不留；放不进份额的交互只留对象，其余交给 GC。
+// 峰值过后，多出来的交互、缓存和扫描器不会一直留着。
 const (
 	maxFree      = 256
 	freeBufShare = 16
@@ -32,13 +33,14 @@ func (e *Engine) recycle(x *exchange) {
 	if len(e.free) >= maxFree {
 		return
 	}
-	if n := int64(cap(x.buf)); n > 0 {
-		if e.cfg.MaxMemory > 0 && e.freeBuf+n > e.cfg.MaxMemory/freeBufShare {
-			x.buf = nil
-		} else {
-			e.freeBuf += n
-		}
+	x.shed(false)
+	n := x.retained()
+	if e.cfg.MaxMemory > 0 && e.freeBuf+n > e.cfg.MaxMemory/freeBufShare {
+		x.shed(true)
+		n = 0
 	}
+	x.keep = n
+	e.freeBuf += n
 	e.free = append(e.free, x)
 }
 

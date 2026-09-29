@@ -4,11 +4,13 @@ import (
 	"net/netip"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"httpgrep/internal/engine"
+	"httpgrep/internal/match"
 	"httpgrep/internal/output"
 	"httpgrep/internal/pcapgen"
 )
@@ -357,9 +359,30 @@ func TestMemoryLimitUnderLoad(t *testing.T) {
 
 // 回收的交互留着缓存和扫描器以便复用，但不计入内存计量，所以要有上限：
 // 1000 个交互同时在途、各缓存 30 KB，全部结束之后，引擎留着的内存不超过 6 MB
-// （上限 64 MB 时回收缓存的总量不超过它的 1/16，即 4 MB，另加不超过 256 个交互对象和扫描器）。
-// 不设上限时会留着全部 30 MB。
+// （上限 64 MB 时回收的缓存和扫描器行缓存的总量不超过它的 1/16，即 4 MB，
+// 另加不超过 256 个交互对象）。不设上限时会留着全部 30 MB。
+// 正则模式下扫描器要缓存没写完的行，body 里没有换行时，每个响应方向的扫描器都缓存了
+// 约 30 KB，这部分同样要算进上限：不算的话 256 个回收的交互要多留约 7.5 MB。
 func TestFreeListBounded(t *testing.T) {
+	for _, regex := range []bool{false, true} {
+		t.Run("regex="+strconv.FormatBool(regex), func(t *testing.T) { freeListBounded(t, regexMatcher(t, regex)) })
+	}
+}
+
+// regexMatcher 返回关键词 NEEDLE 的匹配器：regex 为真时按 -E 编译成 NEE+DLE，扫描器走缓存行的路径。
+func regexMatcher(t *testing.T, regex bool) *match.Matcher {
+	t.Helper()
+	if !regex {
+		return matcher(t, "NEEDLE")
+	}
+	m, err := match.Compile([]string{"NEE+DLE"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func freeListBounded(t *testing.T, m *match.Matcher) {
 	const n = 1000
 	body := strings.Repeat("z", 30000)
 	pkts, _ := decodeAll(t, func(w *pcapgen.Writer) {
@@ -375,7 +398,7 @@ func TestFreeListBounded(t *testing.T) {
 		}
 	})
 	e := engine.New(engine.Config{
-		Matcher: matcher(t, "NEEDLE"), Timeout: 30 * time.Second,
+		Matcher: m, Timeout: 30 * time.Second,
 		MaxMemory: 64 << 20, MaxMessage: 8 << 20,
 		Emit: func(*output.Block) {},
 	})
@@ -406,7 +429,14 @@ func TestFreeListBounded(t *testing.T) {
 // 超时或被丢弃的交互留在队列里当占位，它的缓存已经不计入内存计量，也要真的释放：
 // 1000 个交互各缓存了约 30 KB 的响应后超时，连接都还在，占位等着迟到的响应。
 // 此时引擎留着的内存不超过 10 MB；占位留着缓存的话要多 30 MB。
+// 正则模式下占位的扫描器还缓存着没写完的行（每个约 29 KB），也要释放。
 func TestPlaceholderReleasesBuffer(t *testing.T) {
+	for _, regex := range []bool{false, true} {
+		t.Run("regex="+strconv.FormatBool(regex), func(t *testing.T) { placeholderReleasesBuffer(t, regexMatcher(t, regex)) })
+	}
+}
+
+func placeholderReleasesBuffer(t *testing.T, m *match.Matcher) {
 	const n = 1000
 	body := strings.Repeat("z", 29000)
 	pkts, _ := decodeAll(t, func(w *pcapgen.Writer) {
@@ -418,7 +448,7 @@ func TestPlaceholderReleasesBuffer(t *testing.T) {
 		}
 	})
 	e := engine.New(engine.Config{
-		Matcher: matcher(t, "NEEDLE"), Timeout: 30 * time.Second,
+		Matcher: m, Timeout: 30 * time.Second,
 		MaxMemory: 64 << 20, MaxMessage: 8 << 20,
 		Emit: func(*output.Block) {},
 	})
@@ -461,5 +491,52 @@ func TestEvictedConnectionDropsHeld(t *testing.T) {
 	check(t, out, "")
 	if st.Exchanges != 1 || st.Evicted != 1 || st.NoResponseClosed != 0 || st.NoResponseEOF != 0 {
 		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 单个交互喂入超过 64 KiB 的方向，回收时不留扫描器（和超过 64 KiB 的缓存一样），
+// 即使份额还放得下：上限 1 GiB（份额 64 MB），20 个交互各有 1 MiB 没有换行的响应 body，
+// 正则模式下每个响应方向的扫描器都缓存了 1 MiB。全部结束后引擎留着的内存不超过 4 MB；
+// 留着扫描器的话要多 20 MB。
+func TestFreeListDropsLargeScanners(t *testing.T) {
+	body := strings.Repeat("z", 1<<20)
+	pkts, _ := decodeAll(t, func(w *pcapgen.Writer) {
+		// 20 个交互同时在途：先给每条连接发响应的前一半，再逐个发完。
+		conns := make([]*pcapgen.Conn, 20)
+		for i := range conns {
+			conns[i] = pcapgen.NewConn(w, netip.AddrPortFrom(netip.MustParseAddr("10.2.0.1"), uint16(10000+i)), srv)
+			conns[i].Handshake(ms(0))
+			conns[i].ClientSend(ms(1), []byte("GET / HTTP/1.1\r\n\r\n"))
+			conns[i].ServerSend(ms(2), []byte("HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n"+body[:1<<19]))
+		}
+		for _, c := range conns {
+			c.ServerSend(ms(3), []byte(body[1<<19:]))
+		}
+	})
+	e := engine.New(engine.Config{
+		Matcher: regexMatcher(t, true), Timeout: 30 * time.Second,
+		MaxMemory: 1 << 30, MaxMessage: 8 << 20,
+		Emit: func(*output.Block) {},
+	})
+	for i := range pkts {
+		e.Segment(&pkts[i].seg, pkts[i].ts)
+		e.Advance(pkts[i].ts)
+	}
+	e.Finish(pkts[len(pkts)-1].ts)
+	if st := e.Stats(); st.Complete != 20 || st.PeakInFlight != 20 || st.Evicted != 0 {
+		t.Fatalf("stats: %+v", st)
+	}
+	pkts = nil
+	var alive, gone runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&alive)
+	runtime.KeepAlive(e)
+	e = nil
+	runtime.GC()
+	runtime.ReadMemStats(&gone)
+	retained := int64(alive.HeapAlloc) - int64(gone.HeapAlloc)
+	t.Logf("retained %d bytes", retained)
+	if retained > 4<<20 {
+		t.Fatalf("engine retains %d bytes after all exchanges ended", retained)
 	}
 }
