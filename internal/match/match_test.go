@@ -500,18 +500,24 @@ func TestSlowPathZeroAllocPerLine(t *testing.T) {
 		t.Fatalf("regex line processing must not allocate, got %v allocs", allocs)
 	}
 
-	// 含 \r 的字面关键词走慢路径。
+	// 含 \r 的字面关键词走慢路径。数据不命中（a\rc 不是 a\rb），
+	// 每轮先缓存 "xxa\r" 再用 "c\n" 补完整行，走到 s.buf 追加和复用。
+	// 切片放在闭包外预分配，避免测试自身引入分配。
 	mc, _ := match.Compile([]string{"a\rb"}, false)
 	sc := mc.NewScanner()
-	tail := []byte("b\n")
-	rest := []byte("more\n")
-	sc.Write([]byte("xxa\r"))
+	head := []byte("xxa\r")
+	tail := []byte("c\n")
+	sc.Write(head) // 预热，让 buf 拿到容量
+	sc.Write(tail)
 	allocsC := testing.AllocsPerRun(100, func() {
+		sc.Write(head)
 		sc.Write(tail)
-		sc.Write(rest)
 	})
+	if sc.Matched() {
+		t.Fatal("\\r-pattern test data must not match, otherwise the early return is measured")
+	}
 	if allocsC != 0 {
-		t.Fatalf("\r-pattern line processing must not allocate, got %v allocs", allocsC)
+		t.Fatalf("\\r-pattern line processing must not allocate, got %v allocs", allocsC)
 	}
 }
 

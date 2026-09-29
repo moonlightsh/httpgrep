@@ -68,15 +68,19 @@ func BenchmarkHighlight(b *testing.B) {
 }
 
 // 快速路径整块扫描的稳态分配（含块边界候选更新）。
+// 数据不含关键词：每轮都走完整扫描、fastTail 更新和 Break，而不是命中后的提前返回。
 func BenchmarkFastTailUpdate(b *testing.B) {
 	m, _ := match.Compile([]string{"keyword"}, false)
 	s := m.NewScanner()
-	chunk := []byte("some line without keyword\n") // 每块以 \n 结束
+	chunk := []byte("some line without kw\n") // 每块以 \n 结束
 	s.Write(chunk)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		s.Write(chunk)
 		s.Break()
+	}
+	if s.Matched() {
+		b.Fatal("unexpected match: benchmark would only measure the early return")
 	}
 }
