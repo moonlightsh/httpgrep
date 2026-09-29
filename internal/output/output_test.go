@@ -492,3 +492,22 @@ func BenchmarkWriteTTY(b *testing.B) {
 		}
 	}
 }
+
+func TestTTYBinaryPlaceholder(t *testing.T) {
+	// TTY 模式：占位行黄色；头部内容先按行写出。
+	b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+		Messages: []output.Message{{
+			Binary: true, ContentType: "application/json", BodySize: 100,
+			Pieces: []output.Piece{
+				{Kind: output.PieceHead, Data: []byte("HTTP/1.1 200 OK\r\n\r\n")},
+				{Kind: output.PieceBody, Data: []byte("\x00\x01")},
+			},
+		}}}
+	got := string(render(t, output.Options{Location: tz, TTY: true}, b))
+	want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
+		"HTTP/1.1 200 OK\r\n\r\n" +
+		"\x1b[33m[binary body omitted: application/json, 100 B]\x1b[m\n"
+	if got != want {
+		t.Errorf("TTY 二进制占位不正确\n得到: %q\n期望: %q", got, want)
+	}
+}

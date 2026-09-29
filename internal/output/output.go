@@ -338,9 +338,13 @@ func (w *Writer) writeBinaryMessage(m *Message) {
 		w.writePiece(&m.Pieces[i])
 	}
 	// 占位行
-	if len(w.buf) > 0 && w.buf[len(w.buf)-1] != '\n' {
+	if len(w.line) > 0 {
+		// TTY 模式下先把暂存的行写出
+		w.flushLine(true)
+	} else if len(w.buf) > 0 && w.buf[len(w.buf)-1] != '\n' {
 		w.buf = append(w.buf, '\n')
 	}
+	start := len(w.buf)
 	w.buf = append(w.buf, "[binary body omitted: "...)
 	if m.ContentEncoding != "" {
 		w.buf = append(w.buf, m.ContentEncoding...)
@@ -358,7 +362,11 @@ func (w *Writer) writeBinaryMessage(m *Message) {
 	if m.BodyMatched {
 		w.buf = append(w.buf, ", matched"...)
 	}
-	w.buf = append(w.buf, "]\n"...)
+	w.buf = append(w.buf, "]"...)
+	if w.opt.TTY {
+		w.colorize(start, len(w.buf), "\x1b[33m", "\x1b[m")
+	}
+	w.buf = append(w.buf, '\n')
 	// body 之后的部分
 	for ; i < len(m.Pieces); i++ {
 		if !isBodyPiece(&m.Pieces[i]) {
