@@ -38,7 +38,11 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	}
 	bin = filepath.Join(dir, "httpgrep")
-	out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput()
+	args := []string{"build", "-o", bin}
+	if raceEnabled {
+		args = append(args, "-race")
+	}
+	out, err := exec.Command("go", append(args, ".")...).CombinedOutput()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "go build: %v\n%s", err, out)
 		os.RemoveAll(dir)
