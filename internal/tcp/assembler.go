@@ -227,7 +227,7 @@ func (a *Assembler) Release(k Key, now time.Time) bool {
 }
 
 // BufferedBytes 返回乱序缓存里的字节数。
-func (a *Assembler) BufferedBytes() int64 { return 0 }
+func (a *Assembler) BufferedBytes() int64 { return a.buffered }
 
 // Len 返回当前的连接数。
 func (a *Assembler) Len() int { return len(a.conns) / 2 }
