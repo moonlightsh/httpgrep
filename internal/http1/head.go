@@ -12,6 +12,7 @@ func (p *Parser) begin(line []byte) {
 	p.h = Head{}
 	p.hasCL, p.cl = false, 0
 	p.hasTE, p.chunked = false, false
+	p.dec = undecided
 	parseStart(p.kind, trimEOL(line), &p.h)
 	p.sink.Raw(SecHead, line)
 	p.headLen = len(line)
@@ -124,11 +125,20 @@ func (p *Parser) clState() state {
 	return stBodyCL
 }
 
-// end 结束当前消息。
+// end 结束当前消息，按调用方的决定和 Head.Upgrade 选择之后的状态。
 func (p *Parser) end(complete bool, ts time.Time) {
 	p.sink.End(complete, ts)
 	p.open = false
-	p.st = stStart
+	switch {
+	case p.dec == decTunnel:
+		p.st = stDead
+	case p.kind == Request && p.h.Upgrade && p.dec != decResume:
+		p.st = stHold
+		p.dropHold()
+	default:
+		p.st = stStart
+	}
+	p.dec = undecided
 }
 
 // validStart 判断 line（含行尾）是不是合法的起始行。

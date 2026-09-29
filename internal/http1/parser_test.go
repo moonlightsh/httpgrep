@@ -116,6 +116,8 @@ func data(s string) step          { return step{data: s, ack: -1} }
 func gap(n int64) step            { return step{gap: n} }
 func closeFin() step              { return step{close: "fin"} }
 func closeRst() step              { return step{close: "rst"} }
+func resume() step                { return step{call: "resume"} }
+func tunnel() step                { return step{call: "tunnel"} }
 func (s step) at(sec int) step    { s.ts = t0.Add(time.Duration(sec) * time.Second); return s }
 func (s step) acked(a int64) step { s.ack = a; return s }
 
@@ -935,4 +937,74 @@ func TestUpgradeFlag(t *testing.T) {
 	if len(r.heads) != 1 || r.heads[0].Upgrade || r.heads[0].Tunnel {
 		t.Errorf("response heads = %+v", r.heads)
 	}
+}
+
+func TestUpgradeHold(t *testing.T) {
+	const up = "GET /ws HTTP/1.1\r\nUpgrade: websocket\r\n\r\n" // 40 字节
+	const next = "GET /2 HTTP/1.1\r\n\r\n"                      // 19 字节
+	upEv := []string{"begin off=0", "raw head " + up, "head GET /ws HTTP/1.1 upgrade", "end true"}
+	nextEv := func(off int) []string {
+		return []string{fmt.Sprintf("begin off=%d", off), "raw head " + next, "head GET /2 HTTP/1.1", "end true"}
+	}
+	cat := func(parts ...[]string) []string {
+		var out []string
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+	// 缓存超过 64 KiB 的请求：头部 42 字节，body 70000 字节，
+	// 只缓存得下 body 的前 65494 字节，其余 4506 字节丢弃。
+	const bigHead = "POST / HTTP/1.1\r\nContent-Length: 70000\r\n\r\n"
+	bigBody := strings.Repeat("b", 65494)
+	tests := []struct {
+		name  string
+		steps []step
+		want  []string
+	}{
+		{"held until resume", []step{data(up + next), data(next)}, upEv},
+		{"resume parses held bytes", []step{data(up + next), data("GET /2 "), resume(), data("HTTP/1.1\r\n\r\n"), data(next)},
+			cat(upEv, nextEv(40), nextEv(59), nextEv(78))},
+		{"tunnel drops everything", []step{data(up + next), tunnel(), data(next), gap(5), resume(), data(next), closeRst()}, upEv},
+		{"gap while held is replayed", []step{data(up + "GET /2 HT"), gap(4), data(next), resume()},
+			cat(upEv, []string{"desync 49", "begin off=40 orphan", "raw unparsed GET /2 HT", "gap unparsed 4", "end false"}, nextEv(53))},
+		{"overflow becomes a gap", []step{data(up), data(bigHead + bigBody + strings.Repeat("c", 4506)), resume(), data(next)},
+			cat(upEv, []string{"begin off=40", "raw head " + bigHead, "head POST / HTTP/1.1",
+				"raw body " + bigBody, "body " + bigBody, "gap body 4506", "end true"}, nextEv(40+42+70000))},
+		{"resume before request ends", []step{data(up[:30]), resume(), data(up[30:] + next)}, cat(upEv, nextEv(40))},
+		{"tunnel before request ends", []step{data(up[:30]), tunnel(), data(up[30:] + next), resume(), data(next)}, upEv},
+		{"close while held", []step{data(up + next), closeFin(), resume()}, upEv},
+		{"resume when not held is a no-op", []step{resume(), data(next), resume(), data(next)}, cat(nextEv(0), nextEv(19))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, c := range []int{0, 1, 1460} {
+				got := run(http1.Request, http1.Options{}, c, tt.steps...)
+				if strings.Join(got.ev, "\n") != strings.Join(tt.want, "\n") {
+					t.Errorf("chunk=%d events:\n  got:  %.400q\n  want: %.400q", c, got.ev, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// 缓存的字节在 Resume 时仍带着原来所在包的时间和 peerAck。
+func TestUpgradeHoldKeepsPacketMeta(t *testing.T) {
+	const up = "GET /ws HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"
+	r := run(http1.Request, http1.Options{}, 0, data(up), data("\r\nGET /2 HTTP/1.1\r\n").acked(9).at(4), data("\r\n").at(6), resume())
+	want := http1.Begin{Off: 42, TS: t0.Add(4 * time.Second), PeerAck: 9}
+	if len(r.begins) != 2 || r.begins[1] != want {
+		t.Fatalf("begins = %+v, want second %+v", r.begins, want)
+	}
+	if len(r.ends) != 2 || !r.ends[1].Equal(t0.Add(6*time.Second)) {
+		t.Errorf("ends = %v", r.ends)
+	}
+}
+
+// 响应解析器的 Resume 和 Tunnel 不起作用。
+func TestResumeTunnelIgnoredOnResponse(t *testing.T) {
+	const ok = "HTTP/1.1 204 No Content\r\n\r\n"
+	want := []string{"begin off=0", "raw head " + ok, "head 204 HTTP/1.1", "end true",
+		"begin off=27", "raw head " + ok, "head 204 HTTP/1.1", "end true"}
+	checkAllChunkings(t, http1.Response, http1.Options{}, want, data(ok), tunnel(), resume(), data(ok))
 }

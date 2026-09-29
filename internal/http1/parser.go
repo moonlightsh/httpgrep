@@ -18,6 +18,7 @@ const (
 	stTrailer                // 读 trailer
 	stBodyClose              // 读到关闭为止的 body
 	stScan                   // 失步：在行首找起始行
+	stHold                   // Upgrade 请求之后：缓存字节，等 Resume 或 Tunnel
 	stDead                   // 隧道或已关闭：不再产生任何事件
 )
 
@@ -27,7 +28,25 @@ const (
 	maxChunkLine = 4 << 10  // chunk 长度行的上限
 	maxScanLine  = 8 << 10  // 扫描时起始行候选的上限
 	probeLen     = 24       // 扫描时先看行首这么多字节，明显不是起始行就不缓存
+	maxHold      = 64 << 10 // Upgrade 请求之后最多缓存这么多字节
 )
+
+// 调用方对 Upgrade 请求的决定，可能在请求结束之前就到达。
+type decision uint8
+
+const (
+	undecided decision = iota
+	decResume
+	decTunnel
+)
+
+// held 是 Upgrade 请求之后缓存的一段：数据或缺口。
+type held struct {
+	off, n int64
+	ack    int64
+	ts     time.Time
+	gap    bool
+}
 
 // Parser 解析一个方向的 HTTP/1.x 字节流。
 type Parser struct {
@@ -56,11 +75,20 @@ type Parser struct {
 	chunked bool  // 最后一个 Transfer-Encoding 的最后一项是 chunked
 	rem     int64 // Content-Length body 或当前 chunk 数据还剩多少字节
 	trlLen  int   // 已收到的 trailer 字节数
+
+	// Upgrade 请求之后的缓存。hold 放数据，segs 记录每段的偏移和包信息。
+	// 缓存满了之后，从 dropOff 到 holdEnd 的字节丢弃，Resume 时作为缺口交付。
+	dec     decision
+	hold    []byte
+	segs    []held
+	dropOff int64 // -1 表示没有丢弃
+	holdEnd int64
+	holdTS  time.Time
 }
 
 // NewParser 创建一个解析器。
 func NewParser(kind Kind, sink Sink, opt Options) *Parser {
-	p := &Parser{kind: kind, sink: sink, opt: opt}
+	p := &Parser{kind: kind, sink: sink, opt: opt, dropOff: -1}
 	if opt.Resync {
 		// 流的第一个字节算作行首。
 		p.st, p.bol = stScan, true
@@ -211,6 +239,9 @@ func (p *Parser) step(off int64, b []byte, ack int64, ts time.Time) int {
 
 	case stScan:
 		return p.scan(off, b, ack, ts)
+
+	case stHold:
+		p.holdData(off, b, ack, ts)
 	}
 	return len(b)
 }
@@ -254,6 +285,11 @@ func (p *Parser) scan(off int64, b []byte, ack int64, ts time.Time) int {
 		if p.open {
 			p.sink.End(false, p.lnTS)
 			p.open = false
+			if p.dec == decTunnel {
+				p.dec = undecided
+				p.st = stDead
+				return n
+			}
 		}
 		p.begin(line)
 	} else {
@@ -332,6 +368,12 @@ func (p *Parser) Gap(off, n int64, ts time.Time) {
 	switch p.st {
 	case stDead:
 		return
+	case stHold:
+		if p.dropOff < 0 {
+			p.segs = append(p.segs, held{off: off, n: n, ts: ts, gap: true})
+		}
+		p.holdEnd, p.holdTS = off+n, ts
+		return
 	case stBodyCL, stChunkData:
 		if n <= p.rem {
 			// 缺口落在长度已知的数据里：不影响解析。
@@ -364,7 +406,9 @@ func (p *Parser) Gap(off, n int64, ts time.Time) {
 // Close 在流结束时调用。fin 为真表示正常 FIN，为假表示 RST 或输入结束。
 func (p *Parser) Close(fin bool, ts time.Time) {
 	switch p.st {
-	case stDead:
+	case stDead, stHold:
+		p.dropHold()
+		p.st = stDead
 		return
 	case stStart:
 		// 还没有构成起始行的半行不属于任何消息，丢弃。
@@ -395,8 +439,67 @@ func (p *Parser) lineSection() Section {
 	return SecHead
 }
 
+// holdData 缓存 Upgrade 请求之后的数据，超过 maxHold 的部分丢弃。
+func (p *Parser) holdData(off int64, b []byte, ack int64, ts time.Time) {
+	if p.dropOff < 0 {
+		k := min(maxHold-len(p.hold), len(b))
+		if k > 0 {
+			p.hold = append(p.hold, b[:k]...)
+			p.segs = append(p.segs, held{off: off, n: int64(k), ack: ack, ts: ts})
+		}
+		if k < len(b) {
+			p.dropOff = off + int64(k)
+		}
+	}
+	p.holdEnd, p.holdTS = off+int64(len(b)), ts
+}
+
+func (p *Parser) dropHold() {
+	p.hold, p.segs = p.hold[:0], p.segs[:0]
+	p.dropOff = -1
+}
+
 // Resume 把 Upgrade 请求之后缓存的字节按 HTTP 解析。只对请求解析器有效。
-func (p *Parser) Resume() {}
+// 请求还没结束时调用，请求结束后直接继续解析，不再缓存。
+func (p *Parser) Resume() {
+	if p.kind != Request {
+		return
+	}
+	if p.st != stHold {
+		if p.open {
+			p.dec = decResume
+		}
+		return
+	}
+	// 回放期间可能又遇到 Upgrade 请求而重新开始缓存，所以先把缓存摘下来。
+	buf, segs := p.hold, p.segs
+	dropOff, end, ts := p.dropOff, p.holdEnd, p.holdTS
+	p.hold, p.segs, p.dropOff = nil, nil, -1
+	p.st = stStart
+	var pos int64
+	for _, s := range segs {
+		if s.gap {
+			p.Gap(s.off, s.n, s.ts)
+			continue
+		}
+		p.Feed(s.off, buf[pos:pos+s.n], s.ack, s.ts)
+		pos += s.n
+	}
+	if dropOff >= 0 {
+		p.Gap(dropOff, end-dropOff, ts)
+	}
+}
 
 // Tunnel 丢弃 Upgrade 请求之后缓存的字节，此后不再产生事件。只对请求解析器有效。
-func (p *Parser) Tunnel() {}
+// 请求还没结束时调用，请求结束（End）之后不再产生事件。
+func (p *Parser) Tunnel() {
+	if p.kind != Request || p.st == stDead {
+		return
+	}
+	if p.open {
+		p.dec = decTunnel
+		return
+	}
+	p.dropHold()
+	p.st = stDead
+}
