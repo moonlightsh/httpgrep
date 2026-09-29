@@ -230,3 +230,49 @@ func BenchmarkAdvance(b *testing.B) {
 		})
 	}
 }
+
+// mixedBodies 生成 conns 条连接上一共 n 个 keep-alive 交互，连接之间按交互轮流进行；
+// 响应 body 在 1–30 KB 之间（按固定的伪随机序列取），不含关键词。
+func mixedBodies(n, conns int) func(w *pcapgen.Writer) {
+	const maxBody = 30 << 10
+	body := bytes.Repeat([]byte("abcdefghij"), maxBody/10+1)
+	return func(w *pcapgen.Writer) {
+		cs := make([]*pcapgen.Conn, conns)
+		for i := range cs {
+			cli := netip.AddrPortFrom(netip.MustParseAddr("10.3.0.1"), uint16(10000+i))
+			cs[i] = pcapgen.NewConn(w, cli, srv)
+			cs[i].Handshake(t0)
+		}
+		seed := uint32(1)
+		for i := range n {
+			seed = seed*1664525 + 1013904223 // 线性同余，结果固定
+			size := 1<<10 + int(seed>>8)%(maxBody-1<<10+1)
+			c := cs[i%conns]
+			ts := t0.Add(time.Duration(i+1) * time.Millisecond)
+			c.ClientSend(ts, []byte("GET /item HTTP/1.1\r\nHost: x\r\n\r\n"))
+			c.ServerSend(ts, append([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "+strconv.Itoa(size)+"\r\n\r\n"), body[:size]...))
+		}
+	}
+}
+
+// BenchmarkMixedBodies 测 1 万个交互（100 条连接，body 1–30 KB，不含命中）的吞吐，
+// 从 Segment 算起，不含 pcap 读取和解码。计划要求本机单核不低于 150 MB/s。
+func BenchmarkMixedBodies(b *testing.B) {
+	const n = 10000
+	pkts, payload := decodeAll(b, mixedBodies(n, 100))
+	b.SetBytes(payload)
+	b.ReportAllocs()
+	for b.Loop() {
+		var emitted int
+		e := newBenchEngine(&emitted)
+		for i := range pkts {
+			p := &pkts[i]
+			e.Segment(&p.seg, p.ts)
+			e.Advance(p.ts)
+		}
+		e.Finish(pkts[len(pkts)-1].ts)
+		if st := e.Stats(); st.Complete != n || emitted != 0 {
+			b.Fatalf("Complete %d emitted %d", st.Complete, emitted)
+		}
+	}
+}
