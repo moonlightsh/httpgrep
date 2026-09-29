@@ -64,6 +64,8 @@ func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 func (a *Assembler) segment(c *conn, s Side, seg *decode.Segment, ts time.Time) {
 	d, peer := &c.d[s], &c.d[1-s]
 	if seg.Flags&decode.SYN != 0 {
+		// SYN/SYN-ACK 携带的负载（TCP Fast Open）不处理，直接丢弃；之后的数据
+		// 会先进乱序缓存，最终把 SYN 负载那段认定为缺口。明文 HTTP/1 里很少见。
 		if s == 1 && !d.started {
 			d.start(seg.Seq + 1)
 		}
@@ -76,6 +78,8 @@ func (a *Assembler) segment(c *conn, s Side, seg *decode.Segment, ts time.Time) 
 	peerAck := peerAckOf(peer, seg.Ack, hasAck)
 	if peerAck > peer.next {
 		// 对端的数据已经送达，只是没抓到。
+		// 已知限制：对端的 FIN 没抓到时，确认 FIN 的那个序号无法和数据字节区分，
+		// 会在流末尾多报一个 1 字节的缺口，这个方向也不会回调 Fin。
 		a.skipTo(c, 1-s, peerAck, ts)
 	}
 	off := d.offset(seg.Seq)
