@@ -9,8 +9,8 @@ import (
 	"strings"
 )
 
-// 正则模式下没写完的行的缓存上限，超出的部分不参与匹配。
-const regexBufCap = 8 << 20
+// 没写完的行的缓存上限（正则和含 \r 的字面关键词共用），超出的部分不参与匹配。
+const lineBufCap = 8 << 20
 
 // Matcher 是编译好的关键词集合，可以派生多个 Scanner。
 type Matcher struct {
@@ -150,14 +150,14 @@ func (s *Scanner) Write(b []byte) {
 		if len(s.buf) == 0 {
 			// 不拷贝，直接处理；正则模式下按上限截断。
 			line := b[:i]
-			if s.m.re != nil && len(line) > regexBufCap {
-				line = line[:regexBufCap]
+			if len(line) > lineBufCap {
+				line = line[:lineBufCap]
 			}
 			s.processLine(line)
 		} else {
 			s.buf = append(s.buf, b[:i]...)
-			if s.m.re != nil && len(s.buf) > regexBufCap {
-				s.buf = s.buf[:regexBufCap]
+			if len(s.buf) > lineBufCap {
+				s.buf = s.buf[:lineBufCap]
 			}
 			s.processLine(s.buf)
 			s.buf = s.buf[:0]
@@ -166,15 +166,14 @@ func (s *Scanner) Write(b []byte) {
 	}
 }
 
-// holdLine 缓存没写完的行。正则模式下缓存上限是 regexBufCap，
-// 超出后新到的字节不参与匹配。
+// holdLine 缓存没写完的行，上限 lineBufCap，超出后新到的字节不参与匹配。
 func (s *Scanner) holdLine(b []byte) {
-	if s.m.re != nil && len(s.buf) >= regexBufCap {
+	if len(s.buf) >= lineBufCap {
 		return // 已到上限，超出的部分不参与匹配
 	}
 	s.buf = append(s.buf, b...)
-	if s.m.re != nil && len(s.buf) > regexBufCap {
-		s.buf = s.buf[:regexBufCap]
+	if len(s.buf) > lineBufCap {
+		s.buf = s.buf[:lineBufCap]
 	}
 }
 
