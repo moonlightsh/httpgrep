@@ -179,10 +179,9 @@ func peerAckOf(peer *dir, ack uint32, hasAck bool) int64 {
 		return -1
 	}
 	if off := peer.offset(ack); off >= 0 {
-		// 确认 FIN 的那个序号不算流里的字节。FIN 的偏移不小于 0（见 segment），这里只是兜底。
-		if off = peer.limit(off); off >= 0 {
-			return off
-		}
+		// 确认 FIN 的那个序号不算流里的字节。FIN 的偏移不早于已交付的位置（见 segment），
+		// 所以结果不为负。
+		return peer.limit(off)
 	}
 	return -1
 }
