@@ -58,10 +58,26 @@ func (a *Assembler) create(seg *decode.Segment, ts time.Time) *conn {
 	info := ConnInfo{Start: ts}
 	c := &conn{}
 	switch {
+	case seg.Flags&decode.RST != 0:
+		// RST 即使带负载也不建连接，建了也会立即释放。
+		return nil
 	case seg.Flags&(decode.SYN|decode.ACK) == decode.SYN:
 		info.Key = Key{seg.Src, seg.Dst}
 		info.RolesKnown = true
 		c.d[0].start(seg.Seq + 1)
+	case seg.Flags&(decode.SYN|decode.ACK) == decode.SYN|decode.ACK:
+		// 没看到 SYN：SYN-ACK 的目的方是客户端。
+		info.Key = Key{seg.Dst, seg.Src}
+		info.RolesKnown = true
+		c.d[0].start(seg.Ack)
+		c.d[1].start(seg.Seq + 1)
+	case len(seg.Payload) > 0 || seg.Missing > 0:
+		// 开始抓包前已建立的连接：源地址当作 side 0，另一方向的起点取 Ack。
+		info.Key = Key{seg.Src, seg.Dst}
+		c.d[0].start(seg.Seq)
+		if seg.Flags&decode.ACK != 0 {
+			c.d[1].start(seg.Ack)
+		}
 	default:
 		return nil
 	}
@@ -85,7 +101,7 @@ func (a *Assembler) Release(k Key, now time.Time) bool { return false }
 func (a *Assembler) BufferedBytes() int64 { return 0 }
 
 // Len 返回当前的连接数。
-func (a *Assembler) Len() int { return 0 }
+func (a *Assembler) Len() int { return len(a.conns) / 2 }
 
 // LeastRecent 返回最久没有收到包的连接。
 func (a *Assembler) LeastRecent() (Key, bool) { return Key{}, false }

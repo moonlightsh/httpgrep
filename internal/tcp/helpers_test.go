@@ -31,9 +31,11 @@ func (r rec) add(format string, args ...any) { *r.log = append(*r.log, fmt.Sprin
 func (r rec) Data(side tcp.Side, off int64, b []byte, peerAck int64, ts time.Time) {
 	r.add("data %d off=%d %q ack=%d", side, off, b, peerAck)
 }
-func (r rec) Gap(side tcp.Side, off, n int64, ts time.Time) { r.add("gap %d off=%d n=%d", side, off, n) }
-func (r rec) Fin(side tcp.Side, ts time.Time)               { r.add("fin %d", side) }
-func (r rec) Reset(ts time.Time)                            { r.add("reset") }
+func (r rec) Gap(side tcp.Side, off, n int64, ts time.Time) {
+	r.add("gap %d off=%d n=%d", side, off, n)
+}
+func (r rec) Fin(side tcp.Side, ts time.Time) { r.add("fin %d", side) }
+func (r rec) Reset(ts time.Time)              { r.add("reset") }
 func (r rec) Closed(reason tcp.CloseReason, ts time.Time) {
 	r.add("closed %s", [...]string{"fin", "reset", "idle", "replaced", "eof", "evicted"}[reason])
 }
