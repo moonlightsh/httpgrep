@@ -45,14 +45,28 @@ func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 		return
 	}
 	off := d.offset(seg.Seq)
-	end := off + int64(len(seg.Payload))
-	if off <= d.next && end > d.next {
-		// 重叠的前缀已经交付过，只交付新的部分。
-		c.h.Data(s, d.next, seg.Payload[d.next-off:], peerAck, ts)
-		d.next = end
-		a.drain(c, s, ts)
-	} else if off > d.next {
+	if off > d.next {
 		a.buffer(d, off, seg.Payload, seg.Ack, hasAck, ts)
+		return
+	}
+	a.deliver(c, s, off, seg.Payload, peerAck, ts)
+}
+
+// deliver 交付从 off 开始、off <= next 的负载，已交付的前缀跳过。
+// 负载和缓存重叠的部分以缓存（先到的）为准；负载直接切片交付，不拷贝。
+func (a *Assembler) deliver(c *conn, s Side, off int64, b []byte, peerAck int64, ts time.Time) {
+	d := &c.d[s]
+	end := off + int64(len(b))
+	for d.next < end {
+		stop := end
+		if len(d.buf) > 0 && d.buf[0].off < stop {
+			stop = max(d.buf[0].off, d.next)
+		}
+		if stop > d.next {
+			c.h.Data(s, d.next, b[d.next-off:stop-off], peerAck, ts)
+			d.next = stop
+		}
+		a.drain(c, s, ts)
 	}
 }
 

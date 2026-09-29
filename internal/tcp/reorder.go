@@ -13,16 +13,31 @@ type chunk struct {
 
 func (k *chunk) end() int64 { return k.off + int64(len(k.data)) }
 
-// buffer 把 [off, off+len(b)) 拷进乱序缓存。
+// buffer 把 [off, off+len(b)) 中缓存里还没有的部分拷进乱序缓存。
+// 缓存里的段互不重叠，重叠部分以先到的为准。
 func (a *Assembler) buffer(d *dir, off int64, b []byte, ack uint32, hasAck bool, ts time.Time) {
-	k := chunk{off: off, data: append([]byte(nil), b...), ack: ack, hasAck: hasAck, ts: ts}
-	i := len(d.buf)
-	for i > 0 && d.buf[i-1].off > off {
-		i--
+	cur, end := off, off+int64(len(b))
+	i := 0
+	for i < len(d.buf) && d.buf[i].end() <= cur {
+		i++
 	}
-	d.buf = append(d.buf, chunk{})
-	copy(d.buf[i+1:], d.buf[i:])
-	d.buf[i] = k
+	for cur < end {
+		if i < len(d.buf) && d.buf[i].off <= cur {
+			cur = max(cur, d.buf[i].end())
+			i++
+			continue
+		}
+		stop := end
+		if i < len(d.buf) && d.buf[i].off < end {
+			stop = d.buf[i].off
+		}
+		k := chunk{off: cur, data: append([]byte(nil), b[cur-off:stop-off]...), ack: ack, hasAck: hasAck, ts: ts}
+		d.buf = append(d.buf, chunk{})
+		copy(d.buf[i+1:], d.buf[i:])
+		d.buf[i] = k
+		i++
+		cur = stop
+	}
 }
 
 // drain 交付 side 方向缓存里已经和 next 相接的段。

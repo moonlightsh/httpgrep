@@ -64,3 +64,58 @@ func TestOutOfOrder(t *testing.T) {
 		})
 	}
 }
+
+// 第 7 条：缓存里的段互相重叠时，重叠部分以先到的为准。
+func TestOverlapFirstWins(t *testing.T) {
+	tests := []struct {
+		name  string
+		early []pkt
+		fill  pkt // 最后到达、补上开头空洞的段
+		want  []string
+	}{
+		{
+			name:  "same range",
+			early: []pkt{c2s(1005, 5001, pshAck, "EFGH"), c2s(1005, 5001, pshAck, "xxxx")},
+			fill:  c2s(1001, 5001, pshAck, "abcd"),
+			want:  []string{`data 0 off=0 "abcd" ack=0`, `data 0 off=4 "EFGH" ack=0`},
+		},
+		{
+			name:  "later overlaps tail",
+			early: []pkt{c2s(1005, 5001, pshAck, "EFGH"), c2s(1007, 5001, pshAck, "xxIJ")},
+			fill:  c2s(1001, 5001, pshAck, "abcd"),
+			want:  []string{`data 0 off=0 "abcd" ack=0`, `data 0 off=4 "EFGH" ack=0`, `data 0 off=8 "IJ" ack=0`},
+		},
+		{
+			name:  "later overlaps head",
+			early: []pkt{c2s(1007, 5001, pshAck, "GHIJ"), c2s(1005, 5001, pshAck, "EFxx")},
+			fill:  c2s(1001, 5001, pshAck, "abcd"),
+			want:  []string{`data 0 off=0 "abcd" ack=0`, `data 0 off=4 "EF" ack=0`, `data 0 off=6 "GHIJ" ack=0`},
+		},
+		{
+			name:  "later covers earlier",
+			early: []pkt{c2s(1007, 5001, pshAck, "GH"), c2s(1005, 5001, pshAck, "efxxij")},
+			fill:  c2s(1001, 5001, pshAck, "abcd"),
+			want: []string{
+				`data 0 off=0 "abcd" ack=0`, `data 0 off=4 "ef" ack=0`,
+				`data 0 off=6 "GH" ack=0`, `data 0 off=8 "ij" ack=0`,
+			},
+		},
+		{
+			name:  "in-order segment overlaps buffer",
+			early: []pkt{c2s(1005, 5001, pshAck, "EFGH")},
+			fill:  c2s(1001, 5001, pshAck, "abcdxxxxij"),
+			want:  []string{`data 0 off=0 "abcd" ack=0`, `data 0 off=4 "EFGH" ack=0`, `data 0 off=8 "ij" ack=0`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, defaultConfig())
+			h.handshake(at(0))
+			h.expect("open A=10.0.0.1:40000 B=10.0.0.2:80 known=true")
+			h.feed(at(1), tt.early...)
+			h.expect()
+			h.add(tt.fill, at(2))
+			h.expect(tt.want...)
+		})
+	}
+}
