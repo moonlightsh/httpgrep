@@ -23,9 +23,10 @@ type conn struct {
 	// probes 只在角色未知时使用：每个方向各有一个请求解析器和一个响应解析器，
 	// 下标是 [side][http1.Request 或 http1.Response]。
 	probes *[2][2]probe
-	// orphanOff 是角色未知时每个方向上已经计数的最后一条 Orphan 消息的起始偏移。
-	// 同一方向的两个解析器会对同样的字节各开始一条 Orphan 消息，只计一次。
-	orphanOff [2]int64
+	// orphanOff 是角色未知时每个解析器最近一条 Orphan 消息的起始偏移，下标同 probes，-1 表示没有。
+	// 同一方向的两个解析器都在同一偏移开始 Orphan 消息，这些字节才确实不属于任何消息，只计一次；
+	// 只有一个解析器认为是 Orphan 的（比如请求解析器看到状态行）不计。
+	orphanOff [2][2]int64
 	// finSide 记下角色未知时已经按序结束的方向，定角色时据此设置 srvClosed。
 	finSide [2]bool
 
@@ -85,7 +86,7 @@ func (e *Engine) newConn(info tcp.ConnInfo) *conn {
 		return c
 	}
 	c.probes = new([2][2]probe)
-	c.orphanOff = [2]int64{-1, -1}
+	c.orphanOff = [2][2]int64{{-1, -1}, {-1, -1}}
 	for side := range c.probes {
 		for kind := range c.probes[side] {
 			pr := &c.probes[side][kind]
@@ -129,8 +130,8 @@ func (pr *probe) Begin(b http1.Begin) {
 	c := pr.c
 	if !c.known {
 		if b.Orphan {
-			if b.Off > c.orphanOff[pr.side] {
-				c.orphanOff[pr.side] = b.Off
+			c.orphanOff[pr.side][pr.kind] = b.Off
+			if c.orphanOff[pr.side][1-pr.kind] == b.Off {
 				c.e.stats.Orphans++
 			}
 			return
