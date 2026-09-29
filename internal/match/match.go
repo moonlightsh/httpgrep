@@ -10,6 +10,7 @@ import (
 )
 
 // 没写完的行的缓存上限（正则和含 \r 的字面关键词共用），超出的部分不参与匹配。
+// 副作用：超长行按截断点作为行尾，正则的 $ 会锚定在第 8 MiB 处而非真正的行尾。
 const lineBufCap = 8 << 20
 
 // Matcher 是编译好的关键词集合，可以派生多个 Scanner。
@@ -144,7 +145,14 @@ func (s *Scanner) Write(b []byte) {
 		s.fastScan(b)
 		return
 	}
-	if !s.m.anyEmpty && s.m.re == nil && len(s.m.patterns) == 0 {
+	if s.m.anyEmpty {
+		// 空关键词匹配任何一行：行内容用不上，不缓存，遇到 \n 即命中。
+		if bytes.IndexByte(b, '\n') >= 0 {
+			s.matched = true
+		}
+		return
+	}
+	if s.m.re == nil && len(s.m.patterns) == 0 {
 		return // 没有关键词，永远不命中
 	}
 	for len(b) > 0 {

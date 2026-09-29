@@ -637,3 +637,31 @@ func TestHighlightKeepsCRInLine(t *testing.T) {
 		t.Fatalf("got %v want %v", got, want)
 	}
 }
+
+// 空关键词：这一行的内容用不上，没写完的行不需要缓存。
+// 写入 16 MiB 无换行数据，内存不应增长到 8 MiB 缓存的量级；之后 \n 立即命中。
+func TestEmptyPatternNoLineBuffer(t *testing.T) {
+	for _, regex := range []bool{false, true} {
+		m, _ := match.Compile([]string{"", "zz"}, regex)
+		s := m.NewScanner()
+		flood := make([]byte, 1<<20)
+		runtime.GC()
+		var before runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for i := 0; i < 16; i++ {
+			s.Write(flood)
+		}
+		var after runtime.MemStats
+		runtime.ReadMemStats(&after)
+		if s.Matched() {
+			t.Fatalf("regex=%v: line not ended yet, must not match", regex)
+		}
+		if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
+			t.Fatalf("regex=%v: empty pattern must not buffer line, allocated %d bytes", regex, grew)
+		}
+		s.Write([]byte("tail\n"))
+		if !s.Matched() {
+			t.Fatalf("regex=%v: empty pattern must match once line ends", regex)
+		}
+	}
+}
