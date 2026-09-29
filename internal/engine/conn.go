@@ -61,6 +61,8 @@ type conn struct {
 	// now 是当前回调时引擎的时刻（Engine.now）。请求和响应的时间不用它，取解析器的 LastTS()：
 	// 回放 Upgrade 缓存或乱序缓存放行时，now 不是那些字节被抓到的时间。
 	now time.Time
+
+	pmem int64 // 上一次 syncParsers 时这条连接的解析器缓存的字节数，已计入 Engine.parsers
 }
 
 // reqSink 接收请求解析器的事件。cur 为 nil 时丢弃事件。
@@ -97,6 +99,7 @@ func (e *Engine) newConn(info tcp.ConnInfo) *conn {
 		c.res = http1.NewParser(http1.Response, &c.rs, http1.Options{Method: c.method})
 		return c
 	}
+	e.probing++
 	c.probes = new([2][2]probe)
 	c.orphanOff = [2][2]int64{{-1, -1}, {-1, -1}}
 	for side := range c.probes {
@@ -129,6 +132,7 @@ func (c *conn) decide(pr *probe) {
 	}
 	c.srvClosed = c.finSide[srv]
 	c.known = true
+	c.e.probing--
 	c.align()
 }
 
@@ -257,6 +261,7 @@ func (c *conn) method() string {
 // （定位行、耗时），交互的计时仍按引擎的当前时刻。
 func (c *conn) Data(side tcp.Side, off int64, b []byte, peerAck int64, ts time.Time) {
 	c.now = c.e.now
+	defer c.syncParsers()
 	if !c.known {
 		c.probeFeed(side, off, b, peerAck, ts)
 		return
@@ -266,6 +271,23 @@ func (c *conn) Data(side tcp.Side, off int64, b []byte, peerAck int64, ts time.T
 	} else {
 		c.res.Feed(off, b, peerAck, ts)
 	}
+}
+
+// syncParsers 把这条连接的解析器内部缓存（没收完的行、Upgrade 请求之后缓存的字节）
+// 的变化计入 Engine.parsers。每个会喂入或回放解析器的入口结束时调用。
+func (c *conn) syncParsers() {
+	var n int64
+	if c.probes != nil {
+		for side := range c.probes {
+			for kind := range c.probes[side] {
+				n += int64(c.probes[side][kind].p.Buffered())
+			}
+		}
+	} else if c.known {
+		n = int64(c.req.Buffered() + c.res.Buffered())
+	}
+	c.e.parsers += n - c.pmem
+	c.pmem = n
 }
 
 // probeFeed 在角色未知时把字节喂给这个方向的两个解析器。
@@ -307,6 +329,7 @@ func (c *conn) Gap(side tcp.Side, off, n int64, ts time.Time) {
 	c.e.stats.Gaps++
 	c.e.stats.GapBytes += n
 	c.now = ts
+	defer c.syncParsers()
 	if !c.known {
 		// 定角色之前的消息都是 Orphan，缺口不会让某个解析器产生非 Orphan 的 Begin。
 		c.probes[side][http1.Request].p.Gap(off, n, ts)
@@ -324,6 +347,7 @@ func (c *conn) Gap(side tcp.Side, off, n int64, ts time.Time) {
 // 服务端 FIN 时，读到关闭为止的响应算收完。
 func (c *conn) Fin(side tcp.Side, ts time.Time) {
 	c.now = ts
+	defer c.syncParsers()
 	if !c.known {
 		// 定角色之前，这个方向的两个解析器都只有 Orphan 消息，结束它们不产生交互。
 		c.finSide[side] = true
@@ -374,6 +398,12 @@ func (c *conn) Closed(reason tcp.CloseReason, ts time.Time) {
 	if !c.aligned && c.pendDesyncs+c.pendOrphans > 0 {
 		c.e.stats.NonHTTP++
 	}
+	if !c.known {
+		c.e.probing--
+	}
+	// 连接已经移除，解析器随之释放。
+	c.e.parsers -= c.pmem
+	c.pmem = 0
 }
 
 // close 结束两个方向的解析和所有在途交互：没收完的消息标为不完整，
@@ -435,6 +465,7 @@ func (c *conn) timeout(x *exchange, at time.Time) {
 	c.e.bury(x)
 	c.giveUp(x)
 	c.rearm(at)
+	c.syncParsers()
 }
 
 // giveUp 在交互 x 超时或因内存上限被丢弃时调用：如果它是（或者可能是）还在等决定的
@@ -597,7 +628,7 @@ func (s *reqSink) Body(b []byte) {
 
 func (s *reqSink) Gap(sec http1.Section, n int64) {
 	if x := s.cur; x != nil && !x.ghost {
-		x.gap(x.reqMsg, sec, n)
+		x.gap(x.reqMsg, sec, n, s.c.e.cfg.MaxMessage)
 	}
 }
 
@@ -790,7 +821,7 @@ func (s *resSink) Gap(sec http1.Section, n int64) {
 		s.c.markLate(x)
 		return
 	}
-	x.gap(x.resMsg, sec, n)
+	x.gap(x.resMsg, sec, n, s.c.e.cfg.MaxMessage)
 }
 
 func (s *resSink) End(complete bool, ts time.Time) {

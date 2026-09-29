@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"slices"
 	"time"
 
 	"httpgrep/internal/decode"
@@ -32,6 +33,9 @@ type Engine struct {
 	timers   timers      // 正在计时的在途交互，按到期时间排序
 	inFlight int
 	buffered int64 // 在途交互缓存的消息字节数
+	extra    int64 // 在途交互超出 freeMessages、freePieces 的消息和片段的计量，见 exchange.charge
+	parsers  int64 // 全部解析器内部缓存的字节数之和，见 conn.syncParsers
+	probing  int   // 还没定角色的半路连接数，按 probeOverhead 计入内存
 	ghosts   int   // 队列里的占位数（超时或被丢弃的交互），按 ghostOverhead 计入内存
 
 	now time.Time // 当前时刻：最近一次 Segment、Advance 或 Finish 的时间
@@ -50,6 +54,7 @@ type Engine struct {
 	msgs   []output.Message
 	pieces []output.Piece
 	starts []int
+	fill   []int
 }
 
 // reorderTimeout 是乱序数据最多等待的时间。
@@ -190,6 +195,7 @@ func (e *Engine) end(c *conn, x *exchange) {
 	}
 	e.inFlight--
 	e.buffered -= int64(len(x.buf))
+	x.uncharge()
 }
 
 // addBuffered 记下在途交互新缓存的 n 字节，更新峰值。
@@ -213,16 +219,27 @@ func (e *Engine) emit(c *conn, x *exchange, st output.Status) {
 		// 服务端在请求发完之前就回完了响应时，耗时记 0，不输出负数。
 		b.Duration = max(x.resLast.Sub(x.reqLast), 0)
 	}
-	// 片段按到达顺序缓存，两个方向可能交错：按消息分组后再切给各条消息。
-	e.pieces, e.starts = e.pieces[:0], e.starts[:0]
-	for mi := range x.msgs {
-		e.starts = append(e.starts, len(e.pieces))
-		for _, p := range x.pieces {
-			if p.msg == mi {
-				e.pieces = append(e.pieces, output.Piece{Kind: p.kind, Data: x.buf[p.lo:p.hi], N: p.n, InBody: p.inBody})
-			}
-		}
+	// 片段按到达顺序缓存，两个方向可能交错：按消息分组（计数排序，保持组内顺序）
+	// 后再切给各条消息。消息很多（比如一连串 1xx）时也是线性的。
+	e.starts = e.starts[:0]
+	for range x.msgs {
+		e.starts = append(e.starts, 0)
 	}
+	for _, p := range x.pieces {
+		e.starts[p.msg]++
+	}
+	n := 0
+	for mi, k := range e.starts {
+		e.starts[mi] = n
+		n += k
+	}
+	e.pieces = slices.Grow(e.pieces[:0], n)[:n]
+	fill := append(e.fill[:0], e.starts...)
+	for _, p := range x.pieces {
+		e.pieces[fill[p.msg]] = output.Piece{Kind: p.kind, Data: x.buf[p.lo:p.hi], N: p.n, InBody: p.inBody}
+		fill[p.msg]++
+	}
+	e.fill = fill
 	e.msgs = e.msgs[:0]
 	for mi := range x.msgs {
 		m := &x.msgs[mi]

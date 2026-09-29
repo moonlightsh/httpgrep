@@ -23,16 +23,15 @@ Options:
   --timeout DUR     Exchange timeout: end an unfinished exchange after
                     DUR without new data (default 30s)
   --max-memory SIZE Approximate limit for buffered data (default 256M):
-                    request and response data, out-of-order segments
-                    and per-connection/per-exchange overhead. When it
-                    is exceeded, the oldest unfinished exchanges are
-                    dropped. Not counted, each with its own cap:
-                    -E line buffers (up to 8M per scanner, only for
-                    very long lines), bytes after an Upgrade request
-                    (up to 64K per connection) and resync line buffers
-                    (up to 8K per direction). The process uses more
-                    memory than this; the Go runtime soft limit is set
-                    to 1.5 times this value
+                    request and response data, out-of-order segments,
+                    partial header lines, bytes held after an Upgrade
+                    request, and per-connection/per-exchange overhead.
+                    When it is exceeded, the oldest unfinished
+                    exchanges are dropped, then the least recently
+                    active connections. Not counted: -E line buffers
+                    (up to 8M per scanner, only for very long lines).
+                    The process uses more memory than this; the Go
+                    runtime soft limit is set to 1.5 times this value
   --max-message SIZE
                     Limit for a single request or response; bytes over
                     it are not buffered (default 8M)

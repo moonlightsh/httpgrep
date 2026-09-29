@@ -90,7 +90,7 @@ func TestMaxMessageGapAfterTruncation(t *testing.T) {
 	}
 }
 
-// 内存计量：缓存的消息字节、乱序缓存（每段另计 128 字节）、每条连接 1 KiB、每个在途交互 512 字节。
+// 内存计量：缓存的消息字节、乱序缓存（每段另计 128 字节）、每条连接 2 KiB、每个在途交互 1 KiB。
 // 响应是 150 字节（40 字节头部加 110 字节 body），后 50 字节先到、进乱序缓存，
 // 前 100 字节补上后整个响应交付，交互结束。之后再开一条连接。
 func TestMemoryAccounting(t *testing.T) {
@@ -108,11 +108,11 @@ func TestMemoryAccounting(t *testing.T) {
 		pcapgen.NewConn(w, cli2, srv).Handshake(ms(4)) // 3 个包
 	}, func(e *engine.Engine, _ time.Time) { got = append(got, e.Memory()) })
 	want := []int64{
-		1024, 1024, 1024, // 握手：一条连接
-		1024 + 512 + 18,            // 请求 18 字节在途
-		1024 + 512 + 18 + 50 + 128, // 乱序缓存 50 字节，外加每段 128 字节
-		1024,                       // 响应收完，交互结束
-		2048, 2048, 2048,           // 第二条连接
+		2048, 2048, 2048, // 握手：一条连接
+		2048 + 1024 + 18,            // 请求 18 字节在途
+		2048 + 1024 + 18 + 50 + 128, // 乱序缓存 50 字节，外加每段 128 字节
+		2048,                        // 响应收完，交互结束
+		4096, 4096, 4096,            // 第二条连接
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("Memory after each packet = %v, want %v", got, want)
@@ -138,22 +138,22 @@ func TestTunnelNotBuffered(t *testing.T) {
 		t.Fatalf("%d packets", len(got))
 	}
 	for i, m := range got[4:] {
-		if m != 1024 {
-			t.Fatalf("Memory after packet %d = %d, want 1024", 4+i, m)
+		if m != 2048 {
+			t.Fatalf("Memory after packet %d = %d, want 2048", 4+i, m)
 		}
 	}
 }
 
 // 超过内存上限时，从开始时间最早的在途交互起丢弃，直到不超限。
 // A（t=0，请求命中）和 B（t=1）两个在途交互，B 的响应收到第三个包时计量是
-// 2048（两条连接）+ 1024（两个交互）+ 23 + 19（两个请求）+ 4380（B 的响应）= 7494，
-// 超过 7400：丢弃 A，减去 512 + 23、加上占位的 384，得 7343，不再超限。
+// 4096（两条连接）+ 2048（两个交互）+ 23 + 19（两个请求）+ 4380（B 的响应）= 10566，
+// 超过 10472：丢弃 A，减去 1024 + 23、加上占位的 384，得 9903，不再超限。
 // A 已经命中也不输出，它在队列里留占位：它的响应之后才到，不缓存、不输出，也不算迟到响应，
 // 占位随即回收。B 照常收完、输出。
 func TestEvictOldestInFlight(t *testing.T) {
 	bBody := "TOKEN" + strings.Repeat("x", 4995)
 	var mem []int64
-	out, st := replayEach(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 7400}, func(w *pcapgen.Writer) {
+	out, st := replayEach(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 10472}, func(w *pcapgen.Writer) {
 		a := pcapgen.NewConn(w, cli1, srv)
 		b := pcapgen.NewConn(w, cli2, srv)
 		a.Handshake(ms(-1))
@@ -167,9 +167,9 @@ func TestEvictOldestInFlight(t *testing.T) {
 		"GET /b HTTP/1.1\r\n\r\n"+
 		"HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n"+bBody+"\n")
 	// 两次握手 6 个包，两个请求，B 的响应 4 个包，A 的响应 1 个包。
-	want := []int64{1024, 1024, 1024, 2048, 2048, 2048,
-		2048 + 512 + 23, 2048 + 1024 + 42,
-		3114 + 1460, 3114 + 2920, 7343, 2048 + 384, 2048}
+	want := []int64{2048, 2048, 2048, 4096, 4096, 4096,
+		4096 + 1024 + 23, 4096 + 2048 + 42,
+		6186 + 1460, 6186 + 2920, 9903, 4096 + 384, 4096}
 	if !slices.Equal(mem, want) {
 		t.Fatalf("Memory after each packet = %v, want %v", mem, want)
 	}
@@ -180,11 +180,11 @@ func TestEvictOldestInFlight(t *testing.T) {
 }
 
 // Upgrade 请求 U 的头部收到一半时因内存上限被丢弃（计量和 TestEvictOldestInFlight 相同：
-// 3114 - 23 + 40 + 1460×3 = 7511，超过 7400，丢弃 U 减去 552、加上占位的 384，得 7343）。U 的请求随后发完，
+// 6186 - 23 + 40 + 1460×3 = 10583，超过 10472，丢弃 U 减去 1064、加上占位的 384，得 9903）。U 的请求随后发完，
 // 请求解析器照常缓存它后面管道化的请求 R2，等对 U 的决定。连接被 RST 时要先回放缓存，
 // R2 以 no-response(closed) 结束并输出，不能随请求解析器关闭而丢掉。
 func TestEvictedUpgradeRequestKeepsHeld(t *testing.T) {
-	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 7400}, func(w *pcapgen.Writer) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 10472}, func(w *pcapgen.Writer) {
 		u := pcapgen.NewConn(w, cli1, srv)
 		b := pcapgen.NewConn(w, cli2, srv)
 		u.Handshake(ms(-1))
@@ -202,15 +202,15 @@ func TestEvictedUpgradeRequestKeepsHeld(t *testing.T) {
 	}
 }
 
-// 在途交互都丢完了仍然超限：释放最久没有收到包的连接，直到不超限。上限 3000。
-// C1、C2 握手后，C1 又发了一个 ACK，最久没有包的是 C2。C3 的 SYN 使计量到 3072，
-// 没有在途交互可丢，释放 C2，回到 2048。C2 的四元组上随后来的请求按半路连接新建
-// （3072 + 512 + 23）：先丢弃这个交互（已命中，不输出，留下 384 字节的占位），得 3456，
-// 仍超限，再释放此时最久没有包的 C1，得 2432。C3 不受影响，它的交互照常输出。
+// 在途交互都丢完了仍然超限：释放最久没有收到包的连接，直到不超限。上限 6000。
+// C1、C2 握手后，C1 又发了一个 ACK，最久没有包的是 C2。C3 的 SYN 使计量到 6144，
+// 没有在途交互可丢，释放 C2，回到 4096。C2 的四元组上随后来的请求按半路连接新建
+// （6144 + 1024 + 23，请求行一到就定了角色）：先丢弃这个交互（已命中，不输出，留下 384 字节的占位），
+// 得 6528，仍超限，再释放此时最久没有包的 C1，得 4480。C3 不受影响，它的交互照常输出。
 func TestEvictLeastRecentConnection(t *testing.T) {
 	cli3 := netip.MustParseAddrPort("10.0.0.1:52816")
 	var mem []int64
-	out, st := replayEach(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 3000}, func(w *pcapgen.Writer) {
+	out, st := replayEach(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 6000}, func(w *pcapgen.Writer) {
 		c1 := pcapgen.NewConn(w, cli1, srv)
 		c2 := pcapgen.NewConn(w, cli2, srv)
 		c3 := pcapgen.NewConn(w, cli3, srv)
@@ -225,10 +225,10 @@ func TestEvictLeastRecentConnection(t *testing.T) {
 	check(t, out, "2026-09-28 15:30:12.350 10.0.0.1:52816 -> 10.0.0.2:80 complete 1.0ms\n"+
 		"GET /TOKEN HTTP/1.1\r\n\r\n"+
 		"HTTP/1.1 204 No Content\r\n\r\n")
-	want := []int64{1024, 1024, 1024, 2048, 2048, 2048, 2048,
-		2048, 2048, 2048, // C3 握手：SYN 之后释放了 C2
-		2048 + 384, // C2 四元组上的请求：丢弃交互，释放 C1
-		2048 + 384 + 512 + 23, 2048 + 384}
+	want := []int64{2048, 2048, 2048, 4096, 4096, 4096, 4096,
+		4096, 4096, 4096, // C3 握手：SYN 之后释放了 C2
+		4096 + 384, // C2 四元组上的请求：丢弃交互，释放 C1
+		4096 + 384 + 1024 + 23, 4096 + 384}
 	if !slices.Equal(mem, want) {
 		t.Fatalf("Memory after each packet = %v, want %v", mem, want)
 	}
@@ -239,7 +239,7 @@ func TestEvictLeastRecentConnection(t *testing.T) {
 }
 
 // Warn 按抓包时钟最多每 10 秒调用一次，报告距上一次告警以来的累计数；Finish 时补报剩下的。
-// 上限 2000：一条连接（1024）上同时只放得下一个在途请求（512 + 20 或 23 字节）和一个占位（384），
+// 上限 3536：一条连接（2048）上同时只放得下一个在途请求（1024 + 20 或 23 字节）和一个占位（384），
 // 每来一个管道化的请求就丢弃前一个；被丢弃的请求的响应紧接着到达，占位随即回收。
 // 丢弃发生在 t=0（R0，命中）、1（R1）、5（R2，命中）、12（R3）、13（R4）。t=0 立即告警；
 // t=1、5 的累计到 t=10 的 Advance 时告警；t=12、13 的累计不到 10 秒，Finish 时补报。
@@ -249,7 +249,7 @@ func TestEvictWarnRateLimited(t *testing.T) {
 	var counts []int
 	cfg := engine.Config{
 		Matcher:   matcher(t, "TOKEN"),
-		MaxMemory: 2000,
+		MaxMemory: 3536,
 		Warn:      func(msg string) { warns = append(warns, msg) },
 	}
 	_, out, st := replayHook(t, cfg, func(w *pcapgen.Writer) {
@@ -290,11 +290,11 @@ func TestEvictWarnRateLimited(t *testing.T) {
 // 就超过了上限，要一直丢弃才能不超限。每个包之后（引擎在每个 Segment 之后执行上限）
 // 计量都不超过上限，比计划要求的“上限加一个包的大小”更严。
 //
-// PeakBuffered 的手算：第一阶段 10 条连接都在（10240），至少有一个在途交互（512），
+// PeakBuffered 的手算：第一阶段 10 条连接都在（20480），至少有一个在途交互（1024），
 // 包处理完时计量不超过 65536，一个包最多带来 1460 字节，所以缓存的峰值不超过
-// 65536 + 1460 - 10240 - 512 = 56244。第一阶段以 RST 结束全部连接。第二阶段只有一条
-// 新连接和一个 70000 字节的请求：第 43 段之后是 1024 + 512 + 43×1460 = 64316，不超限；
-// 第 44 段把缓存推到 44×1460 = 64240，计量 65776 超限，这个交互被丢弃。峰值就是 64240。
+// 65536 + 1460 - 20480 - 1024 = 45492。第一阶段以 RST 结束全部连接。第二阶段只有一条
+// 新连接和一个 70000 字节的请求：第 42 段之后是 2048 + 1024 + 42×1460 = 64392，不超限；
+// 第 43 段把缓存推到 43×1460 = 62780，计量 65852 超限，这个交互被丢弃。峰值就是 62780。
 func TestMemoryLimitUnderLoad(t *testing.T) {
 	const limit = 64 << 10
 	var mem []int64
@@ -353,11 +353,11 @@ func TestMemoryLimitUnderLoad(t *testing.T) {
 			t.Fatalf("Memory after packet %d = %d, over %d", i, m, limit)
 		}
 	}
-	// 第一阶段 10×3 + 10×10×4047/1460 取整（每条连接 28 段）+ 10 个 RST，第二阶段的握手之后是 1024。
-	if i := 30 + 10*28 + 10 + 3 - 1; mem[i] != 1024 {
-		t.Fatalf("Memory after the second handshake = %d, want 1024", mem[i])
+	// 第一阶段 10×3 + 10×10×4047/1460 取整（每条连接 28 段）+ 10 个 RST，第二阶段的握手之后是 2048。
+	if i := 30 + 10*28 + 10 + 3 - 1; mem[i] != 2048 {
+		t.Fatalf("Memory after the second handshake = %d, want 2048", mem[i])
 	}
-	if st.PeakBuffered != 64240 || st.Evicted < 1 || st.Exchanges != 101 {
+	if st.PeakBuffered != 62780 || st.Evicted < 1 || st.Exchanges != 101 {
 		t.Fatalf("stats: %+v", st)
 	}
 }
@@ -433,7 +433,7 @@ func freeListBounded(t *testing.T, m *match.Matcher) {
 
 // 超时或被丢弃的交互留在队列里当占位，它的缓存已经不计入内存计量，也要真的释放：
 // 1000 个交互各缓存了约 30 KB 的响应后超时，连接都还在，占位等着迟到的响应。
-// 此时计量是每条连接 1024 加每个占位 384，引擎留着的内存不超过 10 MB；
+// 此时计量是每条连接 2048 加每个占位 384，引擎留着的内存不超过 10 MB；
 // 占位留着缓存的话要多 30 MB。
 // 正则模式下占位的扫描器还缓存着没写完的行（每个约 29 KB），也要释放。
 func TestPlaceholderReleasesBuffer(t *testing.T) {
@@ -463,7 +463,7 @@ func placeholderReleasesBuffer(t *testing.T, m *match.Matcher) {
 		e.Advance(pkts[i].ts)
 	}
 	e.Advance(ms(40000))
-	if st := e.Stats(); st.Incomplete != n || st.PeakInFlight != n || e.Memory() != n*(1024+384) {
+	if st := e.Stats(); st.Incomplete != n || st.PeakInFlight != n || e.Memory() != n*(2048+384) {
 		t.Fatalf("stats: %+v, Memory %d", st, e.Memory())
 	}
 	pkts = nil
@@ -482,13 +482,14 @@ func placeholderReleasesBuffer(t *testing.T, m *match.Matcher) {
 }
 
 // 丢弃 Upgrade 请求时回放出的请求照常计入，仍然超限时同样被丢弃，不会等到连接释放时
-// 再以 no-response(closed) 输出。上限 2600。C1 的 Upgrade 请求 U 后面跟着管道化的
-// GET /TOKEN（缓存着等决定）；C2 的 SYN 使计量到 2048 + 512 + 44 = 2604，超限：
-// 丢弃 U（得 2048 + 384），回放出 GET /TOKEN（再加 512 + 23，得 2967），仍超限，
-// 丢弃它（已命中，不输出，得 2816），仍超限，释放最久没有包的 C1。
+// 再以 no-response(closed) 输出。上限 4600。C1 的 Upgrade 请求 U 后面跟着管道化的
+// GET /TOKEN（23 字节，在请求解析器里缓存着等决定，连同 56 字节的记录计 79）；
+// C2 的 SYN 使计量到 4096 + 1024 + 44 + 79 = 5243，超限：丢弃 U 并回放出 GET /TOKEN
+// （4096 + 384 + 1024 + 23 = 5527），仍超限，丢弃它（已命中，不输出，得 4864），
+// 仍超限，释放最久没有包的 C1，得 2048；C3 的 SYN 之后是 4096，不超限。
 func TestEvictedUpgradeReplayEvicted(t *testing.T) {
 	cli3 := netip.MustParseAddrPort("10.0.0.1:52816")
-	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 2600}, func(w *pcapgen.Writer) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 4600}, func(w *pcapgen.Writer) {
 		c1 := pcapgen.NewConn(w, cli1, srv)
 		c1.Handshake(ms(0))
 		c1.ClientSend(ms(1), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\nGET /TOKEN HTTP/1.1\r\n\r\n"))
@@ -549,13 +550,13 @@ func TestFreeListDropsLargeScanners(t *testing.T) {
 }
 
 // 缺请求的交互同样按开始时间参与丢弃：半路连接（没有握手）上先收到一个没有请求的大响应，
-// body 里有关键词。上限 3000：第二个包之后计量是 1024 + 512 + 2920 = 4456，超限，
-// 丢弃这个交互（已命中，不输出），剩下 1024 加占位的 384，连接本身不释放；
+// body 里有关键词。上限 4536：第一个包的状态行一到就定了角色，之后计量是 2048 + 1024 + 1460 = 4532；
+// 第二个包之后是 5992，超限，丢弃这个交互（已命中，不输出），剩下 2048 加占位的 384，连接本身不释放；
 // 剩下的响应由占位收下，收完时占位回收。
 // 之后同一连接上的请求和响应照常配对输出。
 func TestEvictNoRequestExchange(t *testing.T) {
 	var mem []int64
-	out, st := replayEach(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 3000}, func(w *pcapgen.Writer) {
+	out, st := replayEach(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 4536}, func(w *pcapgen.Writer) {
 		c := pcapgen.NewConn(w, cli1, srv)
 		c.ServerSend(ms(0), []byte("HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\nTOKEN"+strings.Repeat("x", 4995)))
 		c.ClientSend(ms(10), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
@@ -565,7 +566,7 @@ func TestEvictNoRequestExchange(t *testing.T) {
 		"GET /TOKEN HTTP/1.1\r\n\r\n"+
 		"HTTP/1.1 204 No Content\r\n\r\n")
 	// 响应 5042 字节分 4 段（1460×3 + 662），之后是请求和 204。
-	want := []int64{1024 + 512 + 1460, 1024 + 384, 1024 + 384, 1024, 1024 + 512 + 23, 1024}
+	want := []int64{2048 + 1024 + 1460, 2048 + 384, 2048 + 384, 2048, 2048 + 1024 + 23, 2048}
 	if !slices.Equal(mem, want) {
 		t.Fatalf("Memory after each packet = %v, want %v", mem, want)
 	}
@@ -576,13 +577,13 @@ func TestEvictNoRequestExchange(t *testing.T) {
 }
 
 // 占位按每个 384 字节计入内存计量：服务端一直不回响应、客户端隔一会儿就发一个请求时，
-// 超时留下的占位只增不减，计量随之增长，超过上限后和别的内存一样被回收。上限 2400，
+// 超时留下的占位只增不减，计量随之增长，超过上限后和别的内存一样被回收。上限 4000，
 // 每个请求 19 字节。R1（t=0）、R2（t=31）、R3（t=62）依次超时，各留一个占位：t=92.5 时
-// （客户端的一个纯 ACK）是 1024 + 3×384 = 2176。R4（t=93）使计量到 2176 + 531 = 2707，超限：
-// 丢弃 R4 后还有 2560，没有在途交互可丢，释放这条连接，回到 0。
+// （客户端的一个纯 ACK）是 2048 + 3×384 = 3200。R4（t=93）使计量到 3200 + 1043 = 4243，超限：
+// 丢弃 R4，留下第四个占位，得 3584。不计占位的话 R4 只有 3091，不会被丢弃。
 func TestPlaceholdersCounted(t *testing.T) {
 	var mem []int64
-	out, st := replayEach(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 2400}, func(w *pcapgen.Writer) {
+	out, st := replayEach(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 4000}, func(w *pcapgen.Writer) {
 		c := pcapgen.NewConn(w, cli1, srv)
 		c.Handshake(ms(-1))
 		for _, at := range []float64{0, 31000, 62000} {
@@ -592,12 +593,12 @@ func TestPlaceholdersCounted(t *testing.T) {
 		c.ClientSend(ms(93000), []byte("GET /r HTTP/1.1\r\n\r\n"))
 	}, func(e *engine.Engine, _ time.Time) { mem = append(mem, e.Memory()) })
 	check(t, out, "")
-	want := []int64{1024, 1024, 1024,
-		1024 + 531,         // R1
-		1024 + 384 + 531,   // R2，R1 已超时
-		1024 + 2*384 + 531, // R3
-		1024 + 3*384,       // ACK，R3 已超时
-		0,                  // R4：丢弃 R4，释放连接
+	want := []int64{2048, 2048, 2048,
+		2048 + 1043,         // R1
+		2048 + 384 + 1043,   // R2，R1 已超时
+		2048 + 2*384 + 1043, // R3
+		2048 + 3*384,        // ACK，R3 已超时
+		2048 + 4*384,        // R4：丢弃 R4，留下占位
 	}
 	if !slices.Equal(mem, want) {
 		t.Fatalf("Memory after each packet = %v, want %v", mem, want)
@@ -609,11 +610,12 @@ func TestPlaceholdersCounted(t *testing.T) {
 
 // 因内存上限丢弃的 Upgrade 请求像超时的一样按被拒处理：它后面管道化的请求马上照常解析、
 // 从丢弃时起计时，不等到连接关闭或输入结束。
-//   - 头部收到一半时被丢弃（上限 7400）：计量同 TestEvictedUpgradeRequestKeepsHeld，t=2 时丢弃 U；
+//   - 头部收到一半时被丢弃（上限 10472）：计量同 TestEvictedUpgradeRequestKeepsHeld，t=2 时丢弃 U；
 //     t=4 请求发完，GET /TOKEN 随即开始，t=30.004 超时输出。
-//   - 请求发完、后面的 GET /TOKEN 已经缓存着时被丢弃（上限 8000）：U 带 1000 字节的 X-Pad，1043 字节。
-//     B 的响应第三个包之后计量是 2048 + (512+1043) + (512+19) + 4380 = 8514，超限，丢弃 U，
-//     得 8514 - 1555 + 384 = 7343；回放出 GET /TOKEN（512 + 23），得 7878，不再超限。
+//   - 请求发完、后面的 GET /TOKEN 已经缓存着时被丢弃（上限 11000）：U 带 1000 字节的 X-Pad，1043 字节；
+//     缓存的 GET /TOKEN 连同记录计 79。B 的响应第三个包之后计量是
+//     4096 + (1024+1043) + 79 + (1024+19) + 4380 = 11665，超限，丢弃 U 并回放出 GET /TOKEN，
+//     得 11665 - 2067 + 384 - 79 + (1024+23) = 10950，不再超限。
 //     GET /TOKEN 从 t=2 起计时，t=30.002 超时输出；定位行时间是它所在包的时间 t=0。
 func TestEvictedUpgradeGivesUpDecision(t *testing.T) {
 	pad := "X-Pad: " + strings.Repeat("p", 991) + "\r\n" // 1000 字节
@@ -627,7 +629,7 @@ func TestEvictedUpgradeGivesUpDecision(t *testing.T) {
 	}{
 		{
 			name:  "evicted while head in progress",
-			limit: 7400,
+			limit: 10472,
 			u: func(u *pcapgen.Conn) {
 				u.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n"))
 			},
@@ -640,7 +642,7 @@ func TestEvictedUpgradeGivesUpDecision(t *testing.T) {
 		},
 		{
 			name:  "evicted while holding",
-			limit: 8000,
+			limit: 11000,
 			rest:  func(*pcapgen.Conn) {},
 			u: func(u *pcapgen.Conn) {
 				u.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n"+pad+"\r\nGET /TOKEN HTTP/1.1\r\n\r\n"))
@@ -671,11 +673,11 @@ func TestEvictedUpgradeGivesUpDecision(t *testing.T) {
 }
 
 // 丢弃按引擎看到交互开始的先后：Upgrade 请求 U 被拒后回放出的 GET /TOKEN，定位行时间是
-// 它所在包的时间 t=0，比 B（t=1）早，但它在 t=2 才开始，排在 B 后面。上限 5000。
-// 400 之后计量是 2048 + (512+19) + (512+23) = 3114；B 的响应第二个包之后是 6034，超限，
-// 先丢弃 B，得 6034 - 531 - 2920 + 384 = 2967，GET /TOKEN 照常收到响应、输出。
+// 它所在包的时间 t=0，比 B（t=1）早，但它在 t=2 才开始，排在 B 后面。上限 8072。
+// 400 之后计量是 4096 + (1024+19) + (1024+23) = 6186；B 的响应第二个包之后是 9106，超限，
+// 先丢弃 B，得 9106 - 1043 - 2920 + 384 = 5527，GET /TOKEN 照常收到响应、输出。
 func TestEvictOrderReplayedRequest(t *testing.T) {
-	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 5000}, func(w *pcapgen.Writer) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 8072}, func(w *pcapgen.Writer) {
 		u := pcapgen.NewConn(w, cli1, srv)
 		b := pcapgen.NewConn(w, cli2, srv)
 		u.Handshake(ms(-1))

@@ -256,7 +256,7 @@ func TestHelp(t *testing.T) {
 		"Usage: httpgrep [OPTION]... PATTERN [FILE]",
 		"-e PATTERN", "-E ", "--timeout DUR", "(default 30s)",
 		"--max-memory SIZE", "Approximate limit for buffered data (default 256M)",
-		"-E line buffers", "Upgrade", "resync",
+		"-E line buffers", "Upgrade", "partial header lines",
 		"--max-message SIZE", "(default 8M)", "--cpus N", "1 to 1024 (default 1)",
 		"--stats", "--help", "--version",
 		"K, M, G", "Exit status is 0 if an exchange matched, 1 if none matched, 2 on error.",
