@@ -595,8 +595,9 @@ func TestSlowPathNoUnboundedBuffer(t *testing.T) {
 	runtime.GC()
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
-	// 驻留内存不应超过 8 MiB 缓存加少量杂项。
-	if grew := int64(after.HeapInuse) - int64(before.HeapInuse); grew > 12*miB {
-		t.Fatalf("\\r-pattern must not buffer past 8 MiB, heap in use grew %d bytes", grew)
+	// 有上限时累计分配约 34 MiB（扩容轨迹），无上限时 166 MiB。
+	// 阈值取 64 MiB 区分两者。
+	if grew := int64(after.TotalAlloc) - int64(before.TotalAlloc); grew > 64*miB {
+		t.Fatalf("\\r-pattern must not buffer past 8 MiB, allocated %d bytes", grew)
 	}
 }
