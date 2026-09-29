@@ -155,15 +155,17 @@ func TestParseInterleaved(t *testing.T) {
 // 第 4 条：长短选项的各种写法。
 func TestParseOptionForms(t *testing.T) {
 	cases := []struct {
-		name string
-		args []string
-		want cli.Options
+		name     string
+		args     []string
+		timeout  time.Duration
+		patterns []string
+		regex    bool
 	}{
-		{"long= form", []string{"--timeout=5s", "kw"}, cli.Options{Timeout: 5 * time.Second}},
-		{"long space form", []string{"--timeout", "5s", "kw"}, cli.Options{Timeout: 5 * time.Second}},
-		{"short space form", []string{"-e", "kw"}, cli.Options{Patterns: []string{"kw"}}},
-		{"short glued form", []string{"-ekw"}, cli.Options{Patterns: []string{"kw"}}},
-		{"short combined", []string{"-Ee", "kw"}, cli.Options{Regex: true, Patterns: []string{"kw"}}},
+		{"long= form", []string{"--timeout=5s", "kw"}, 5 * time.Second, []string{"kw"}, false},
+		{"long space form", []string{"--timeout", "5s", "kw"}, 5 * time.Second, []string{"kw"}, false},
+		{"short space form", []string{"-e", "kw"}, 30 * time.Second, []string{"kw"}, false},
+		{"short glued form", []string{"-ekw"}, 30 * time.Second, []string{"kw"}, false},
+		{"short combined", []string{"-Ee", "kw"}, 30 * time.Second, []string{"kw"}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -171,18 +173,18 @@ func TestParseOptionForms(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Parse: %v", err)
 			}
-			if c.want.Timeout != 0 && got.Timeout != c.want.Timeout {
-				t.Errorf("Timeout = %v, want %v", got.Timeout, c.want.Timeout)
+			if got.Timeout != c.timeout {
+				t.Errorf("Timeout = %v, want %v", got.Timeout, c.timeout)
 			}
-			if got.Regex != c.want.Regex {
-				t.Errorf("Regex = %v, want %v", got.Regex, c.want.Regex)
+			if got.Regex != c.regex {
+				t.Errorf("Regex = %v, want %v", got.Regex, c.regex)
 			}
-			if c.want.Patterns != nil && len(got.Patterns) != len(c.want.Patterns) {
-				t.Fatalf("Patterns = %v, want %v", got.Patterns, c.want.Patterns)
+			if len(got.Patterns) != len(c.patterns) {
+				t.Fatalf("Patterns = %v, want %v", got.Patterns, c.patterns)
 			}
 			for i := range got.Patterns {
-				if c.want.Patterns != nil && got.Patterns[i] != c.want.Patterns[i] {
-					t.Errorf("Patterns[%d] = %q, want %q", i, got.Patterns[i], c.want.Patterns[i])
+				if got.Patterns[i] != c.patterns[i] {
+					t.Errorf("Patterns[%d] = %q, want %q", i, got.Patterns[i], c.patterns[i])
 				}
 			}
 		})
@@ -342,6 +344,14 @@ func TestParseHelpVersion(t *testing.T) {
 	// 没有关键词但带了 help 时也不报错；其他格式错误照常检查。
 	if _, err := cli.Parse([]string{"--help", "--foo"}); err == nil {
 		t.Error("未知选项仍应报错")
+	}
+	if _, err := cli.Parse([]string{"--version", "--foo"}); err == nil {
+		t.Error("--version 下未知选项仍应报错")
+	}
+	// help 不豁免位置参数个数限制：第一个是关键词，第二个是文件，第三个多余。
+	_, err = cli.Parse([]string{"--help", "a.pcap", "b.pcap", "c.pcap"})
+	if err == nil || err.Error() != "only one input file is supported" {
+		t.Fatalf("err = %v, want only one input file is supported", err)
 	}
 	// 不提供 -h。
 	if _, err := cli.Parse([]string{"-h"}); err == nil {
