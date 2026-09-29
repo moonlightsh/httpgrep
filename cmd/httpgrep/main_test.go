@@ -623,6 +623,11 @@ func TestClosedStdoutKilledBySIGPIPE(t *testing.T) {
 // 写标准输出出错（EPIPE 以外）：stdout 是只读打开的 /dev/null，写入得到 EBADF，
 // 报错并以退出码 2 结束；--cpus 4 时同样如此。
 func TestWriteErrorExits2(t *testing.T) {
+	if os.Getenv("HTTPGREP_BIN") != "" {
+		// 经包装脚本（比如 docker run）运行时，只读的 stdout 交给的是包装进程，
+		// httpgrep 自己写的是包装进程的管道，测不到它写失败时的行为。
+		t.Skip("HTTPGREP_BIN 指向外部程序，stdout 的文件描述符不会原样传给 httpgrep")
+	}
 	for _, cpus := range []string{"1", "4"} {
 		t.Run("cpus="+cpus, func(t *testing.T) {
 			ro, err := os.Open(os.DevNull)
