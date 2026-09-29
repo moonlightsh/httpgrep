@@ -307,7 +307,7 @@ func (s *reqSink) End(complete bool, ts time.Time) {
 	}
 }
 
-func (s *reqSink) Desync(off int64) {}
+func (s *reqSink) Desync(off int64) { s.c.e.stats.Desyncs++ }
 
 // Begin 实现 http1.Sink：响应按顺序归入第一个还没收完最终响应的交互。
 // 通常就是队首；队首的请求还没发完、响应却已收完时，它还留在队列里。
@@ -406,4 +406,4 @@ func (s *resSink) End(complete bool, ts time.Time) {
 	s.c.finish(x)
 }
 
-func (s *resSink) Desync(off int64) {}
+func (s *resSink) Desync(off int64) { s.c.e.stats.Desyncs++ }
