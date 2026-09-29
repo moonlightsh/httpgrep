@@ -2,6 +2,7 @@ package run_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -340,6 +341,43 @@ func TestRunInputErrors(t *testing.T) {
 				t.Fatalf("matched = %v, want %v", matched, tc.matched)
 			}
 			check(t, out.String(), tc.stdout)
+		})
+	}
+}
+
+// errWriter 的每次写入都失败。
+type errWriter struct{}
+
+var errDisk = errors.New("disk full")
+
+func (errWriter) Write([]byte) (int, error) { return 0, errDisk }
+
+// 输出写入失败：Run 返回这个错误，matched 为假；输入是一直不关的管道时也要马上返回，不等输入结束。
+func TestRunWriteError(t *testing.T) {
+	in := capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nX: HIT\r\n\r\n"))
+		c.ServerSend(ms(1), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+	for _, cpus := range []string{"1", "4"} {
+		t.Run("file/cpus="+cpus, func(t *testing.T) {
+			matched, _, err := run.Run(run.Config{Input: bytes.NewReader(in), Stdout: errWriter{}, Opts: opts(t, "--cpus", cpus, "HIT")})
+			if err != errDisk || matched {
+				t.Fatalf("matched %v err %v, want false %v", matched, err, errDisk)
+			}
+		})
+		t.Run("pipe/cpus="+cpus, func(t *testing.T) {
+			pr, pw := io.Pipe()
+			defer pw.Close()
+			ch := goRun(run.Config{Input: pr, Pipe: true, Stdout: errWriter{}, Opts: opts(t, "--cpus", cpus, "HIT")})
+			if _, err := pw.Write(in); err != nil {
+				t.Fatal(err)
+			}
+			r := wait(t, ch, 2*time.Second)
+			if r.err != errDisk || r.matched {
+				t.Fatalf("matched %v err %v, want false %v", r.matched, r.err, errDisk)
+			}
 		})
 	}
 }

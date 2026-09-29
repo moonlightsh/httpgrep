@@ -33,7 +33,8 @@ type sink struct {
 	w       *output.Writer
 	stderr  io.Writer
 	matched bool
-	err     error // 第一次写出失败的错误，之后不再写
+	err     error         // 第一次写出失败的错误，之后不再写
+	fail    chan struct{} // 写出失败时关闭，通知主循环停下
 }
 
 // emit 是引擎的 Emit 回调。
@@ -45,6 +46,7 @@ func (s *sink) emit(b *output.Block) {
 	}
 	if err := s.w.Write(b); err != nil {
 		s.err = err
+		close(s.fail)
 		return
 	}
 	s.matched = true
@@ -78,7 +80,7 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 	if cfg.TTY {
 		oo.Highlight = m.Highlight
 	}
-	out := &sink{w: output.NewWriter(cfg.Stdout, oo), stderr: cfg.Stderr}
+	out := &sink{w: output.NewWriter(cfg.Stdout, oo), stderr: cfg.Stderr, fail: make(chan struct{})}
 
 	n := max(o.CPUs, 1)
 	rd := startReader(cfg.Input, n)
@@ -141,6 +143,9 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 			onStop()
 		case <-grace:
 			done = true
+		case <-out.fail: // 输出已经坏了，不再结束在途交互
+			st = d.abort()
+			return out.matched, st, out.failed()
 		}
 	}
 	st = d.finish(l.clock)
