@@ -171,14 +171,16 @@ func decodeIPv6(ip []byte, origLen int, seg *Segment) Result {
 		return NotTCP
 	}
 	plen := int(binary.BigEndian.Uint16(ip[4:6]))
+	// Payload Length 字段已包含扩展头：报文总长 = 40 + plen
+	total := 40 + plen
 	if plen == 0 {
 		// 网卡 TSO 抓包：负载长度为 0，用线上长度推算
-		plen = origLen - 40
-		if plen < 0 {
-			return Malformed
-		}
+		total = origLen
 	}
-	return decodeTCP(ip, false, hl, hl+plen, seg)
+	if total < hl {
+		return Malformed
+	}
+	return decodeTCP(ip, false, hl, total, seg)
 }
 
 // addrPortFrom4 用 4 字节 IPv4 地址和端口拼 AddrPort，不分配内存。

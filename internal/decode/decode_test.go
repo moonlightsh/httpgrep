@@ -369,12 +369,42 @@ func TestIPv6ExtHeaders(t *testing.T) {
 			if string(seg.Payload) != "ext" {
 				t.Errorf("Payload = %q, want %q", seg.Payload, "ext")
 			}
+			if seg.Missing != 0 {
+				t.Errorf("Missing = %d, want 0（扩展头不能重复计入负载长度）", seg.Missing)
+			}
 		})
+	}
+
+	// 扩展头之后跟着链路层尾部字节时，尾部不能算进 Payload
+	trailer := append(ipv6ExtPacket(43, 1, tcp), make([]byte, 16)...)
+	var seg decode.Segment
+	if got := decode.Decode(pcap.LinkRaw, trailer, len(trailer), &seg); got != decode.OK {
+		t.Fatalf("trailer Decode = %v, want OK", got)
+	}
+	if string(seg.Payload) != "ext" {
+		t.Errorf("trailer Payload = %q, want %q", seg.Payload, "ext")
+	}
+	if seg.Missing != 0 {
+		t.Errorf("trailer Missing = %d, want 0", seg.Missing)
+	}
+
+	// 带 TSO（负载长度 0）的 IPv6 加扩展头
+	tsoFrame := ipv6ExtPacket(0, 1, tcpSegment(5, 6, 7, 8, 0x18, nil, []byte("v6tso")))
+	binary.BigEndian.PutUint16(tsoFrame[4:6], 0)
+	seg = decode.Segment{}
+	if got := decode.Decode(pcap.LinkRaw, tsoFrame, len(tsoFrame), &seg); got != decode.OK {
+		t.Fatalf("v6 TSO+ext Decode = %v, want OK", got)
+	}
+	if string(seg.Payload) != "v6tso" {
+		t.Errorf("v6 TSO+ext Payload = %q, want %q", seg.Payload, "v6tso")
+	}
+	if seg.Missing != 0 {
+		t.Errorf("v6 TSO+ext Missing = %d, want 0", seg.Missing)
 	}
 
 	// 分片头（44）返回 Fragment
 	frag := ipv6ExtPacket(44, 1, tcp)
-	var seg decode.Segment
+	seg = decode.Segment{}
 	if got := decode.Decode(pcap.LinkRaw, frag, len(frag), &seg); got != decode.Fragment {
 		t.Errorf("分片头 Decode = %v, want Fragment", got)
 	}
