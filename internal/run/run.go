@@ -81,7 +81,25 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 
 	rd := startReader(cfg.Input, 1)
 	defer close(rd.done)
-	h := <-rd.hdr
+	// Stop 关闭后最多再读 stopGrace，或者读到输入结束为止；读取协程卡在阻塞的 read 上时不等它。
+	stop := cfg.Stop
+	var grace <-chan time.Time
+	onStop := func() {
+		stop = nil
+		t := time.NewTimer(stopGrace)
+		grace = t.C
+	}
+	var h header
+	for waiting := true; waiting; {
+		select {
+		case h = <-rd.hdr:
+			waiting = false
+		case <-stop:
+			onStop()
+		case <-grace: // 文件头都没等到：当作没有任何包
+			return false, st, nil
+		}
+	}
 	if h.err != nil {
 		return false, st, h.err
 	}
@@ -109,15 +127,21 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 			done = l.batch(b)
 		case <-tick:
 			l.idle()
+		case <-stop:
+			onStop()
+		case <-grace:
+			done = true
 		}
 	}
 	st = d.finish(l.clock)
 	return out.matched, st, out.failed()
 }
 
-// 管道输入的真实时间兜底：每 idleCheck 检查一次，超过 idleAfter 没有新包时，
-// 时钟从最后一个包起按真实经过的时间往前推。
 const (
+	// stopGrace 是 Stop 关闭后最多再读的时间。
+	stopGrace = time.Second
+	// 管道输入的真实时间兜底：每 idleCheck 检查一次，超过 idleAfter 没有新包时，
+	// 时钟从最后一个包起按真实经过的时间往前推。
 	idleCheck = 200 * time.Millisecond
 	idleAfter = time.Second
 )

@@ -151,3 +151,63 @@ func TestRunPipeRealTimeFallback(t *testing.T) {
 		})
 	}
 }
+
+// Stop 关闭后最多再读 1 秒：读取卡在阻塞的 read 上（管道一直不关）时不等它，
+// 约 1 秒后结束在途交互，只有请求的交互以 no-response(eof) 输出。
+func TestRunStopGivesUpBlockedRead(t *testing.T) {
+	in := capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nX: HIT\r\n\r\n"))
+	})
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	stop := make(chan struct{})
+	var out bytes.Buffer
+	ch := goRun(run.Config{Input: pr, Stop: stop, Stdout: &out, Opts: opts(t, "HIT")})
+	if _, err := pw.Write(in); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	close(stop)
+	r := wait(t, ch, 3*time.Second)
+	if el := time.Since(start); el < 800*time.Millisecond || el > 2500*time.Millisecond {
+		t.Fatalf("Run returned %v after Stop, want about 1s", el)
+	}
+	if r.err != nil || !r.matched {
+		t.Fatalf("matched %v err %v", r.matched, r.err)
+	}
+	check(t, out.String(), "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(eof)\n"+
+		"GET /a HTTP/1.1\r\nX: HIT\r\n\r\n")
+}
+
+// Stop 关闭后 1 秒内写入的数据照样处理（连文件头都在 Stop 之后才到）；
+// 读到输入结束就收尾，不等满 1 秒。
+func TestRunStopReadsUntilEOF(t *testing.T) {
+	in := capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nX: HIT\r\n\r\n"))
+		c.ServerSend(ms(4), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+	pr, pw := io.Pipe()
+	stop := make(chan struct{})
+	var out bytes.Buffer
+	ch := goRun(run.Config{Input: pr, Stop: stop, Stdout: &out, Opts: opts(t, "HIT")})
+	start := time.Now()
+	close(stop)
+	time.Sleep(200 * time.Millisecond)
+	if _, err := pw.Write(in); err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+	r := wait(t, ch, 3*time.Second)
+	if el := time.Since(start); el > 900*time.Millisecond {
+		t.Fatalf("Run returned %v after Stop, want right after EOF", el)
+	}
+	if r.err != nil || !r.matched {
+		t.Fatalf("matched %v err %v", r.matched, r.err)
+	}
+	check(t, out.String(), "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 4.0ms\n"+
+		"GET /a HTTP/1.1\r\nX: HIT\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n")
+}
