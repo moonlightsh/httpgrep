@@ -36,6 +36,7 @@ type Reader struct {
 }
 
 // NewReader 读取并校验 24 字节的 pcap 文件头。
+// 底层 reader 报的非 EOF 错误原样返回，不归入 ErrEmpty/ErrPcapNG/ErrNotPcap。
 func NewReader(r io.Reader) (*Reader, error) {
 	br := bufio.NewReaderSize(r, 1<<20)
 	var hdr [fileHeaderLen]byte
@@ -43,6 +44,9 @@ func NewReader(r io.Reader) (*Reader, error) {
 	if err != nil {
 		if err == io.EOF {
 			return nil, ErrEmpty
+		}
+		if err != io.ErrUnexpectedEOF {
+			return nil, err
 		}
 		// 只有 4 字节且是 pcapng 的 magic 时也能识别。
 		if n >= 4 && binary.BigEndian.Uint32(hdr[0:4]) == 0x0a0d0d0a {
