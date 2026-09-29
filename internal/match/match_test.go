@@ -213,6 +213,29 @@ func TestHighlightRegex(t *testing.T) {
 
 }
 
+// 正则 Highlight 按 leftmost-longest 取区间（与 grep --color 一致）：
+// 前面的分支能匹配空串或较短的串时，不能遮住后面分支的真实命中。
+func TestHighlightRegexLeftmostLongest(t *testing.T) {
+	tests := []struct {
+		patterns []string
+		line     string
+		want     [][2]int
+	}{
+		{[]string{`x*`, `\d+`}, "a12b", [][2]int{{1, 3}}},
+		{[]string{`a`, `ab`}, "ab", [][2]int{{0, 2}}},
+		{[]string{`a|ab`}, "xab", [][2]int{{1, 3}}},
+	}
+	for _, tt := range tests {
+		m, err := match.Compile(tt.patterns, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := m.Highlight([]byte(tt.line)); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q on %q: got %v want %v", tt.patterns, tt.line, got, tt.want)
+		}
+	}
+}
+
 // 正则 c$ 命中 abc\r\n（\r 去掉后 c 在行尾）。
 func TestTrailingCRRegex(t *testing.T) {
 	m, _ := match.Compile([]string{`c$`}, true)

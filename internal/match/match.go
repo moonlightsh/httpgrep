@@ -17,6 +17,7 @@ const lineBufCap = 8 << 20
 type Matcher struct {
 	patterns [][]byte       // 字面关键词（不含空串）
 	re       *regexp.Regexp // 正则模式：合并编译后的行匹配
+	hl       *regexp.Regexp // 正则模式：re 的 leftmost-longest 版本，只给 Highlight 用
 	anyEmpty bool           // 某个关键词是空串（匹配所有行）
 	fast     bool           // 字面模式且关键词都不含 \r：走快速路径
 	maxLen   int            // 最长关键词的长度（快速路径用）
@@ -51,6 +52,12 @@ func Compile(patterns []string, regex bool) (*Matcher, error) {
 				return nil, &CompileError{Pattern: joined, Err: err.Error()}
 			}
 			m.re = re
+			// Highlight 用 leftmost-longest，与 grep --color 一致：否则排在前面、
+			// 能匹配空串或较短串的分支会遮住后面分支的命中（如 x*|\d+ 作用于 a12b）。
+			// 命中判断仍用 re：是否命中与匹配语义无关，leftmost-first 更快。
+			hl := regexp.MustCompile(joined) // 刚刚编译成功过，不会 panic
+			hl.Longest()
+			m.hl = hl
 		}
 		return m, nil
 	}
@@ -86,10 +93,11 @@ func (e *CompileError) Error() string {
 
 // Highlight 返回一行里所有命中的 [起, 止) 区间，按起点排序、互不重叠。
 // line 不含 \n；行尾的 \r 由调用方去掉。
+// 正则模式按 leftmost-longest 取区间，丢弃长度为 0 的区间。
 func (m *Matcher) Highlight(line []byte) [][2]int {
-	if m.re != nil {
+	if m.hl != nil {
 		var out [][2]int
-		for _, loc := range m.re.FindAllIndex(line, -1) {
+		for _, loc := range m.hl.FindAllIndex(line, -1) {
 			if loc[1] > loc[0] {
 				out = append(out, [2]int{loc[0], loc[1]})
 			}
