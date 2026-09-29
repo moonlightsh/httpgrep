@@ -356,3 +356,70 @@ func TestEmptyPatternFastPathDisabled(t *testing.T) {
 		t.Fatal("empty pattern should match any line")
 	}
 }
+
+// 正则缓存溢出后丢的是新到的字节：后面完整的行不受影响。
+func TestRegexBufferDropSemantics(t *testing.T) {
+	const miB = 1 << 20
+	m, _ := match.Compile([]string{"later-line"}, true)
+	s := m.NewScanner()
+	s.Write(make([]byte, 9*miB)) // 一整块超限的未完成行
+	s.Break()
+	s.Write([]byte("later-line\n")) // 溢出之后的新行正常匹配
+	if !s.Matched() {
+		t.Fatal("line after overflow should still match")
+	}
+}
+
+// 没有关键词时 Compile 成功且永不命中。
+func TestNoPatternsNeverMatches(t *testing.T) {
+	for _, regex := range []bool{false, true} {
+		m, err := match.Compile(nil, regex)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := m.NewScanner()
+		s.Write([]byte("anything\n"))
+		if s.Matched() {
+			t.Fatal("no patterns must never match")
+		}
+	}
+}
+
+// 多个字面关键词各自跨块：任一命中即置位。
+func TestFastPathMultiPatternAcrossChunks(t *testing.T) {
+	m, _ := match.Compile([]string{"4904", "19C6"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("aaa 4904 bbb\nno match here\n"))
+	if !s.Matched() {
+		t.Fatal("first pattern matched")
+	}
+	m2, _ := match.Compile([]string{"4904", "19C6"}, false)
+	s2 := m2.NewScanner()
+	s2.Write([]byte("xxx 49"))
+	s2.Write([]byte("04 yyy\n"))
+	if !s2.Matched() {
+		t.Fatal("match split across writes")
+	}
+}
+
+// Highlight 行尾 \r 由调用方去掉：Highlight 本身不再处理。
+func TestHighlightDoesNotStripCR(t *testing.T) {
+	m, _ := match.Compile([]string{"c"}, false)
+	got := m.Highlight([]byte("abc\r")) // 调用方应传去掉 \r 的行；这里只验证行为一致
+	want := [][2]int{{2, 3}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+}
+
+// 长关键词跨多块：候选字节超过一块时逐块携带。
+func TestFastPathLongPatternMultiChunk(t *testing.T) {
+	m, _ := match.Compile([]string{"the-long-keyword"}, false)
+	s := m.NewScanner()
+	for _, part := range []string{"xx", "the-l", "ong-key", "word", "yy"} {
+		s.Write([]byte(part))
+	}
+	if !s.Matched() {
+		t.Fatal("long pattern split across many writes")
+	}
+}
