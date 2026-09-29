@@ -275,3 +275,80 @@ func TestEvictWarnRateLimited(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 上限 64 KiB，100 个大请求并发：10 条连接上各有 10 个管道化的 POST（body 4000 字节），
+// 按 1460 字节一段在 10 条连接之间轮流发送，每个包一个时间戳。100 个请求的固定开销
+// 就超过了上限，要一直丢弃才能不超限。每个包之后（引擎在每个 Segment 之后执行上限）
+// 计量都不超过上限，比计划要求的“上限加一个包的大小”更严。
+//
+// PeakBuffered 的手算：第一阶段 10 条连接都在（10240），至少有一个在途交互（512），
+// 包处理完时计量不超过 65536，一个包最多带来 1460 字节，所以缓存的峰值不超过
+// 65536 + 1460 - 10240 - 512 = 56244。第一阶段以 RST 结束全部连接。第二阶段只有一条
+// 新连接和一个 70000 字节的请求：第 43 段之后是 1024 + 512 + 43×1460 = 64316，不超限；
+// 第 44 段把缓存推到 44×1460 = 64240，计量 65776 超限，这个交互被丢弃。峰值就是 64240。
+func TestMemoryLimitUnderLoad(t *testing.T) {
+	const limit = 64 << 10
+	var mem []int64
+	var sizes []int
+	out, st := replayEach(t, engine.Config{Matcher: matcher(t, "NEEDLE"), MaxMemory: limit, MaxMessage: limit}, func(w *pcapgen.Writer) {
+		tick := 0
+		next := func() time.Time { tick++; return t0.Add(time.Duration(tick) * time.Microsecond) }
+		send := func(c *pcapgen.Conn, b []byte) {
+			c.ClientSend(next(), b)
+			sizes = append(sizes, len(b))
+		}
+		var conns []*pcapgen.Conn
+		var streams [][]byte
+		for i := range 10 {
+			c := pcapgen.NewConn(w, netip.AddrPortFrom(cli1.Addr(), uint16(20000+i)), srv)
+			c.Handshake(next())
+			sizes = append(sizes, 0, 0, 0)
+			var s []byte
+			for j := range 10 {
+				s = append(s, "POST /up"+string(rune('0'+i))+string(rune('0'+j))+" HTTP/1.1\r\nContent-Length: 4000\r\n\r\n"...)
+				s = append(s, strings.Repeat("a", 4000)...)
+			}
+			conns, streams = append(conns, c), append(streams, s)
+		}
+		for more := true; more; {
+			more = false
+			for i, c := range conns {
+				if n := min(len(streams[i]), 1460); n > 0 {
+					send(c, streams[i][:n])
+					streams[i] = streams[i][n:]
+					more = true
+				}
+			}
+		}
+		for _, c := range conns {
+			c.ClientRst(next())
+			sizes = append(sizes, 0)
+		}
+		big := pcapgen.NewConn(w, netip.MustParseAddrPort("10.0.0.3:40000"), srv)
+		big.Handshake(next())
+		sizes = append(sizes, 0, 0, 0)
+		head := "POST /big HTTP/1.1\r\nContent-Length: 69953\r\n\r\n" // 47 字节，一共 70000 字节
+		body := []byte(head + strings.Repeat("b", 70000-len(head)))
+		for len(body) > 0 {
+			n := min(len(body), 1460)
+			send(big, body[:n])
+			body = body[n:]
+		}
+	}, func(e *engine.Engine, _ time.Time) { mem = append(mem, e.Memory()) })
+	check(t, out, "")
+	if len(mem) != len(sizes) {
+		t.Fatalf("%d packets, %d sizes", len(mem), len(sizes))
+	}
+	for i, m := range mem {
+		if m > limit {
+			t.Fatalf("Memory after packet %d = %d, over %d", i, m, limit)
+		}
+	}
+	// 第一阶段 10×3 + 10×10×4047/1460 取整（每条连接 28 段）+ 10 个 RST，第二阶段的握手之后是 1024。
+	if i := 30 + 10*28 + 10 + 3 - 1; mem[i] != 1024 {
+		t.Fatalf("Memory after the second handshake = %d, want 1024", mem[i])
+	}
+	if st.PeakBuffered != 64240 || st.Evicted < 1 || st.Exchanges != 101 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
