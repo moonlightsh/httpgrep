@@ -214,12 +214,28 @@ func TestSLL(t *testing.T) {
 		t.Errorf("SLL2 payload=%q sport=%d", seg.Payload, seg.Src.Port())
 	}
 
-	// SLL 协议号不是 IP 时返回 NotTCP
-	arpSLL := make([]byte, 16, 20)
-	binary.BigEndian.PutUint16(arpSLL[14:16], 0x0806)
-	arpSLL = append(arpSLL, 0, 0, 0, 0)
+	// SLL 协议号不是 IP 时返回 NotTCP（载荷用合法 IPv4 字节，确保拒绝的是协议号）
+	arpSLL := make([]byte, 16, 16+len(ip))
+	binary.BigEndian.PutUint16(arpSLL[14:16], 0x0806) // 协议号 ARP
+	arpSLL = append(arpSLL, ip...)
 	if got := decode.Decode(pcap.LinkLinuxSLL, arpSLL, len(arpSLL), &seg); got != decode.NotTCP {
 		t.Errorf("SLL ARP Decode = %v, want NotTCP", got)
+	}
+
+	// SLL2 协议号不是 IP 时同样返回 NotTCP
+	arpSLL2 := make([]byte, 20, 20+len(ip))
+	binary.BigEndian.PutUint16(arpSLL2[0:2], 0x0806) // SLL2 协议号在偏移 0
+	arpSLL2 = append(arpSLL2, ip...)
+	if got := decode.Decode(pcap.LinkLinuxSLL2, arpSLL2, len(arpSLL2), &seg); got != decode.NotTCP {
+		t.Errorf("SLL2 ARP Decode = %v, want NotTCP", got)
+	}
+
+	// SLL 头不足 16 字节、SLL2 头不足 20 字节返回 Malformed
+	if got := decode.Decode(pcap.LinkLinuxSLL, arpSLL[:15], 15, &seg); got != decode.Malformed {
+		t.Errorf("SLL 短头 Decode = %v, want Malformed", got)
+	}
+	if got := decode.Decode(pcap.LinkLinuxSLL2, arpSLL2[:19], 19, &seg); got != decode.Malformed {
+		t.Errorf("SLL2 短头 Decode = %v, want Malformed", got)
 	}
 }
 

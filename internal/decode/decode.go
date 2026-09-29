@@ -41,10 +41,18 @@ func stripLink(link pcap.LinkType, data []byte) ([]byte, Result) {
 		if len(data) < 16 {
 			return nil, Malformed
 		}
+		// SLL 协议号在偏移 14
+		if et := binary.BigEndian.Uint16(data[14:16]); et != ethTypeIPv4 && et != ethTypeIPv6 {
+			return nil, NotTCP
+		}
 		return data[16:], OK
 	case pcap.LinkLinuxSLL2:
 		if len(data) < 20 {
 			return nil, Malformed
+		}
+		// SLL2 协议号在偏移 0
+		if et := binary.BigEndian.Uint16(data[0:2]); et != ethTypeIPv4 && et != ethTypeIPv6 {
+			return nil, NotTCP
 		}
 		return data[20:], OK
 	}
