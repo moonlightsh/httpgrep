@@ -1,0 +1,10 @@
+# 并行开发用的 git worktree
+/.worktrees/
+# 编译产物
+/httpgrep
+/dist/
+*.test
+# 抓包文件可能含生产数据，一律不进仓库
+*.pcap
+*.pcapng
+*.cap
