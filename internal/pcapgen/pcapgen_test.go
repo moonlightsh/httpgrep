@@ -3,6 +3,7 @@ package pcapgen_test
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -102,6 +103,7 @@ func TestRecordTCPFields(t *testing.T) {
 	t0 := time.Unix(1700000000, 123456000)
 	t1 := t0.Add(1500 * time.Millisecond)
 	t2 := t0.Add(2 * time.Second)
+	t3 := t0.Add(3 * time.Second)
 	// 192.168.1.1→192.168.1.2 的头部按 16 位字求和会产生进位，
 	// 用来覆盖校验和的进位折叠（python 独立算出 0xb77c）。
 	carrySrc := netip.MustParseAddrPort("192.168.1.1:1")
@@ -120,20 +122,29 @@ func TestRecordTCPFields(t *testing.T) {
 		if err := w.Record(t2, pcapgen.Frame(pcap.LinkEthernet, carry), 0); err != nil {
 			t.Fatal(err)
 		}
+		// 显式 origLen：抓到 54 字节、原始长度 1514，模拟 snaplen 截断。
+		ack := pcapgen.TCP(client, server, 1006, 2001, decode.ACK, nil)
+		if err := w.Record(t3, pcapgen.Frame(pcap.LinkEthernet, ack), 1514); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	rows := tsharkFields(t, path, []string{"-o", "ip.check_checksum:TRUE"},
 		"frame.time_epoch", "ip.src", "ip.dst", "tcp.srcport", "tcp.dstport",
-		"tcp.seq_raw", "tcp.ack_raw", "tcp.flags", "tcp.len", "ip.checksum", "ip.checksum.status")
-	if len(rows) != 3 {
-		t.Fatalf("包数 = %d，想要 3", len(rows))
+		"tcp.seq_raw", "tcp.ack_raw", "tcp.flags", "tcp.len", "ip.checksum", "ip.checksum.status",
+		"frame.len", "frame.cap_len")
+	if len(rows) != 4 {
+		t.Fatalf("包数 = %d，想要 4", len(rows))
 	}
 	// 期望值逐字段手写：时间戳只核对到微秒（pcap 的精度）。
-	wantTime := []string{"1700000000.123456", "1700000001.623456", "1700000002.123456"}
+	// frame.len 是记录头里的原始长度，frame.cap_len 是抓到的长度：
+	// origLen 为 0 时两者都等于帧长（14+20+20=54，带 5 字节载荷为 59）。
+	wantTime := []string{"1700000000.123456", "1700000001.623456", "1700000002.123456", "1700000003.123456"}
 	want := [][]string{
-		{"10.0.0.1", "10.0.0.2", "12345", "80", "1000", "0", "0x0002", "0", "0x26ce", "1"},
-		{"10.0.0.1", "10.0.0.2", "12345", "80", "1001", "2001", "0x0018", "5", "0x26c9", "1"},
-		{"192.168.1.1", "192.168.1.2", "1", "2", "7", "0", "0x0002", "0", "0xb77c", "1"},
+		{"10.0.0.1", "10.0.0.2", "12345", "80", "1000", "0", "0x0002", "0", "0x26ce", "1", "54", "54"},
+		{"10.0.0.1", "10.0.0.2", "12345", "80", "1001", "2001", "0x0018", "5", "0x26c9", "1", "59", "59"},
+		{"192.168.1.1", "192.168.1.2", "1", "2", "7", "0", "0x0002", "0", "0xb77c", "1", "54", "54"},
+		{"10.0.0.1", "10.0.0.2", "12345", "80", "1006", "2001", "0x0010", "0", "0x26ce", "1", "1514", "54"},
 	}
 	for i, row := range rows {
 		if !strings.HasPrefix(row[0], wantTime[i]) {
@@ -611,6 +622,123 @@ func TestTCPPayloadTooLong(t *testing.T) {
 				}
 			}()
 			pcapgen.TCP(tc.src, tc.dst, 1, 0, decode.ACK, make([]byte, tc.n))
+		})
+	}
+}
+
+// Raw 按 fromClient 决定方向，序号、确认号、标志位和载荷原样写出。
+func TestConnRaw(t *testing.T) {
+	client := netip.MustParseAddrPort("10.0.0.1:50006")
+	server := netip.MustParseAddrPort("10.0.0.2:80")
+	ts := time.Unix(1700000000, 0)
+	path := writePcap(t, "raw.pcap", pcap.LinkEthernet, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, client, server)
+		c.Raw(ts, true, 5000, 6000, decode.ACK|decode.PSH, []byte("x"))
+		c.Raw(ts, false, 7000, 8000, decode.ACK, nil)
+	})
+	rows := tsharkFields(t, path, nil,
+		"tcp.srcport", "tcp.dstport", "tcp.seq_raw", "tcp.ack_raw", "tcp.flags", "tcp.len")
+	want := [][]string{
+		{"50006", "80", "5000", "6000", "0x0018", "1"},
+		{"80", "50006", "7000", "8000", "0x0010", "0"},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Errorf("srcport/dstport/seq/ack/flags/len = %v，想要 %v", rows, want)
+	}
+}
+
+// failWriter 第 failAt 次调用 Write 时返回 errBoom，之前的调用都成功；
+// calls 记录一共被调用了几次。
+type failWriter struct {
+	failAt int
+	calls  int
+}
+
+var errBoom = errors.New("boom")
+
+func (f *failWriter) Write(p []byte) (int, error) {
+	f.calls++
+	if f.calls == f.failAt {
+		return 0, errBoom
+	}
+	return len(p), nil
+}
+
+// 写出出错后 Writer 记住第一个错误：Err() 和之后的 Record 都返回它，
+// 并且不再调用底层 Write。每条记录调用两次 Write（记录头、帧）。
+func TestWriterError(t *testing.T) {
+	client := netip.MustParseAddrPort("10.0.0.1:50007")
+	server := netip.MustParseAddrPort("10.0.0.2:80")
+	ts := time.Unix(1700000000, 0)
+	frame := pcapgen.Frame(pcap.LinkEthernet, pcapgen.TCP(client, server, 1, 0, decode.SYN, nil))
+	cases := []struct {
+		name   string
+		failAt int
+		gen    func(w *pcapgen.Writer) error // 返回最后一次 Record 的错误，Conn 场景返回 nil
+		calls  int                           // 期望的 Write 调用次数，手算
+	}{
+		// 文件头失败：之后的 Record 直接返回错误，不写任何东西。
+		{"header", 1, func(w *pcapgen.Writer) error { return w.Record(ts, frame, 0) }, 1},
+		// 第一条记录的帧失败（第 3 次 Write）：第二条记录不再写。
+		{"record", 3, func(w *pcapgen.Writer) error {
+			_ = w.Record(ts, frame, 0)
+			return w.Record(ts, frame, 0)
+		}, 3},
+		// Conn：握手第二个包的记录头失败（第 4 次 Write），之后的包全部不写。
+		{"conn", 4, func(w *pcapgen.Writer) error {
+			c := pcapgen.NewConn(w, client, server)
+			c.Handshake(ts)
+			c.ClientSend(ts, []byte("hello"))
+			c.ClientFin(ts)
+			return nil
+		}, 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fw := &failWriter{failAt: tc.failAt}
+			w := pcapgen.NewWriter(fw, pcap.LinkEthernet)
+			if err := tc.gen(w); tc.name != "conn" && !errors.Is(err, errBoom) {
+				t.Errorf("Record 返回 %v，想要 %v", err, errBoom)
+			}
+			if err := w.Err(); !errors.Is(err, errBoom) {
+				t.Errorf("Err() = %v，想要 %v", err, errBoom)
+			}
+			if fw.calls != tc.calls {
+				t.Errorf("Write 调用 %d 次，想要 %d 次", fw.calls, tc.calls)
+			}
+		})
+	}
+}
+
+// Null 的协议族按抓包机字节序写，这里固定为小端（02 00 00 00）；
+// Loop 固定为网络字节序（00 00 00 02）。tshark 两种都认，只能直接读字节核对。
+func TestFrameNullLoopFamilyBytes(t *testing.T) {
+	c4 := netip.MustParseAddrPort("10.0.0.1:1")
+	s4 := netip.MustParseAddrPort("10.0.0.2:2")
+	c6 := netip.MustParseAddrPort("[2001:db8::1]:1")
+	s6 := netip.MustParseAddrPort("[2001:db8::2]:2")
+	ip4 := pcapgen.TCP(c4, s4, 1, 0, decode.SYN, nil)
+	ip6 := pcapgen.TCP(c6, s6, 1, 0, decode.SYN, nil)
+	cases := []struct {
+		name string
+		link pcap.LinkType
+		ip   []byte
+		want []byte
+	}{
+		{"null-ipv4", pcap.LinkNull, ip4, []byte{0x02, 0, 0, 0}},
+		{"null-ipv6", pcap.LinkNull, ip6, []byte{0x1e, 0, 0, 0}},
+		{"loop-ipv4", pcap.LinkLoop, ip4, []byte{0, 0, 0, 0x02}},
+		{"loop-ipv6", pcap.LinkLoop, ip6, []byte{0, 0, 0, 0x1e}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pcapgen.Frame(tc.link, tc.ip)
+			if !bytes.Equal(got[:4], tc.want) {
+				t.Errorf("前 4 字节 = % x，想要 % x", got[:4], tc.want)
+			}
+			if !bytes.Equal(got[4:], tc.ip) {
+				t.Errorf("链路头之后不是原 IP 包")
+			}
 		})
 	}
 }
