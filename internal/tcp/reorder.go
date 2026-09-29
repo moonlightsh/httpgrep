@@ -86,45 +86,60 @@ func (a *Assembler) insert(d *dir, i int, k chunk) {
 	d.arrive(k.off, k.end(), k.ts)
 }
 
+// arrivals 是一个方向的到达记录队列，q[head:] 有效。放在指针后面：多数连接没有乱序缓存，
+// 不让每个 dir 都多带这些字段（连接表的全表扫描对 conn 的大小敏感）。
+type arrivals struct {
+	q    []arrival
+	head int
+}
+
 // arrive 记下 [off, end) 在 ts 到达。每个缓存段正好一条没过时的记录；过时的记录
 // 超过缓存段数的两倍时整体清理一次，队列长度和缓存段数成正比，摊还 O(1)。
 func (d *dir) arrive(off, end int64, ts time.Time) {
-	if len(d.arr)-d.arrHead > 2*len(d.buf)+32 {
-		live := d.arr[:0]
-		for _, r := range d.arr[d.arrHead:] {
+	if d.arr == nil {
+		d.arr = &arrivals{}
+	}
+	a := d.arr
+	if len(a.q)-a.head > 2*len(d.buf)+32 {
+		live := a.q[:0]
+		for _, r := range a.q[a.head:] {
 			if r.end > d.next {
 				live = append(live, r)
 			}
 		}
-		clear(d.arr[len(live):])
-		d.arr, d.arrHead = live, 0
+		clear(a.q[len(live):])
+		a.q, a.head = live, 0
 	}
-	d.arr = append(d.arr, arrival{off: off, end: end, ts: ts})
+	a.q = append(a.q, arrival{off: off, end: end, ts: ts})
 }
 
 // oldest 返回最早到达、还没交付的缓存段的记录，缓存为空时返回 false。
 func (d *dir) oldest() (arrival, bool) {
+	a := d.arr
+	if a == nil {
+		return arrival{}, false
+	}
 	if len(d.buf) == 0 {
-		d.arr, d.arrHead = d.arr[:0], 0
+		a.q, a.head = a.q[:0], 0
 		return arrival{}, false
 	}
-	for d.arrHead < len(d.arr) && d.arr[d.arrHead].end <= d.next {
-		d.arrHead++
+	for a.head < len(a.q) && a.q[a.head].end <= d.next {
+		a.head++
 	}
-	if d.arrHead > len(d.arr)/2 {
+	if a.head > len(a.q)/2 {
 		// 过时的记录占了一半以上时压缩，队列长度不超过缓存段数的两倍左右。
-		n := copy(d.arr, d.arr[d.arrHead:])
-		d.arr, d.arrHead = d.arr[:n], 0
+		n := copy(a.q, a.q[a.head:])
+		a.q, a.head = a.q[:n], 0
 	}
-	if d.arrHead == len(d.arr) {
+	if a.head == len(a.q) {
 		return arrival{}, false
 	}
-	return d.arr[d.arrHead], true
+	return a.q[a.head], true
 }
 
 // clearBuf 丢弃这个方向的乱序缓存。
 func (d *dir) clearBuf() {
-	d.buf, d.bufLen, d.arr, d.arrHead = nil, 0, nil, 0
+	d.buf, d.bufLen, d.arr = nil, 0, nil
 }
 
 // limitReorder 在 side 方向乱序缓存超过 MaxReorderBytes 时，
@@ -193,6 +208,9 @@ func (a *Assembler) skipTo(c *conn, s Side, limit int64, ts time.Time) {
 // 仍没补上时，把它之前的空洞认定为缺口。
 func (a *Assembler) expireReorder(c *conn, s Side, now time.Time) {
 	d := &c.d[s]
+	if len(d.buf) == 0 && !d.finSeen {
+		return // 常见情况：没有乱序缓存，也没有等待中的 FIN
+	}
 	for {
 		k, ok := d.oldest()
 		if !ok {
