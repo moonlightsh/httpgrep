@@ -1,0 +1,657 @@
+package match_test
+
+import (
+	"reflect"
+	"runtime"
+	"strings"
+	"testing"
+
+	"httpgrep/internal/match"
+)
+
+// 字面匹配：区分大小写，任一关键词命中即命中。
+func TestLiteralCaseSensitive(t *testing.T) {
+	m, err := match.Compile([]string{"Device"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := m.NewScanner()
+	s.Write([]byte("POST /api/Device/bind HTTP/1.1\n"))
+	if !s.Matched() {
+		t.Fatal("want match for exact case")
+	}
+
+	m2, _ := match.Compile([]string{"device"}, false)
+	s2 := m2.NewScanner()
+	s2.Write([]byte("POST /api/device/bind HTTP/1.1\n"))
+	if !s2.Matched() {
+		t.Fatal("device is lowercase in the line, should match")
+	}
+
+	m3, _ := match.Compile([]string{"DEVICE"}, false)
+	s3 := m3.NewScanner()
+	s3.Write([]byte("POST /api/Device/bind HTTP/1.1\n"))
+	if s3.Matched() {
+		t.Fatal("want no match for different case")
+	}
+}
+
+// 多个关键词中任意一个命中就算命中。
+func TestAnyPatternMatches(t *testing.T) {
+	m, _ := match.Compile([]string{"zzz", "sn"}, false)
+	s := m.NewScanner()
+	s.Write([]byte(`{"sn":"4904"}` + "\n"))
+	if !s.Matched() {
+		t.Fatal("second pattern should match")
+	}
+}
+
+// 空关键词匹配任何行，包括空行。
+func TestEmptyPatternMatchesEverything(t *testing.T) {
+	m, err := match.Compile([]string{""}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := m.NewScanner()
+	s.Write([]byte("\n"))
+	if !s.Matched() {
+		t.Fatal("empty pattern should match empty line")
+	}
+}
+
+// 跨多次 Write 的命中也能找到；跨行、跨 Break 的不算。
+func TestMatchAcrossWritesNotLines(t *testing.T) {
+	m, _ := match.Compile([]string{"490419C6"}, false)
+	s := m.NewScanner()
+	s.Write([]byte(`{"sn":"4904`))
+	s.Write([]byte(`19C6117A"}` + "\n"))
+	if !s.Matched() {
+		t.Fatal("match spanning two Write calls should be found")
+	}
+
+	// 跨行不算：同一行内没有完整关键词。
+	m2, _ := match.Compile([]string{"490419C6"}, false)
+	s2 := m2.NewScanner()
+	s2.Write([]byte("4904\n19C6\n"))
+	if s2.Matched() {
+		t.Fatal("match must not span lines")
+	}
+
+	// 跨 Break 不算：Break 等同于行结束。
+	m3, _ := match.Compile([]string{"490419C6"}, false)
+	s3 := m3.NewScanner()
+	s3.Write([]byte("4904"))
+	s3.Break()
+	s3.Write([]byte("19C6\n"))
+	if s3.Matched() {
+		t.Fatal("match must not span Break")
+	}
+}
+
+// Reset 后可以重新扫描。
+func TestScannerReset(t *testing.T) {
+	m, _ := match.Compile([]string{"hit"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("a hit b\n"))
+	if !s.Matched() {
+		t.Fatal("expected match")
+	}
+	s.Reset()
+	if s.Matched() {
+		t.Fatal("after Reset, matched should be false")
+	}
+	s.Write([]byte("no such thing\n"))
+	s.Break()
+	if s.Matched() {
+		t.Fatal("should not match after reset on clean data")
+	}
+	// Reset 后未完成的行缓冲也清空：跨 Reset 拼接不算命中。
+	s.Reset()
+	s.Write([]byte("hi"))
+	s.Reset()
+	s.Write([]byte("t here\n"))
+	if s.Matched() {
+		t.Fatal("partial line buffer must be cleared by Reset")
+	}
+}
+
+// 行尾的 \r 不算行内容。
+func TestTrailingCRNotPartOfLine(t *testing.T) {
+	// 关键词 abc\r 不命中 abc\r\n（行内容是 abc）。
+	m, err := match.Compile([]string{"abc\r"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := m.NewScanner()
+	s.Write([]byte("abc\r\n"))
+	if s.Matched() {
+		t.Fatal("abc\\r should not match line abc (trailing CR stripped)")
+	}
+}
+
+// 正则按行匹配，^、$ 锚定行首行尾，支持 (?i)，多个正则合并编译。
+func TestRegexLineMatching(t *testing.T) {
+	m, err := match.Compile([]string{`^POST\s`, `(?i)content-type:\s*application/json`}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := m.NewScanner()
+	s.Write([]byte("post /x HTTP/1.1\r\n"))
+	if s.Matched() {
+		t.Fatal("lowercase post should not match ^POST\\s")
+	}
+	s.Write([]byte("Content-Type: application/json\r\n"))
+	if !s.Matched() {
+		t.Fatal("(?i) pattern should match case-insensitively")
+	}
+
+	// $ 锚定行尾。
+	m2, _ := match.Compile([]string{`json$`}, true)
+	s2 := m2.NewScanner()
+	s2.Write([]byte("Content-Type: application/json\r\n"))
+	if !s2.Matched() {
+		t.Fatal("$ should anchor at end of line with CR stripped")
+	}
+	s2r := m2.NewScanner()
+	s2r.Write([]byte("jsonx\n"))
+	if s2r.Matched() {
+		t.Fatal("jsonx should not match json$")
+	}
+}
+
+// 正则不合法时，Compile 的错误里包含这个关键词。
+func TestRegexCompileErrorContainsPattern(t *testing.T) {
+	_, err := match.Compile([]string{`ok`, `(unclosed`}, true)
+	if err == nil {
+		t.Fatal("expected compile error")
+	}
+	if !strings.Contains(err.Error(), "(unclosed") {
+		t.Fatalf("error should mention the bad pattern, got: %v", err)
+	}
+}
+
+// 正则模式下空关键词同样匹配所有行。
+func TestEmptyRegexPatternMatchesEverything(t *testing.T) {
+	m, err := match.Compile([]string{""}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := m.NewScanner()
+	s.Write([]byte("\n"))
+	if !s.Matched() {
+		t.Fatal("empty regex should match empty line")
+	}
+}
+
+// Highlight 返回一行里所有命中的 [起, 止) 区间，按起点排序、互不重叠。
+func TestHighlightLiteral(t *testing.T) {
+	m, _ := match.Compile([]string{"ab"}, false)
+	got := m.Highlight([]byte("abxabxab"))
+	want := [][2]int{{0, 2}, {3, 5}, {6, 8}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+
+	// 重叠的区间合并：关键词 ab 和 bc 在 abc 里重叠。
+	m3, _ := match.Compile([]string{"ab", "bc"}, false)
+	got3 := m3.Highlight([]byte("abc"))
+	want3 := [][2]int{{0, 3}}
+	if !reflect.DeepEqual(got3, want3) {
+		t.Fatalf("overlapping: got %v want %v", got3, want3)
+	}
+}
+
+// 正则模式用 FindAllIndex，丢弃长度为 0 的区间。
+func TestHighlightRegex(t *testing.T) {
+	m, _ := match.Compile([]string{`\d+`, `x*`}, true)
+	got := m.Highlight([]byte("a12b345c"))
+	// \d+ 命中 12 和 345；x* 命中空区间（丢弃）以及非重叠的空串。
+	want := [][2]int{{1, 3}, {4, 7}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+
+}
+
+// 正则 c$ 命中 abc\r\n（\r 去掉后 c 在行尾）。
+func TestTrailingCRRegex(t *testing.T) {
+	m, _ := match.Compile([]string{`c$`}, true)
+	s := m.NewScanner()
+	s.Write([]byte("abc\r\n"))
+	if !s.Matched() {
+		t.Fatal("c$ should match abc with trailing CR stripped")
+	}
+}
+
+// 正则模式缓存没写完的行，上限 8 MiB，超出的部分不参与匹配。
+func TestRegexLineBufferCap(t *testing.T) {
+	const miB = 1 << 20
+	m, _ := match.Compile([]string{"near-start"}, true)
+	s := m.NewScanner()
+	head := make([]byte, 100)
+	copy(head, []byte("near-start"))
+	s.Write(head)
+	s.Write(make([]byte, 9*miB)) // 远超 8 MiB
+	s.Break()
+	if !s.Matched() {
+		t.Fatal("keyword within first 8 MiB should match")
+	}
+
+	m2, _ := match.Compile([]string{"past-the-cap"}, true)
+	s2 := m2.NewScanner()
+	s2.Write(make([]byte, 8*miB+1024)) // 先填满并溢出
+	s2.Write([]byte("past-the-cap"))   // 溢出之后的部分不参与匹配
+	s2.Break()
+	if s2.Matched() {
+		t.Fatal("keyword past the 8 MiB cap must not match")
+	}
+}
+
+// 快速路径：关键词跨任意切分点写入都能命中（穷举切分位置）。
+func TestFastPathSplitExhaustive(t *testing.T) {
+	line := []byte("xx490419C6117A0087747906yy")
+	pats := []string{"490419C6", "11A", "zz"}
+	for split := 0; split <= len(line); split++ {
+		m, _ := match.Compile(pats, false)
+		s := m.NewScanner()
+		s.Write(line[:split])
+		s.Write(line[split:])
+		if !s.Matched() {
+			t.Fatalf("split at %d: fast path missed match", split)
+		}
+	}
+	// 不含命中时绝不误报：跨块边界拼接不出关键词。
+	miss := []byte("4904xx19C6")
+	for split := 0; split <= len(miss); split++ {
+		m, _ := match.Compile([]string{"490419C6"}, false)
+		s := m.NewScanner()
+		s.Write(miss[:split])
+		s.Write(miss[split:])
+		s.Break()
+		if s.Matched() {
+			t.Fatalf("split at %d: fast path false positive", split)
+		}
+	}
+}
+
+// 快速路径不跨 Break：跨 Break 的候选字节要作废。
+func TestFastPathBreakInvalidatesTail(t *testing.T) {
+	m, _ := match.Compile([]string{"490419C6"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("xx4904"))
+	s.Break()
+	s.Write([]byte("19C6yy\n"))
+	if s.Matched() {
+		t.Fatal("fast path must not match across Break")
+	}
+}
+
+// 快速路径不跨行：行内不完整的关键词不命中。
+func TestFastPathNoCrossLine(t *testing.T) {
+	m, _ := match.Compile([]string{"490419C6"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("4904xx\r\n19C6\n"))
+	if s.Matched() {
+		t.Fatal("fast path must not match across lines")
+	}
+}
+
+// 关键词含 \r 时不走快速路径（按行处理）。
+func TestPatternWithCRSlowPath(t *testing.T) {
+	if _, err := match.Compile([]string{"a\r\nb"}, false); err == nil {
+		t.Fatal("pattern containing \\n should be rejected by Compile")
+	}
+	// 关键词含 \r 但确实在某行内容里出现：\r 在行中间时算行内容。
+	m2, _ := match.Compile([]string{"a\rb"}, false)
+	s2 := m2.NewScanner()
+	s2.Write([]byte("xxa\r"))
+	s2.Write([]byte("byy\n"))
+	if !s2.Matched() {
+		t.Fatal("mid-line \\r is part of line content")
+	}
+}
+
+// 空关键词不走快速路径，空行也命中。
+func TestEmptyPatternFastPathDisabled(t *testing.T) {
+	m, _ := match.Compile([]string{"", "zz"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("whatever"))
+	s.Break()
+	if !s.Matched() {
+		t.Fatal("empty pattern should match any line")
+	}
+}
+
+// 正则缓存溢出后丢的是新到的字节：后面完整的行不受影响。
+func TestRegexBufferDropSemantics(t *testing.T) {
+	const miB = 1 << 20
+	m, _ := match.Compile([]string{"later-line"}, true)
+	s := m.NewScanner()
+	s.Write(make([]byte, 9*miB)) // 一整块超限的未完成行
+	s.Break()
+	s.Write([]byte("later-line\n")) // 溢出之后的新行正常匹配
+	if !s.Matched() {
+		t.Fatal("line after overflow should still match")
+	}
+}
+
+// 没有关键词时 Compile 成功且永不命中。
+func TestNoPatternsNeverMatches(t *testing.T) {
+	for _, regex := range []bool{false, true} {
+		m, err := match.Compile(nil, regex)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := m.NewScanner()
+		s.Write([]byte("anything\n"))
+		if s.Matched() {
+			t.Fatal("no patterns must never match")
+		}
+	}
+}
+
+// 多个字面关键词各自跨块：任一命中即置位。
+func TestFastPathMultiPatternAcrossChunks(t *testing.T) {
+	m, _ := match.Compile([]string{"4904", "19C6"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("aaa 4904 bbb\nno match here\n"))
+	if !s.Matched() {
+		t.Fatal("first pattern matched")
+	}
+	m2, _ := match.Compile([]string{"4904", "19C6"}, false)
+	s2 := m2.NewScanner()
+	s2.Write([]byte("xxx 49"))
+	s2.Write([]byte("04 yyy\n"))
+	if !s2.Matched() {
+		t.Fatal("match split across writes")
+	}
+}
+
+// Highlight 行尾 \r 由调用方去掉：Highlight 本身不再处理。
+func TestHighlightDoesNotStripCR(t *testing.T) {
+	m, _ := match.Compile([]string{"c"}, false)
+	got := m.Highlight([]byte("abc\r")) // 调用方应传去掉 \r 的行；这里只验证行为一致
+	want := [][2]int{{2, 3}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+}
+
+// 长关键词跨多块：候选字节超过一块时逐块携带。
+func TestFastPathLongPatternMultiChunk(t *testing.T) {
+	m, _ := match.Compile([]string{"the-long-keyword"}, false)
+	s := m.NewScanner()
+	for _, part := range []string{"xx", "the-l", "ong-key", "word", "yy"} {
+		s.Write([]byte(part))
+	}
+	if !s.Matched() {
+		t.Fatal("long pattern split across many writes")
+	}
+}
+
+// 8 MiB 行缓存上限对以 \n 结束的完整行同样生效（正则模式）。
+func TestRegexLineCapCompleteLine(t *testing.T) {
+	const miB = 1 << 20
+	// 反例 1：分两次 Write，第二次以 \n 结束这一行。
+	m, _ := match.Compile([]string{"past-the-cap"}, true)
+	s := m.NewScanner()
+	s.Write(make([]byte, 8*miB+1024))
+	s.Write([]byte("past-the-cap\n"))
+	if s.Matched() {
+		t.Fatal("keyword past the 8 MiB cap must not match (split writes)")
+	}
+
+	// 反例 2：一次 Write，行在块内以 \n 结束。
+	m2, _ := match.Compile([]string{"past-the-cap"}, true)
+	s2 := m2.NewScanner()
+	s2.Write(append(make([]byte, 9*miB), "past-the-cap\n"...))
+	if s2.Matched() {
+		t.Fatal("keyword past the 8 MiB cap must not match (single write)")
+	}
+}
+
+// 命中之后 Write 直接返回：不再缓存、零分配。
+func TestEarlyReturnZeroAlloc(t *testing.T) {
+	m, _ := match.Compile([]string{"hit"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("a hit b\n"))
+	if !s.Matched() {
+		t.Fatal("expected match")
+	}
+	// 慢路径（正则模式）去掉提前返回后会继续缓存数据：
+	// 命中后写入远超 8 MiB 的无换行数据，若仍在处理，
+	// 缓存会涨到 8 MiB；提前返回时内存零增长。用 MemStats 观察。
+	mr, _ := match.Compile([]string{"hit"}, true)
+	sr := mr.NewScanner()
+	sr.Write([]byte("a hit b\n"))
+	if !sr.Matched() {
+		t.Fatal("expected match (regex)")
+	}
+	flood := make([]byte, 1<<20)
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < 100; i++ {
+		sr.Write(flood)
+	}
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	// 命中后允许零星分配，但绝不应缓存近 8 MiB。
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
+		t.Fatalf("Write after match must not process data; allocated %d bytes", grew)
+	}
+	// 命中后再写入、Break 都不改变状态。
+	s.Write([]byte("more data without newline"))
+	s.Break()
+	s.Write([]byte("tail"))
+	if !s.Matched() || !sr.Matched() {
+		t.Fatal("Matched must stay true after match")
+	}
+}
+
+// Highlight 忽略空关键词：空关键词只影响命中判断，不产生区间；
+// 混用时非空关键词的真实位置不受影响。
+func TestHighlightIgnoresEmptyPattern(t *testing.T) {
+	m, _ := match.Compile([]string{"", "zz"}, false)
+	got := m.Highlight([]byte("axzzb"))
+	want := [][2]int{{2, 4}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mixed: got %v want %v", got, want)
+	}
+
+	// 只有空关键词：没有任何非空区间。
+	m2, _ := match.Compile([]string{""}, false)
+	if got2 := m2.Highlight([]byte("abc")); got2 != nil {
+		t.Fatalf("literal empty-only: got %v want nil", got2)
+	}
+	// 空行。
+	if got3 := m2.Highlight(nil); got3 != nil {
+		t.Fatalf("literal empty-only nil line: got %v want nil", got3)
+	}
+
+	// 正则模式同理：空正则只会产生长度 0 的匹配，丢弃后为空。
+	m4, _ := match.Compile([]string{""}, true)
+	if got4 := m4.Highlight([]byte("abc")); got4 != nil {
+		t.Fatalf("regex empty-only: got %v want nil", got4)
+	}
+}
+
+// 慢路径处理完整行不分配内存（s.buf 复用容量、行内直接处理不拷贝）。
+func TestSlowPathZeroAllocPerLine(t *testing.T) {
+	// 正则模式。
+	mr, _ := match.Compile([]string{"zz"}, true)
+	sr := mr.NewScanner()
+	line := []byte("no match line here\n")
+	sr.Write(line) // 预热，让 buf 拿到容量
+	allocs := testing.AllocsPerRun(100, func() {
+		sr.Write(line)
+	})
+	if allocs != 0 {
+		t.Fatalf("regex line processing must not allocate, got %v allocs", allocs)
+	}
+
+	// 含 \r 的字面关键词走慢路径。数据不命中（a\rc 不是 a\rb），
+	// 每轮先缓存 "xxa\r" 再用 "c\n" 补完整行，走到 s.buf 追加和复用。
+	// 切片放在闭包外预分配，避免测试自身引入分配。
+	mc, _ := match.Compile([]string{"a\rb"}, false)
+	sc := mc.NewScanner()
+	head := []byte("xxa\r")
+	tail := []byte("c\n")
+	sc.Write(head) // 预热，让 buf 拿到容量
+	sc.Write(tail)
+	allocsC := testing.AllocsPerRun(100, func() {
+		sc.Write(head)
+		sc.Write(tail)
+	})
+	if sc.Matched() {
+		t.Fatal("\\r-pattern test data must not match, otherwise the early return is measured")
+	}
+	if allocsC != 0 {
+		t.Fatalf("\\r-pattern line processing must not allocate, got %v allocs", allocsC)
+	}
+}
+
+// 快速路径 Write+Break 每轮零分配；正则路径 Write+Break 同样。
+// 数据不含关键词，确保每轮都真的走到 fastTail 更新和 Break，而不是命中后的提前返回。
+func TestZeroAllocPerBreakCycle(t *testing.T) {
+	m, _ := match.Compile([]string{"keyword"}, false) // maxLen=7，fastTail 候选 6 字节
+	s := m.NewScanner()
+	chunk := []byte("some line without kw\n")
+	s.Write(chunk) // 预热 fastTail
+	s.Break()
+	allocs := testing.AllocsPerRun(100, func() {
+		s.Write(chunk)
+		s.Break()
+	})
+	if s.Matched() {
+		t.Fatal("test data must not match, otherwise the early return is measured")
+	}
+	if allocs != 0 {
+		t.Fatalf("fast path Write+Break must not allocate, got %v allocs", allocs)
+	}
+
+	mr, _ := match.Compile([]string{"keyword"}, true)
+	sr := mr.NewScanner()
+	partial := []byte("some line without kw") // 不以 \n 结束，Break 处理缓存的行
+	sr.Write(partial)
+	sr.Break()
+	allocsR := testing.AllocsPerRun(100, func() {
+		sr.Write(partial)
+		sr.Break()
+	})
+	if sr.Matched() {
+		t.Fatal("regex test data must not match")
+	}
+	if allocsR != 0 {
+		t.Fatalf("regex Write+Break must not allocate, got %v allocs", allocsR)
+	}
+}
+
+// Write+Break 和 Reset 循环零内存增长（含 tiny 分配，用 TotalAlloc 观察）。
+func TestBreakResetNoMemoryGrowth(t *testing.T) {
+	m, _ := match.Compile([]string{"keyword"}, false) // maxLen=7，fastTail 候选 6 字节
+	s := m.NewScanner()
+	chunk := []byte("some line without kw\n")
+	s.Write(chunk)
+	s.Break()
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < 1000; i++ {
+		s.Write(chunk)
+		s.Break()
+		s.Reset()
+	}
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	if s.Matched() {
+		t.Fatal("test data must not match, otherwise the early return is measured")
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew != 0 {
+		t.Fatalf("Write/Break/Reset cycle must not allocate anything, allocated %d bytes", grew)
+	}
+}
+
+// 空关键词和含 \r 的字面关键词不需要无限缓存：
+// 一个不含 \n 的大块写入后内存不应线性增长。
+func TestSlowPathNoUnboundedBuffer(t *testing.T) {
+	// 空关键词：遇到 \n 或 Break 直接置位，无需缓存数据。
+	m, _ := match.Compile([]string{""}, false)
+	s := m.NewScanner()
+	s.Write([]byte("no newline at all"))
+	s.Break()
+	if !s.Matched() {
+		t.Fatal("empty pattern should match via Break on line without newline")
+	}
+
+	// 含 \r 的字面关键词：超过 8 MiB 的未完成行不再缓存。
+	const miB = 1 << 20
+	m2, _ := match.Compile([]string{"a\rb"}, false)
+	s2 := m2.NewScanner()
+	flood := make([]byte, miB) // 测试自身的分配计入基准之前
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < 32; i++ { // 32 MiB，远超 8 MiB
+		s2.Write(flood)
+	}
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	// 有上限时累计分配约 34 MiB（扩容轨迹），无上限时 166 MiB。
+	// 阈值取 64 MiB 区分两者。
+	if grew := int64(after.TotalAlloc) - int64(before.TotalAlloc); grew > 64*miB {
+		t.Fatalf("\\r-pattern must not buffer past 8 MiB, allocated %d bytes", grew)
+	}
+}
+
+// 关键词含 \n 时 Compile 报错（契约要求调用方已按换行拆好）。
+func TestCompileRejectsNewlinePattern(t *testing.T) {
+	for _, regex := range []bool{false, true} {
+		_, err := match.Compile([]string{"a\nb"}, regex)
+		if err == nil {
+			t.Fatalf("regex=%v: expected error for pattern with newline", regex)
+		}
+		if !strings.Contains(err.Error(), "a\nb") && !strings.Contains(err.Error(), `a\nb`) {
+			t.Fatalf("error should contain the pattern: %v", err)
+		}
+	}
+}
+
+// Highlight 不去掉行尾 \r：关键词 "c\r" 命中 "abc\r" 的 [2,4)。
+func TestHighlightKeepsCRInLine(t *testing.T) {
+	m, _ := match.Compile([]string{"c\r"}, false)
+	got := m.Highlight([]byte("abc\r"))
+	want := [][2]int{{2, 4}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+}
+
+// 空关键词：这一行的内容用不上，没写完的行不需要缓存。
+// 写入 16 MiB 无换行数据，内存不应增长到 8 MiB 缓存的量级；之后 \n 立即命中。
+func TestEmptyPatternNoLineBuffer(t *testing.T) {
+	for _, regex := range []bool{false, true} {
+		m, _ := match.Compile([]string{"", "zz"}, regex)
+		s := m.NewScanner()
+		flood := make([]byte, 1<<20)
+		runtime.GC()
+		var before runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for i := 0; i < 16; i++ {
+			s.Write(flood)
+		}
+		var after runtime.MemStats
+		runtime.ReadMemStats(&after)
+		if s.Matched() {
+			t.Fatalf("regex=%v: line not ended yet, must not match", regex)
+		}
+		if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
+			t.Fatalf("regex=%v: empty pattern must not buffer line, allocated %d bytes", regex, grew)
+		}
+		s.Write([]byte("tail\n"))
+		if !s.Matched() {
+			t.Fatalf("regex=%v: empty pattern must match once line ends", regex)
+		}
+	}
+}
