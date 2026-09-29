@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net/netip"
+	"reflect"
 	"testing"
 	"time"
 
@@ -406,13 +407,23 @@ func TestTTYColors(t *testing.T) {
 		}
 	})
 	t.Run("高亮一行内跨 Piece", func(t *testing.T) {
+		var gotLines []string
+		record := func(line []byte) [][2]int {
+			gotLines = append(gotLines, string(line))
+			return hl(line)
+		}
 		b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
 			Messages: []output.Message{{Pieces: []output.Piece{
 				{Data: []byte("ab")},
 				{Data: []byte("hit\r\n")},
 				{Data: []byte("no hit here\n")},
 			}}}}
-		got := string(render(t, output.Options{Location: tz, TTY: true, Highlight: hl}, b))
+		got := string(render(t, output.Options{Location: tz, TTY: true, Highlight: record}, b))
+		// 传给 Highlight 的行去掉 \n 和行尾的 \r
+		wantLines := []string{"abhit", "no hit here"}
+		if !reflect.DeepEqual(gotLines, wantLines) {
+			t.Errorf("Highlight 收到的行不正确\n得到: %q\n期望: %q", gotLines, wantLines)
+		}
 		want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
 			"ab\x1b[01;31mt\x1b[m\x1b[01;31m \x1b[m\x1b[01;31mt\x1b[m\r\n" +
 			"no \x1b[01;31mt\x1b[m\x1b[01;31m \x1b[m\x1b[01;31mt\x1b[m here\n"
