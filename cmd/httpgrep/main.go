@@ -21,11 +21,23 @@ func httpgrep(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "httpgrep: %v\nTry 'httpgrep --help' for more information.\n", err)
 		return 2
 	}
-	f, _ := os.Open(opts.File)
+	f, err := os.Open(opts.File)
+	if err != nil {
+		return fail(stderr, err)
+	}
 	defer f.Close()
-	matched, _, _ := run.Run(run.Config{Input: f, Stdout: stdout, Stderr: stderr, Opts: opts})
+	matched, _, err := run.Run(run.Config{Input: f, Stdout: stdout, Stderr: stderr, Opts: opts})
+	if err != nil {
+		return fail(stderr, err)
+	}
 	if !matched {
 		return 1
 	}
 	return 0
+}
+
+// fail 写出错信息，返回退出码 2。
+func fail(stderr io.Writer, err error) int {
+	fmt.Fprintf(stderr, "httpgrep: %v\n", err)
+	return 2
 }

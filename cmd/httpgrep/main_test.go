@@ -179,3 +179,26 @@ func TestBadArgumentsExit2(t *testing.T) {
 		})
 	}
 }
+
+// 输入出错：stderr 写 "httpgrep: <错误>"，没有提示行，退出码 2。
+func TestInputErrorsExit2(t *testing.T) {
+	// 一个 pcapng 的 Section Header Block，长 28 字节。
+	pcapng := []byte("\x0a\x0d\x0d\x0a\x1c\x00\x00\x00\x4d\x3c\x2b\x1a\x01\x00\x00\x00" +
+		"\xff\xff\xff\xff\xff\xff\xff\xff\x1c\x00\x00\x00")
+	missing := filepath.Join(t.TempDir(), "missing.pcap")
+	for _, tc := range []struct {
+		name   string
+		file   string
+		stderr string
+	}{
+		{"pcapng", writeFile(t, pcapng), "httpgrep: pcapng is not supported; capture with tcpdump -w\n"},
+		{"empty", writeFile(t, nil), "httpgrep: empty input\n"},
+		{"not-pcap", writeFile(t, []byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")),
+			"httpgrep: input is not a pcap stream; pipe it from tcpdump -U -w -\n"},
+		{"missing", missing, "httpgrep: open " + missing + ": no such file or directory\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want(t, runBin(t, nil, "x", tc.file), "", tc.stderr, 2)
+		})
+	}
+}
