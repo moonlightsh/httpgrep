@@ -211,3 +211,25 @@ func TestReadsStdin(t *testing.T) {
 		})
 	}
 }
+
+// -e 可以写多次，命中任意一个就输出；-E 把关键词按正则处理。
+func TestPatternOptions(t *testing.T) {
+	for _, tc := range []struct {
+		args   []string
+		stdout string
+	}{
+		{[]string{"-e", "TOKEN-42", "-e", "No Content"}, block1 + "--\n" + block2},
+		{[]string{"-e", "No Content", "-e", "NOPE"}, block2},
+		{[]string{"-E", "TOKEN-[0-9]+"}, block1},
+		{[]string{"TOKEN-[0-9]+"}, ""},
+		{[]string{"-E", "-e", "NOPE", "-e", "No C.ntent"}, block2},
+	} {
+		t.Run(fmt.Sprint(tc.args), func(t *testing.T) {
+			code := 0
+			if tc.stdout == "" {
+				code = 1
+			}
+			want(t, runBin(t, bytes.NewReader(twoExchanges(t)), tc.args...), tc.stdout, "", code)
+		})
+	}
+}
