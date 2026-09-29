@@ -242,6 +242,7 @@ func (s *reqSink) Raw(sec http1.Section, b []byte) {
 		// 回放 Upgrade 请求之后缓存的字节时，LastTS 是这些字节所在缓存段的时间。
 		x.reqLast = s.c.req.LastTS()
 		x.raw(x.reqMsg, sec, b)
+		s.c.e.addBuffered(len(b))
 	}
 }
 
@@ -344,6 +345,7 @@ func (s *resSink) Raw(sec http1.Section, b []byte) {
 	if x := s.cur; x != nil {
 		x.resLast = s.c.now
 		x.raw(x.resMsg, sec, b)
+		s.c.e.addBuffered(len(b))
 	}
 }
 

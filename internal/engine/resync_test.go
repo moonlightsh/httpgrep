@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"bytes"
 	"testing"
 
 	"httpgrep/internal/engine"
@@ -153,5 +154,43 @@ func TestTLSConnectionOrphans(t *testing.T) {
 	check(t, out, "")
 	if st.Exchanges != 0 || st.Orphans != 2 || st.Desyncs != 2 {
 		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 非 HTTP 连接的数据只扫描、不缓存：内存计量不随它的数据量增长。
+// 作为对照，同样大小的 HTTP 响应 body 会被缓存，计量随之增长。
+// 只比较两种规模的差值，不依赖连接和交互的固定开销。
+func TestNonHTTPNotBuffered(t *testing.T) {
+	tls := func(n int) func(w *pcapgen.Writer) {
+		return func(w *pcapgen.Writer) {
+			c := pcapgen.NewConn(w, cli1, srv)
+			c.Handshake(ms(-1))
+			c.ClientSend(ms(0), tlsRecord(200))
+			for i := range n {
+				c.ServerSend(ms(float64(1+i)), tlsRecord(1400))
+			}
+		}
+	}
+	httpRes := func(n int) func(w *pcapgen.Writer) {
+		return func(w *pcapgen.Writer) {
+			c := pcapgen.NewConn(w, cli1, srv)
+			c.Handshake(ms(-1))
+			c.ClientSend(ms(0), []byte("GET / HTTP/1.1\r\n\r\n"))
+			c.ServerSend(ms(1), []byte("HTTP/1.1 200 OK\r\n\r\n"))
+			for i := range n {
+				c.ServerSend(ms(float64(2+i)), bytes.Repeat([]byte("x"), 1000))
+			}
+		}
+	}
+	cfg := engine.Config{Matcher: matcher(t, "TOKEN-42")}
+	_, small := replay(t, cfg, tls(1))
+	_, large := replay(t, cfg, tls(100))
+	if small.PeakBuffered != large.PeakBuffered {
+		t.Fatalf("TLS PeakBuffered grows with data: %d -> %d", small.PeakBuffered, large.PeakBuffered)
+	}
+	_, small = replay(t, cfg, httpRes(1))
+	_, large = replay(t, cfg, httpRes(100))
+	if d := large.PeakBuffered - small.PeakBuffered; d != 99*1000 {
+		t.Fatalf("HTTP PeakBuffered grows by %d, want %d", d, 99*1000)
 	}
 }

@@ -29,6 +29,7 @@ type Engine struct {
 
 	free     []*exchange // 回收的交互，连同缓存和扫描器一起复用
 	inFlight int
+	buffered int64 // 在途交互缓存的消息字节数
 
 	// 输出块和它引用的切片，每次输出复用。
 	block  output.Block
@@ -129,7 +130,17 @@ func (e *Engine) finish(c *conn, x *exchange) {
 		e.emit(c, x, st)
 	}
 	e.inFlight--
+	e.buffered -= int64(len(x.buf))
 	e.free = append(e.free, x)
+}
+
+// addBuffered 记下在途交互新缓存的 n 字节，更新峰值。
+// 只计消息字节；乱序缓存和固定开销在内存上限（E4）里计入。
+func (e *Engine) addBuffered(n int) {
+	e.buffered += int64(n)
+	if e.buffered > e.stats.PeakBuffered {
+		e.stats.PeakBuffered = e.buffered
+	}
 }
 
 // emit 把交互组装成输出块交给 Emit。
