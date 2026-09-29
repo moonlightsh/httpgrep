@@ -454,6 +454,30 @@ func TestTTYColors(t *testing.T) {
 			t.Errorf("nil Highlight 不正确\n得到: %q\n期望: %q", got, want)
 		}
 	})
+	t.Run("重叠或乱序区间不 panic", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			ranges [][2]int
+			want   string
+		}{
+			// 重叠：[3,6) 与 [0,5) 重叠的部分并入前一个区间，只剩 [5,6)
+			{"重叠", [][2]int{{0, 5}, {3, 6}}, "\x1b[01;31mabcde\x1b[m\x1b[01;31mf\x1b[mg\n"},
+			// 乱序：[0,2) 落在已写出的 [4,6) 之前，跳过
+			{"乱序", [][2]int{{4, 6}, {0, 2}}, "abcd\x1b[01;31mef\x1b[mg\n"},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				hl := func([]byte) [][2]int { return c.ranges }
+				b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+					Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte("abcdefg\n")}}}}}
+				got := string(render(t, output.Options{Location: tz, TTY: true, Highlight: hl}, b))
+				want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" + c.want
+				if got != want {
+					t.Errorf("区间处理不正确\n得到: %q\n期望: %q", got, want)
+				}
+			})
+		}
+	})
 	t.Run("末尾没有换行的行也高亮", func(t *testing.T) {
 		b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
 			Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte("xx hit yy")}}}}}

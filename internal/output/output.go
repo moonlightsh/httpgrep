@@ -61,7 +61,8 @@ type Block struct {
 type Options struct {
 	TTY       bool
 	Location  *time.Location             // 为 nil 时用 time.Local
-	Highlight func(line []byte) [][2]int // 只在 TTY 模式下使用，可以为 nil
+	Highlight func(line []byte) [][2]int // 只在 TTY 模式下使用，可以为 nil。
+	// Highlight 返回的区间应按起点排序、互不重叠；否则重叠部分并入前一个区间，乱序区间跳过，不会 panic
 }
 
 // Writer 把 Block 渲染后写给底层 writer。
@@ -182,7 +183,9 @@ func (w *Writer) flushLine(newline bool) {
 		ranges = w.opt.Highlight(line)
 	}
 	// 按区间顺序分段写：区间外原样转义，区间内先写起始码，转义后写结束码。
-	// 分段转义与整行转义结果相同：转义是逐字节局部的，不依赖上下文。
+	// 区间应按起点排序、互不重叠；越界的部分夹到行内，与已写部分重叠的部分并入
+	// 前一个区间，完全落在已写部分之前的区间跳过。
+	// 区间边界切在多字节序列中间时，两边各自按孤立字节处理，结果可能与整行转义不同。
 	prev := 0
 	for _, r := range ranges {
 		lo, hi := r[0], r[1]
@@ -191,6 +194,9 @@ func (w *Writer) flushLine(newline bool) {
 		}
 		if hi > len(line) {
 			hi = len(line)
+		}
+		if lo < prev {
+			lo = prev
 		}
 		if lo >= hi {
 			continue
