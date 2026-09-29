@@ -221,3 +221,113 @@ func TestMarkerLines(t *testing.T) {
 		})
 	}
 }
+
+func TestBinaryBodyOmitted(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  output.Message
+		want string
+	}{
+		{
+			name: "gzip + json，带 matched",
+			msg: output.Message{
+				Binary: true, ContentType: "application/json", ContentEncoding: "gzip",
+				BodySize: 3482, BodyMatched: true,
+				Pieces: []output.Piece{
+					{Kind: output.PieceHead, Data: []byte("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n")},
+					{Kind: output.PieceBody, Data: []byte("\x1f\x8b abc")},
+				},
+			},
+			want: "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n[binary body omitted: gzip, application/json, 3.4 KB, matched]\n",
+		},
+		{
+			name: "只有类型",
+			msg: output.Message{
+				Binary: true, ContentType: "application/x-protobuf", BodySize: 12595,
+				Pieces: []output.Piece{
+					{Kind: output.PieceBody, Data: []byte("\x00\x01")},
+				},
+			},
+			want: "[binary body omitted: application/x-protobuf, 12.3 KB]\n",
+		},
+		{
+			name: "都没有",
+			msg: output.Message{
+				Binary: true, BodySize: 512,
+				Pieces: []output.Piece{{Kind: output.PieceBody, Data: []byte("\x00")}},
+			},
+			want: "[binary body omitted: 512 B]\n",
+		},
+		{
+			name: "恰好 1024",
+			msg: output.Message{
+				Binary: true, BodySize: 1024,
+				Pieces: []output.Piece{{Kind: output.PieceBody, Data: []byte("\x00")}},
+			},
+			want: "[binary body omitted: 1.0 KB]\n",
+		},
+		{
+			name: "1 MiB",
+			msg: output.Message{
+				Binary: true, ContentType: "application/octet-stream", BodySize: 1048576,
+				Pieces: []output.Piece{{Kind: output.PieceBody, Data: []byte("\x00")}},
+			},
+			want: "[binary body omitted: application/octet-stream, 1.0 MB]\n",
+		},
+		{
+			name: "InBody 的 gap 也换掉",
+			msg: output.Message{
+				Binary: true, BodySize: 2048,
+				Pieces: []output.Piece{
+					{Kind: output.PieceHead, Data: []byte("H\r\n\r\n")},
+					{Kind: output.PieceBody, Data: []byte("\x00a")},
+					{Kind: output.PieceGap, N: 1460, InBody: true},
+					{Kind: output.PieceBody, Data: []byte("b")},
+				},
+			},
+			want: "H\r\n\r\n[binary body omitted: 2.0 KB]\n",
+		},
+		{
+			name: "body 后的 trailer 保留",
+			msg: output.Message{
+				Binary: true, BodySize: 100,
+				Pieces: []output.Piece{
+					{Kind: output.PieceBody, Data: []byte("\x00")},
+					{Kind: output.PieceTrailer, Data: []byte("X-Trailer: v\r\n")},
+					{Kind: output.PieceUnparsed, Data: []byte("junk")},
+				},
+			},
+			want: "[binary body omitted: 100 B]\nX-Trailer: v\r\njunk\n",
+		},
+		{
+			name: "非 body 的 gap 不启动替换",
+			msg: output.Message{
+				Binary: true, BodySize: 100,
+				Pieces: []output.Piece{
+					{Kind: output.PieceGap, N: 10, InBody: false},
+					{Kind: output.PieceBody, Data: []byte("\x00rest")},
+				},
+			},
+			want: "[gap: 10 bytes missing]\n[binary body omitted: 100 B]\n",
+		},
+		{
+			name: "非二进制不动",
+			msg: output.Message{
+				Binary: false, ContentType: "text/plain", BodySize: 100, BodyMatched: true,
+				Pieces: []output.Piece{{Kind: output.PieceBody, Data: []byte("plain body\r\n")}},
+			},
+			want: "plain body\r\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+				Messages: []output.Message{tt.msg}}
+			got := string(render(t, output.Options{Location: tz}, b))
+			want := "1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\n" + tt.want
+			if got != want {
+				t.Errorf("二进制占位不正确\n得到: %q\n期望: %q", got, want)
+			}
+		})
+	}
+}

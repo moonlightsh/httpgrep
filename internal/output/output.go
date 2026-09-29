@@ -91,28 +91,36 @@ func (w *Writer) Write(b *Block) error {
 }
 
 func (w *Writer) writeMessage(m *Message) {
+	if m.Binary {
+		w.writeBinaryMessage(m)
+		return
+	}
 	for i := range m.Pieces {
-		p := &m.Pieces[i]
-		switch p.Kind {
-		case PieceGap, PieceTruncated:
-			if len(w.buf) > 0 && w.buf[len(w.buf)-1] != '\n' {
-				w.buf = append(w.buf, '\n')
-			}
-			if p.Kind == PieceGap {
-				w.buf = append(w.buf, "[gap: "...)
-				w.buf = strconv.AppendInt(w.buf, p.N, 10)
-				w.buf = append(w.buf, " bytes missing]\n"...)
-			} else {
-				w.buf = append(w.buf, "[truncated: "...)
-				w.buf = strconv.AppendInt(w.buf, p.N, 10)
-				w.buf = append(w.buf, " bytes over --max-message]\n"...)
-			}
-		default:
-			w.buf = append(w.buf, p.Data...)
-		}
+		w.writePiece(&m.Pieces[i])
 	}
 	if n := len(w.buf); n > 0 && w.buf[n-1] != '\n' {
 		w.buf = append(w.buf, '\n')
+	}
+}
+
+// writePiece 写一个 Piece：数据原样追加，标记类 Piece 写成标记行。
+func (w *Writer) writePiece(p *Piece) {
+	switch p.Kind {
+	case PieceGap, PieceTruncated:
+		if len(w.buf) > 0 && w.buf[len(w.buf)-1] != '\n' {
+			w.buf = append(w.buf, '\n')
+		}
+		if p.Kind == PieceGap {
+			w.buf = append(w.buf, "[gap: "...)
+			w.buf = strconv.AppendInt(w.buf, p.N, 10)
+			w.buf = append(w.buf, " bytes missing]\n"...)
+		} else {
+			w.buf = append(w.buf, "[truncated: "...)
+			w.buf = strconv.AppendInt(w.buf, p.N, 10)
+			w.buf = append(w.buf, " bytes over --max-message]\n"...)
+		}
+	default:
+		w.buf = append(w.buf, p.Data...)
 	}
 }
 
@@ -161,7 +169,75 @@ func (w *Writer) writeLocationLine(b *Block) {
 	w.buf = append(w.buf, '\n')
 }
 
-// appendAddr 追加 "地址:端口"，IPv6 加方括号。
+// writeBinaryMessage 写二进制 body 的消息：从第一个 body 类 Piece 起的连续一段
+// 换成一行占位，其余 Piece 原样输出。
+func (w *Writer) writeBinaryMessage(m *Message) {
+	i := 0
+	for ; i < len(m.Pieces); i++ {
+		if isBodyPiece(&m.Pieces[i]) {
+			break
+		}
+		w.writePiece(&m.Pieces[i])
+	}
+	// 占位行
+	if len(w.buf) > 0 && w.buf[len(w.buf)-1] != '\n' {
+		w.buf = append(w.buf, '\n')
+	}
+	w.buf = append(w.buf, "[binary body omitted:"...)
+	if m.ContentEncoding != "" || m.ContentType != "" {
+		if m.ContentEncoding != "" {
+			w.buf = append(w.buf, ' ')
+			w.buf = append(w.buf, m.ContentEncoding...)
+		}
+		if m.ContentType != "" {
+			if m.ContentEncoding != "" {
+				w.buf = append(w.buf, ", "...)
+			} else {
+				w.buf = append(w.buf, ' ')
+			}
+			w.buf = append(w.buf, m.ContentType...)
+		}
+		w.buf = append(w.buf, ", "...)
+	}
+	w.buf = append(w.buf, ' ')
+	w.buf = appendSize(w.buf, m.BodySize)
+	if m.BodyMatched {
+		w.buf = append(w.buf, ", matched"...)
+	}
+	w.buf = append(w.buf, "]\n"...)
+	// body 之后的部分
+	for ; i < len(m.Pieces); i++ {
+		if !isBodyPiece(&m.Pieces[i]) {
+			break
+		}
+	}
+	for ; i < len(m.Pieces); i++ {
+		w.writePiece(&m.Pieces[i])
+	}
+	if n := len(w.buf); n > 0 && w.buf[n-1] != '\n' {
+		w.buf = append(w.buf, '\n')
+	}
+}
+
+// isBodyPiece 判断 Piece 是否属于 body 段。
+func isBodyPiece(p *Piece) bool {
+	return p.Kind == PieceBody || (p.Kind == PieceGap && p.InBody)
+}
+
+// appendSize 按人的习惯追加大小：小于 1024 写 N B，小于 1 MiB 写 %.1f KB，否则 %.1f MB。
+func appendSize(buf []byte, n int64) []byte {
+	switch {
+	case n < 1024:
+		buf = strconv.AppendInt(buf, n, 10)
+		return append(buf, " B"...)
+	case n < 1024*1024:
+		buf = strconv.AppendFloat(buf, float64(n)/1024, 'f', 1, 64)
+		return append(buf, " KB"...)
+	default:
+		buf = strconv.AppendFloat(buf, float64(n)/(1024*1024), 'f', 1, 64)
+		return append(buf, " MB"...)
+	}
+}
 func appendAddr(buf []byte, a netip.AddrPort) []byte {
 	return a.AppendTo(buf)
 }
