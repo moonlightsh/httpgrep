@@ -331,3 +331,38 @@ func TestBinaryBodyOmitted(t *testing.T) {
 		})
 	}
 }
+
+func TestTTYEscape(t *testing.T) {
+	// 转义规则：C0（\t \r \n 除外）、DEL、合法 UTF-8 C1（C2 80-9F）转 \xNN；
+	// 不成 UTF-8 的 0x80-0x9F 单字节也转；其他字节原样。
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"普通文本不变", "hello world", "hello world"},
+		{"制表符换行回车保留", "a\tb\r\nc", "a\tb\r\nc"},
+		{"ESC 转义", "\x1b[0m", "\\x1b[0m"},
+		{"NUL 转义", "a\x00b", "a\\x00b"},
+		{"其他 C0", "\x01\x02\x1f", "\\x01\\x02\\x1f"},
+		{"DEL", "\x7f", "\\x7f"},
+		{"合法 C1 两字节都转", "a\xc2\x85b", "a\\xc2\\x85b"},
+		{"合法 C1 上界 C2 9F", "\xc2\x9f", "\\xc2\\x9f"},
+		{"C2 A0 不转", "\xc2\xa0", "\xc2\xa0"},
+		{"孤立的 0x85 转义", "a\x85b", "a\\x85b"},
+		{"GBK 文本原样", "\xd6\xd0\xce\xc4", "\xd6\xd0\xce\xc4"},
+		{"截断的 C2 序列原样", "a\xc2", "a\xc2"},
+		{"0x80 孤立转义", "\x80", "\\x80"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+				Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte(tt.in)}}}}}
+			got := string(render(t, output.Options{Location: tz, TTY: true}, b))
+			want := "1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\n" + tt.want + "\n"
+			if got != want {
+				t.Errorf("转义不正确\n得到: %q\n期望: %q", got, want)
+			}
+		})
+	}
+}

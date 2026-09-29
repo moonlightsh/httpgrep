@@ -120,8 +120,76 @@ func (w *Writer) writePiece(p *Piece) {
 			w.buf = append(w.buf, " bytes over --max-message]\n"...)
 		}
 	default:
-		w.buf = append(w.buf, p.Data...)
+		if w.opt.TTY {
+			w.appendEscaped(p.Data)
+		} else {
+			w.buf = append(w.buf, p.Data...)
+		}
 	}
+}
+
+// appendEscaped 把内容里的控制字符转成可见的 \xNN 形式后追加：
+// \t、\r、\n 以外的 C0 字符和 DEL；合法 UTF-8 编码的 C1 字符（C2 80–C2 9F，
+// 两字节都转义）；以及不成 UTF-8 序列的单个 0x80–0x9F 字节。其他字节原样。
+func (w *Writer) appendEscaped(data []byte) {
+	for i := 0; i < len(data); {
+		c := data[i]
+		switch {
+		case c < 0x20 && c != '\t' && c != '\r' && c != '\n', c == 0x7f:
+			w.appendHex(c)
+			i++
+		case c == 0xc2 && i+1 < len(data) && data[i+1] >= 0x80 && data[i+1] <= 0x9f:
+			// 合法 UTF-8 的 C1 字符，两个字节都转义
+			w.appendHex(c)
+			w.appendHex(data[i+1])
+			i += 2
+		case c >= 0x80 && c <= 0x9f:
+			// 不成 UTF-8 序列的单字节（前面不是能和它组成序列的引导字节）
+			w.appendHex(c)
+			i++
+		case c >= 0xc2 && c < 0xf0 && i+1 < len(data):
+			// 多字节 UTF-8 序列，原样拷贝
+			n := utf8SeqLen(c)
+		if i+n <= len(data) && validSeq(data[i:i+n]) {
+			w.buf = append(w.buf, data[i:i+n]...)
+			i += n
+		} else {
+			w.buf = append(w.buf, c)
+			i++
+			}
+		default:
+			w.buf = append(w.buf, c)
+			i++
+		}
+	}
+}
+
+// utf8SeqLen 返回引导字节对应的序列长度（假定是合法引导字节）。
+func utf8SeqLen(c byte) int {
+	switch {
+	case c < 0xe0:
+		return 2
+	case c < 0xf0:
+		return 3
+	default:
+		return 4
+	}
+}
+
+// validSeq 判断一个 UTF-8 序列的续字节是否合法。
+func validSeq(s []byte) bool {
+	for _, b := range s[1:] {
+		if b&0xc0 != 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// appendHex 追加小写十六进制形式的 \xNN。
+func (w *Writer) appendHex(c byte) {
+	const hexdigits = "0123456789abcdef"
+	w.buf = append(w.buf, '\\', 'x', hexdigits[c>>4], hexdigits[c&0xf])
 }
 
 // writeLocationLine 写定位行。
