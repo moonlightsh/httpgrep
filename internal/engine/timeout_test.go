@@ -155,3 +155,45 @@ func TestTimeoutUpgradeResumesHeld(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// Upgrade 请求超时之后，它的 400 才迟到：占位收下 400，不再回放一次；
+// 缓存在它后面的请求已经在超时时回放，和随后的 204 配对。耗时从它最后一个缓存段（t=1）算起。
+func TestTimeoutUpgradeLateRefusal(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\nX-Id: TOKEN-U\r\n\r\n"))
+		c.ClientSend(ms(1000), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(35000), []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"))
+		c.ServerSend(ms(36000), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n"+
+		"GET /chat HTTP/1.1\r\nUpgrade: websocket\r\nX-Id: TOKEN-U\r\n\r\n"+
+		"--\n"+
+		"2026-09-28 15:30:13.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 35000.0ms\n"+
+		"GET /TOKEN HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 204 No Content\r\n\r\n")
+	if st.Late != 1 || st.Complete != 1 || st.NoResponseTimeout != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 迟到的 400 属于已经超时的 Upgrade 请求，不能当成对正在发送的下一个 Upgrade 请求的决定：
+// 第二个 Upgrade 请求照常等自己的 101，101 之后隧道里像请求的字节不再解析、不输出。
+func TestTimeoutUpgradeLateRefusalNotForNext(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\nX-Id: TOKEN-U\r\n\r\n"))
+		c.ClientSend(ms(32000), []byte("GET /chat2 HTTP/1.1\r\nUpgrade: websocket\r\n"))
+		c.ServerSend(ms(35000), []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"))
+		c.ClientSend(ms(36000), []byte("\r\n"))
+		c.ClientSend(ms(37000), []byte("GET /TOKEN-IN-TUNNEL HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(38000), []byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n"+
+		"GET /chat HTTP/1.1\r\nUpgrade: websocket\r\nX-Id: TOKEN-U\r\n\r\n")
+	if st.Late != 1 || st.Exchanges != 2 || st.Complete != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
