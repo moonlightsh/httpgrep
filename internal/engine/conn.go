@@ -315,10 +315,16 @@ func (c *conn) Reset(ts time.Time) {
 }
 
 // Closed 实现 tcp.Handler：连接已经从连接表移除，结束剩下的在途交互。
+// 空闲释放不是线上看到的关闭：在途交互是等不到数据而结束的，按超时标记。
+// 排在后面、还没轮到计时的请求也一样：按排队规则它们本该更晚才超时，但连接已经
+// 连续 2 倍交互超时没有任何包，同样是等不到响应。
 func (c *conn) Closed(reason tcp.CloseReason, ts time.Time) {
 	why := noRespClosed
-	if reason == tcp.CloseEOF {
+	switch reason {
+	case tcp.CloseEOF:
 		why = noRespEOF
+	case tcp.CloseIdle:
+		why = noRespTimeout
 	}
 	c.close(why, ts)
 }

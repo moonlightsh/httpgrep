@@ -394,3 +394,31 @@ func TestLateInterimResponse(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 空闲释放不是连接关闭：管道化的 R1、R2、R3 都没有响应，R1 在 t=30、R2 在 t=60 超时；
+// 最后一个包在 t=2，连接在 t=62 空闲释放，这时 R3 还没到自己的超时（t=90），
+// 但同样是等不到数据而结束，标为 no-response(timeout)，不是 closed。
+func TestIdleReleaseEndsAsTimeout(t *testing.T) {
+	snaps, out, st := replayTicks(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /TOKEN-1 HTTP/1.1\r\n\r\n"))
+		c.ClientSend(ms(1000), []byte("GET /TOKEN-2 HTTP/1.1\r\n\r\n"))
+		c.ClientSend(ms(2000), []byte("GET /TOKEN-3 HTTP/1.1\r\n\r\n"))
+	}, ms(60000), ms(61900), ms(62000))
+	r12 := "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n" +
+		"GET /TOKEN-1 HTTP/1.1\r\n\r\n" +
+		"--\n" +
+		"2026-09-28 15:30:13.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n" +
+		"GET /TOKEN-2 HTTP/1.1\r\n\r\n"
+	r3 := "--\n" +
+		"2026-09-28 15:30:14.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n" +
+		"GET /TOKEN-3 HTTP/1.1\r\n\r\n"
+	check(t, snaps[0], r12)
+	check(t, snaps[1], r12)
+	check(t, snaps[2], r12+r3)
+	check(t, out, r12+r3)
+	if st.NoResponseTimeout != 3 || st.NoResponseClosed != 0 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
