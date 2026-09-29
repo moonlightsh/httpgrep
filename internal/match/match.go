@@ -80,8 +80,11 @@ func (s *Scanner) Reset() {
 	s.buf = s.buf[:0]
 }
 
-// processLine 处理一行完整的行（不含 \n）。行尾的 \r 由调用方去掉。
+// processLine 处理一行完整的行（不含 \n）。行尾的 \r 不算行内容，先去掉。
 func (s *Scanner) processLine(line []byte) {
+	if n := len(line); n > 0 && line[n-1] == '\r' {
+		line = line[:n-1]
+	}
 	for _, p := range s.m.patterns {
 		if len(p) == 0 {
 			s.matched = true

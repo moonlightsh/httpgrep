@@ -111,3 +111,17 @@ func TestScannerReset(t *testing.T) {
 		t.Fatal("partial line buffer must be cleared by Reset")
 	}
 }
+
+// 行尾的 \r 不算行内容。
+func TestTrailingCRNotPartOfLine(t *testing.T) {
+	// 关键词 abc\r 不命中 abc\r\n（行内容是 abc）。
+	m, err := match.Compile([]string{"abc\r"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := m.NewScanner()
+	s.Write([]byte("abc\r\n"))
+	if s.Matched() {
+		t.Fatal("abc\\r should not match line abc (trailing CR stripped)")
+	}
+}
