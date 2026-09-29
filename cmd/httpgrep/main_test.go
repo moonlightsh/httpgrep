@@ -186,6 +186,8 @@ func TestBadArgumentsExit2(t *testing.T) {
 		{[]string{"--cpus", "100000", "x"}, "httpgrep: invalid value for --cpus: 100000 (at most 1024)\n" + try},
 		{[]string{"--cpus", "4", "--max-memory", "64K", "--max-message", "32K", "x"},
 			"httpgrep: --max-message cannot exceed --max-memory divided by --cpus (16384 bytes per worker with --cpus 4)\n" + try},
+		{[]string{"--max-memory", "1000", "--cpus", "1024", "x"},
+			"httpgrep: --max-memory cannot be less than --cpus (1024 bytes are needed for --cpus 1024)\n" + try},
 		{[]string{"--timeout", "1500000h", "x"}, "httpgrep: invalid duration for --timeout: 1500000h (at most 8760h)\n" + try},
 	} {
 		t.Run(fmt.Sprint(tc.args), func(t *testing.T) {

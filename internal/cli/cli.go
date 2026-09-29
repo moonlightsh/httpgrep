@@ -214,6 +214,11 @@ done:
 	// 每个分片的内存上限是 MaxMemory/CPUs。单条消息超过它时，本该截断的消息会整笔
 	// 因内存上限丢弃，所以 MaxMessage 不能超过它；没给 --max-message 时默认值随之下调。
 	share := opts.MaxMemory / int64(opts.CPUs)
+	if share < 1 {
+		// 分片上限为 0 在引擎里表示不限，不能让它悄悄关掉内存上限。
+		return opts, &errBadArg{"--max-memory cannot be less than --cpus (" + strconv.Itoa(opts.CPUs) +
+			" bytes are needed for --cpus " + strconv.Itoa(opts.CPUs) + ")"}
+	}
 	if !msgSet {
 		opts.MaxMessage = min(opts.MaxMessage, share)
 	}

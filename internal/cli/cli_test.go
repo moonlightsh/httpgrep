@@ -475,6 +475,20 @@ func TestParseMaxMessagePerCPU(t *testing.T) {
 	if err != nil || opts.MaxMessage != 16384 {
 		t.Fatalf("--max-message 16K: MaxMessage %d, err %v", opts.MaxMessage, err)
 	}
+	// --max-memory 小于 --cpus 时每个分片分不到 1 字节：报错，不能让默认的 --max-message
+	// 跟着降到 0、分片上限也变成 0（0 表示不限），整个内存上限失效。
+	for _, args := range [][]string{
+		{"--max-memory", "1000", "--cpus", "1024", "kw"},
+		{"--max-memory", "3", "--cpus", "4", "--max-message", "1", "kw"},
+	} {
+		_, err := cli.Parse(args)
+		if want := "--max-memory cannot be less than --cpus (" + args[3] + " bytes are needed for --cpus " + args[3] + ")"; err == nil || err.Error() != want {
+			t.Errorf("%v: err %v, want %q", args, err, want)
+		}
+	}
+	if opts, err := cli.Parse([]string{"--max-memory", "4", "--cpus", "4", "kw"}); err != nil || opts.MaxMessage != 1 {
+		t.Errorf("--max-memory 4 --cpus 4: MaxMessage %d, err %v; want 1", opts.MaxMessage, err)
+	}
 	for _, tc := range []struct {
 		args []string
 		want int64
