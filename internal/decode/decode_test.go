@@ -308,6 +308,16 @@ func TestRawIP(t *testing.T) {
 	if string(seg.Payload) != "v6" {
 		t.Errorf("RAW v6 payload = %q", seg.Payload)
 	}
+	// IPv6 地址字段：手写字面量，src/dst 不能接反
+	if want := mustAddrPort(t, "[2001:db8::1]:3"); seg.Src != want {
+		t.Errorf("Src = %v, want %v", seg.Src, want)
+	}
+	if want := mustAddrPort(t, "[2001:db8::2]:4"); seg.Dst != want {
+		t.Errorf("Dst = %v, want %v", seg.Dst, want)
+	}
+	if !seg.Src.Addr().Is6() || seg.Src.Addr().Is4In6() {
+		t.Errorf("Src.Addr() 应是 IPv6，Is6=%v Is4In6=%v", seg.Src.Addr().Is6(), seg.Src.Addr().Is4In6())
+	}
 }
 
 // ---- 行为 7：IP 选项与 TCP 选项 ----
