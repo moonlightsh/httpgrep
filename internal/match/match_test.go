@@ -184,3 +184,16 @@ func TestRegexCompileErrorContainsPattern(t *testing.T) {
 		t.Fatalf("error should mention the bad pattern, got: %v", err)
 	}
 }
+
+// 正则模式下空关键词同样匹配所有行。
+func TestEmptyRegexPatternMatchesEverything(t *testing.T) {
+	m, err := match.Compile([]string{""}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := m.NewScanner()
+	s.Write([]byte("\n"))
+	if !s.Matched() {
+		t.Fatal("empty regex should match empty line")
+	}
+}
