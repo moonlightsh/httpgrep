@@ -32,6 +32,9 @@ type Engine struct {
 	inFlight int
 	buffered int64 // 在途交互缓存的消息字节数
 
+	// oldest、newest 是按开始时间排序的在途交互链表的两端，超过内存上限时从 oldest 丢起。
+	oldest, newest *exchange
+
 	// 输出块和它引用的切片，每次输出复用。
 	block  output.Block
 	msgs   []output.Message
@@ -71,12 +74,14 @@ func (e *Engine) open(info tcp.ConnInfo) tcp.Handler {
 func (e *Engine) Segment(seg *decode.Segment, ts time.Time) {
 	e.expire(ts)
 	e.asm.Add(seg, ts)
+	e.enforce(ts)
 }
 
 // Advance 推进时钟，只处理到期的定时器。now 单调不减。
 func (e *Engine) Advance(now time.Time) {
 	e.expire(now)
 	e.asm.Advance(now)
+	e.enforce(now)
 }
 
 // expire 按到期时间的先后结束到 now 为止超时的交互。
@@ -144,6 +149,7 @@ func (e *Engine) finish(c *conn, x *exchange) {
 // 超时的交互之后还要留在队列里当占位，由调用方决定何时回收。
 func (e *Engine) end(c *conn, x *exchange) {
 	e.timers.remove(x)
+	e.untrack(x)
 	x.breakAll()
 	st := x.status()
 	switch {

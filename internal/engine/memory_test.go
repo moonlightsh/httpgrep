@@ -138,3 +138,61 @@ func TestTunnelNotBuffered(t *testing.T) {
 		}
 	}
 }
+
+// 超过内存上限时，从开始时间最早的在途交互起丢弃，直到不超限。
+// A（t=0，请求命中）和 B（t=1）两个在途交互，B 的响应收到第三个包时计量是
+// 2048（两条连接）+ 1024（两个交互）+ 23 + 19（两个请求）+ 4380（B 的响应）= 7494，
+// 超过 7000：丢弃 A，减去 512 + 23，得 6959，不再超限。
+// A 已经命中也不输出，它在队列里留占位：它的响应之后才到，不缓存、不输出，也不算迟到响应。
+// B 照常收完、输出。
+func TestEvictOldestInFlight(t *testing.T) {
+	bBody := "TOKEN" + strings.Repeat("x", 4995)
+	var mem []int64
+	out, st := replayEach(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 7000}, func(w *pcapgen.Writer) {
+		a := pcapgen.NewConn(w, cli1, srv)
+		b := pcapgen.NewConn(w, cli2, srv)
+		a.Handshake(ms(-1))
+		b.Handshake(ms(-1))
+		a.ClientSend(ms(0), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+		b.ClientSend(ms(1), []byte("GET /b HTTP/1.1\r\n\r\n"))
+		b.ServerSend(ms(2), []byte("HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n"+bBody)) // 1460×3 + 661
+		a.ServerSend(ms(3), []byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nTOKEN"))
+	}, func(e *engine.Engine, _ time.Time) { mem = append(mem, e.Memory()) })
+	check(t, out, "2026-09-28 15:30:12.346 10.0.0.1:52815 -> 10.0.0.2:80 complete 1.0ms\n"+
+		"GET /b HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n"+bBody+"\n")
+	// 两次握手 6 个包，两个请求，B 的响应 4 个包，A 的响应 1 个包。
+	want := []int64{1024, 1024, 1024, 2048, 2048, 2048,
+		2048 + 512 + 23, 2048 + 1024 + 42,
+		3114 + 1460, 3114 + 2920, 6959, 2048, 2048}
+	if !slices.Equal(mem, want) {
+		t.Fatalf("Memory after each packet = %v, want %v", mem, want)
+	}
+	if st.Evicted != 1 || st.EvictedMatched != 1 || st.Exchanges != 2 || st.Matched != 1 ||
+		st.Complete != 1 || st.Late != 0 || st.NoResponseEOF != 0 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// Upgrade 请求 U 的头部收到一半时因内存上限被丢弃（计量和 TestEvictOldestInFlight 相同：
+// 3114 - 23 + 40 + 1460×3 = 7511，丢弃 U 减去 552，得 6959）。U 的请求随后发完，
+// 请求解析器照常缓存它后面管道化的请求 R2，等对 U 的决定。连接被 RST 时要先回放缓存，
+// R2 以 no-response(closed) 结束并输出，不能随请求解析器关闭而丢掉。
+func TestEvictedUpgradeRequestKeepsHeld(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 7000}, func(w *pcapgen.Writer) {
+		u := pcapgen.NewConn(w, cli1, srv)
+		b := pcapgen.NewConn(w, cli2, srv)
+		u.Handshake(ms(-1))
+		b.Handshake(ms(-1))
+		u.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n"))
+		b.ClientSend(ms(1), []byte("GET /b HTTP/1.1\r\n\r\n"))
+		b.ServerSend(ms(2), []byte("HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n"+strings.Repeat("x", 5000)))
+		u.ClientSend(ms(4), []byte("\r\nGET /TOKEN HTTP/1.1\r\n\r\n"))
+		u.ClientRst(ms(5))
+	})
+	check(t, out, "2026-09-28 15:30:12.349 10.0.0.1:52814 -> 10.0.0.2:80 no-response(closed)\n"+
+		"GET /TOKEN HTTP/1.1\r\n\r\n")
+	if st.Evicted != 1 || st.EvictedMatched != 0 || st.Exchanges != 3 || st.NoResponseClosed != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}

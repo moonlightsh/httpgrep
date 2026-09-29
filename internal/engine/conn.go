@@ -403,7 +403,7 @@ func (c *conn) timeout(x *exchange, at time.Time) {
 
 // markLate 在迟到响应的字节或缺口到达占位 x 时计数，每个占位只计一次。
 func (c *conn) markLate(x *exchange) {
-	if !x.late {
+	if !x.late && !x.evicted {
 		x.late = true
 		c.e.stats.Late++
 	}
@@ -496,6 +496,7 @@ func (s *reqSink) Begin(b http1.Begin) {
 	x.start, x.reqLast = b.TS, b.TS
 	x.reqOff = b.Off
 	x.reqMsg = x.addMessage(dirReq)
+	c.e.track(x)
 	c.queue = append(c.queue, x)
 	s.cur = x
 	// 从引擎看到它的时刻起计时：回放 Upgrade 请求之后缓存的字节时，b.TS 是缓存段的时间，更早。
@@ -548,8 +549,21 @@ func (s *reqSink) End(complete bool, ts time.Time) {
 	}
 	s.cur = nil
 	x.reqDone = true
+	// 占位也要记下：请求发到一半时因内存上限被丢弃的 Upgrade 请求还在等决定
+	// （超时的占位已经记下了决定，不会走到这里）。
+	if complete && x.upgrade && !x.decided {
+		if s.c.srvClosed {
+			// 服务端已经关闭，决定不会再来：现在就按被拒处理。解析器还没结束这条消息，
+			// Resume 只记下决定，随后直接继续解析，不缓存后面的字节。
+			x.decided = true
+			s.c.req.Resume()
+		} else {
+			// 请求解析器在 Upgrade 请求正常结束、还没有决定时开始缓存后面的字节。
+			s.c.held = true
+		}
+	}
 	if x.ghost {
-		// 请求发到一半就超时的占位：它的响应已经收完或不会再来时回收。
+		// 请求发到一半就超时或被丢弃的占位：它的响应已经收完或不会再来时回收。
 		if x.resDone || s.c.srvClosed {
 			s.c.drop(x)
 		}
@@ -557,17 +571,6 @@ func (s *reqSink) End(complete bool, ts time.Time) {
 	}
 	if complete {
 		x.reqLast = ts
-		if x.upgrade && !x.decided {
-			if s.c.srvClosed {
-				// 服务端已经关闭，决定不会再来：现在就按被拒处理。解析器还没结束这条消息，
-				// Resume 只记下决定，随后直接继续解析，不缓存后面的字节。
-				x.decided = true
-				s.c.req.Resume()
-			} else {
-				// 请求解析器在 Upgrade 请求正常结束、还没有决定时开始缓存后面的字节。
-				s.c.held = true
-			}
-		}
 	} else {
 		x.incomplete = true
 	}
@@ -607,6 +610,7 @@ func (s *resSink) Begin(b http1.Begin) {
 		x = c.e.newExchange(c)
 		x.noReq, x.reqDone = true, true
 		x.start = b.TS
+		c.e.track(x)
 		c.e.arm(x, b.TS)
 	}
 	s.open(x, b.Orphan)

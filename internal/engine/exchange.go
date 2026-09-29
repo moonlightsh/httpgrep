@@ -96,10 +96,16 @@ type exchange struct {
 	upgrade    bool // 请求是 CONNECT 或带 Upgrade 头
 	decided    bool // 已经就 Upgrade 请求调用过 Resume 或 Tunnel
 
-	// ghost 表示交互已经超时结束、留在原位置当占位，保证后面的响应配对正确。
+	// prev、next 把在途交互按开始时间串成链表（见 Engine.oldest），超过内存上限时从最早的丢起。
+	prev, next *exchange
+	tracked    bool
+
+	// ghost 表示交互已经超时结束（或因内存上限被丢弃）、留在原位置当占位，保证后面的响应配对正确。
 	// 它之后的请求字节和迟到响应只由解析器解析长度，不缓存、不匹配、不输出。
 	ghost bool
 	late  bool // 已经为它计过一次 Late
+	// evicted 表示占位是因内存上限丢弃的交互留下的：之后到达的是它自己的数据，不是迟到响应。
+	evicted bool
 	// lateInterim 表示占位上正在收的迟到响应是 1xx（不含 101），之后还有最终响应。
 	lateInterim bool
 
