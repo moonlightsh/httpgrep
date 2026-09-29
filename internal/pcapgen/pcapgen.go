@@ -78,6 +78,7 @@ const (
 )
 
 // TCP 构造一个完整的 IP 包。IPv4 带正确的头部校验和，TCP 校验和填 0。
+// payload 超出 IP 长度字段能表示的范围时 panic（测试工具尽早暴露错误用法）。
 func TCP(src, dst netip.AddrPort, seq, ack uint32, flags decode.Flags, payload []byte) []byte {
 	if src.Addr().Is4() && dst.Addr().Is4() {
 		return tcpIPv4(src, dst, seq, ack, flags, payload)
@@ -87,6 +88,9 @@ func TCP(src, dst netip.AddrPort, seq, ack uint32, flags decode.Flags, payload [
 
 func tcpIPv4(src, dst netip.AddrPort, seq, ack uint32, flags decode.Flags, payload []byte) []byte {
 	total := ipv4HeaderLen + tcpHeaderLen + len(payload)
+	if total > 0xffff {
+		panic("pcapgen: IPv4 packet too long: " + strconv.Itoa(total))
+	}
 	b := make([]byte, ipv4HeaderLen+tcpHeaderLen+len(payload))
 
 	b[0] = 0x45 // 版本 4，IHL 5
@@ -116,6 +120,9 @@ func tcpIPv4(src, dst netip.AddrPort, seq, ack uint32, flags decode.Flags, paylo
 }
 
 func tcpIPv6(src, dst netip.AddrPort, seq, ack uint32, flags decode.Flags, payload []byte) []byte {
+	if n := tcpHeaderLen + len(payload); n > 0xffff {
+		panic("pcapgen: IPv6 payload too long: " + strconv.Itoa(n))
+	}
 	b := make([]byte, 40+tcpHeaderLen+len(payload))
 	b[0] = 0x60 // 版本 6，流量类别 0
 	binary.BigEndian.PutUint16(b[4:], uint16(tcpHeaderLen+len(payload)))

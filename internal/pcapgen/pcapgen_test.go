@@ -584,3 +584,33 @@ func TestConnMSS(t *testing.T) {
 		})
 	}
 }
+
+// payload 超出 IP 长度字段能表示的范围时 TCP 应当 panic，而不是静默截断。
+// IPv4：20+20+65495 = 65535 是上限；IPv6：载荷长度字段 20+65515 = 65535 是上限。
+func TestTCPPayloadTooLong(t *testing.T) {
+	c4 := netip.MustParseAddrPort("10.0.0.1:1")
+	s4 := netip.MustParseAddrPort("10.0.0.2:2")
+	c6 := netip.MustParseAddrPort("[2001:db8::1]:1")
+	s6 := netip.MustParseAddrPort("[2001:db8::2]:2")
+	cases := []struct {
+		name      string
+		src, dst  netip.AddrPort
+		n         int
+		wantPanic bool
+	}{
+		{"ipv4-max", c4, s4, 65495, false},
+		{"ipv4-over", c4, s4, 65496, true},
+		{"ipv6-max", c6, s6, 65515, false},
+		{"ipv6-over", c6, s6, 65516, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); (r != nil) != tc.wantPanic {
+					t.Errorf("panic = %v，想要 panic = %v", r, tc.wantPanic)
+				}
+			}()
+			pcapgen.TCP(tc.src, tc.dst, 1, 0, decode.ACK, make([]byte, tc.n))
+		})
+	}
+}
