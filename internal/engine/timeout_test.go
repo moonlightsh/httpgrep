@@ -255,3 +255,51 @@ func TestIdleConnectionReleased(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 缺请求的交互（不在队列里）也会超时：响应收到一半的是 no-request,incomplete，
+// 只收到 1xx 的是 no-request,no-response(timeout)。剩下的部分或最终响应迟到时计入 Late，
+// 不另起一个缺请求的交互；之后的请求和它自己的响应配对。
+func TestTimeoutNoRequest(t *testing.T) {
+	cases := []struct {
+		name, first, late, status string
+	}{
+		{
+			name:   "partial response",
+			first:  "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nTOKEN",
+			late:   "abcde",
+			status: "no-request,incomplete",
+		},
+		{
+			name:   "interim only",
+			first:  "HTTP/1.1 100 Continue\r\nX-Id: TOKEN\r\n\r\n",
+			late:   "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+			status: "no-request,no-response(timeout)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snaps, out, st := replayTicks(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				c.ServerSend(ms(0), []byte(tc.first))
+				c.ServerSend(ms(35000), []byte(tc.late))
+				c.ClientSend(ms(40000), []byte("GET /TOKEN-2 HTTP/1.1\r\n\r\n"))
+				c.ServerSend(ms(40003), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+			}, ms(29999.9), ms(30000))
+			first := "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 " + tc.status + "\n" + tc.first
+			if tc.name == "partial response" {
+				first += "\n"
+			}
+			check(t, snaps[0], "")
+			check(t, snaps[1], first)
+			check(t, out, first+
+				"--\n"+
+				"2026-09-28 15:30:52.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 3.0ms\n"+
+				"GET /TOKEN-2 HTTP/1.1\r\n\r\n"+
+				"HTTP/1.1 204 No Content\r\n\r\n")
+			if st.Late != 1 || st.NoRequest != 1 || st.Exchanges != 2 || st.Complete != 1 {
+				t.Fatalf("stats: %+v", st)
+			}
+		})
+	}
+}
