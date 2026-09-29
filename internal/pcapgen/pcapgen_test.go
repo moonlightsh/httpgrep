@@ -3,6 +3,7 @@ package pcapgen_test
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -237,5 +238,47 @@ func TestConnHandshakeSend(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("follow 还原 %d 字节，和写入的 %d 字节不同", len(got), len(want))
+	}
+}
+
+// 行为 4：SkipClient 跳过 100 字节后，下一段序号比原来多 100，
+// tshark 会标出 tcp.analysis.lost_segment。
+func TestConnSkipClient(t *testing.T) {
+	client := netip.MustParseAddrPort("10.0.0.1:50001")
+	server := netip.MustParseAddrPort("10.0.0.2:80")
+	t0 := time.Unix(1700000000, 0)
+
+	var seqNoSkip, seqSkip string
+	path := writePcap(t, "skip.pcap", pcap.LinkEthernet, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, client, server)
+		c.Handshake(t0)
+		c.ClientSend(t0.Add(10*time.Millisecond), []byte("before"))
+		seqNoSkip = fmt.Sprint(c.ClientISN + 1 + 6) // 跳过前下一段的序号
+
+		c.SkipClient(100)
+		c.ClientSend(t0.Add(20*time.Millisecond), []byte("after"))
+		seqSkip = fmt.Sprint(c.ClientISN + 1 + 6 + 100)
+	})
+
+	rows := tsharkFields(t, path, nil, "tcp.seq_raw", "tcp.len", "tcp.analysis.lost_segment")
+	if len(rows) != 5 {
+		t.Fatalf("包数 = %d，想要 5（握手 3 个 + 数据 2 个）", len(rows))
+	}
+	// 找到带 lost_segment 的段。
+	var lost []string
+	for i, row := range rows {
+		if strings.Contains(row[2], "1") && row[1] != "0" {
+			lost = append(lost, row[0])
+			_ = i
+		}
+	}
+	if len(lost) == 0 {
+		t.Fatalf("没有包被标出 tcp.analysis.lost_segment；字段输出 %q", rows)
+	}
+	if got := lost[len(lost)-1]; got != seqSkip {
+		t.Errorf("丢失段之后的第一段序号 = %s，想要 %s", got, seqSkip)
+	}
+	if seqNoSkip == seqSkip {
+		t.Fatal("对照值相同，测试无意义")
 	}
 }
