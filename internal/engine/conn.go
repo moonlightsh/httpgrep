@@ -380,9 +380,11 @@ func (c *conn) timeout(x *exchange, at time.Time) {
 	}
 	c.e.end(c, x)
 	x.bury()
-	if x.upgrade && !x.decided {
+	if !x.decided && (x.upgrade || !x.reqDone) {
 		// Upgrade 请求等不到决定了，按被拒处理：缓存在它后面的请求回放出来照常排队，
 		// 从现在起计时。请求还没发完时 Resume 只记下决定，发完后直接继续解析。
+		// 请求头还没收完时还不知道是不是 Upgrade 请求（Head 还没来），也先记下：
+		// http1 只在 Begin 时清掉决定，不是 Upgrade 请求时这个决定不起作用。
 		x.decided = true
 		if c.held {
 			c.resumeHeld()

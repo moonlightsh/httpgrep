@@ -327,3 +327,50 @@ func TestTimeoutPartialRequest(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 请求没发完就超时，Upgrade 头或 body 的剩余部分超时之后才到：超时时就按被拒记下决定，
+// 请求发完后解析器直接继续解析，不缓存后面的请求；后面管道化的请求照常排队，输入结束时 no-response(eof)。
+func TestTimeoutUnfinishedUpgradeRequest(t *testing.T) {
+	cases := []struct {
+		name, first, rest string
+	}{
+		{
+			// 超时时还没看到 Upgrade 头，引擎还不知道它是 Upgrade 请求。
+			name:  "upgrade header after timeout",
+			first: "GET /chat HTTP/1.1\r\n",
+			rest:  "Upgrade: websocket\r\n\r\n",
+		},
+		{
+			name:  "body after timeout",
+			first: "POST /chat HTTP/1.1\r\nUpgrade: websocket\r\nContent-Length: 4\r\n\r\nab",
+			rest:  "cd",
+		},
+	}
+	ends := []struct {
+		name string
+		end  func(c *pcapgen.Conn)
+		why  string
+	}{
+		{"finish", func(*pcapgen.Conn) {}, "no-response(eof)"},
+		{"server FIN", func(c *pcapgen.Conn) { c.ServerFin(ms(37000)) }, "no-response(closed)"},
+	}
+	for _, tc := range cases {
+		for _, end := range ends {
+			t.Run(tc.name+"/"+end.name, func(t *testing.T) {
+				out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+					c := pcapgen.NewConn(w, cli1, srv)
+					c.Handshake(ms(-1))
+					c.ClientSend(ms(0), []byte(tc.first))
+					c.ClientSend(ms(35000), []byte(tc.rest))
+					c.ClientSend(ms(36000), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+					end.end(c)
+				})
+				check(t, out, "2026-09-28 15:30:48.345 10.0.0.1:52814 -> 10.0.0.2:80 "+end.why+"\n"+
+					"GET /TOKEN HTTP/1.1\r\n\r\n")
+				if st.Exchanges != 2 || st.NoResponseTimeout != 1 {
+					t.Fatalf("stats: %+v", st)
+				}
+			})
+		}
+	}
+}
