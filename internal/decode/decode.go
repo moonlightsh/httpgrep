@@ -24,7 +24,8 @@ func Decode(link pcap.LinkType, data []byte, origLen int, seg *Segment) Result {
 	if res != OK {
 		return res
 	}
-	return decodeIP(ip, origLen, seg)
+	// origLen 是整帧长度，去掉链路层头后才是线上 IP 包长度
+	return decodeIP(ip, origLen-(len(data)-len(ip)), seg)
 }
 
 // stripLink 去掉链路层头，返回 IP 包。
@@ -108,7 +109,7 @@ func decodeIP(ip []byte, origLen int, seg *Segment) Result {
 	}
 	switch ip[0] >> 4 {
 	case 4:
-		return decodeIPv4(ip, seg)
+		return decodeIPv4(ip, origLen, seg)
 	case 6:
 		return decodeIPv6(ip, origLen, seg)
 	}
@@ -118,7 +119,7 @@ func decodeIP(ip []byte, origLen int, seg *Segment) Result {
 const protoTCP = 6 // TCP 协议号
 
 // decodeIPv4 解码 IPv4 包。
-func decodeIPv4(ip []byte, seg *Segment) Result {
+func decodeIPv4(ip []byte, origLen int, seg *Segment) Result {
 	if len(ip) < 20 {
 		return Malformed
 	}
@@ -137,7 +138,11 @@ func decodeIPv4(ip []byte, seg *Segment) Result {
 		return NotTCP
 	}
 	if total == 0 {
-		return Malformed // TSO 推算稍后实现
+		// 网卡 TSO 抓包：总长度字段为 0，用线上长度推算
+		total = origLen
+		if total < hl {
+			return Malformed
+		}
 	}
 	return decodeTCP(ip, true, hl, total, seg)
 }
@@ -167,7 +172,11 @@ func decodeIPv6(ip []byte, origLen int, seg *Segment) Result {
 	}
 	plen := int(binary.BigEndian.Uint16(ip[4:6]))
 	if plen == 0 {
-		return Malformed // origLen 推算稍后实现
+		// 网卡 TSO 抓包：负载长度为 0，用线上长度推算
+		plen = origLen - 40
+		if plen < 0 {
+			return Malformed
+		}
 	}
 	return decodeTCP(ip, false, hl, hl+plen, seg)
 }
