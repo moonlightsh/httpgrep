@@ -832,3 +832,83 @@ func TestOrphanBegin(t *testing.T) {
 		t.Errorf("gap: begins = %+v, want %+v", r.begins, want)
 	}
 }
+
+func TestResync(t *testing.T) {
+	const ok = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+	okEv := func(off int) []string {
+		return []string{fmt.Sprintf("begin off=%d", off), "raw head HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n",
+			"head 200 HTTP/1.1", "raw body ok", "body ok", "end true"}
+	}
+	resync := http1.Options{Resync: true}
+	tests := []struct {
+		name  string
+		kind  http1.Kind
+		steps []step
+		want  []string
+	}{
+		{
+			"middle of a response body", http1.Response,
+			[]step{data("dy of previous\r\nmore\r\n" + ok)},
+			append([]string{"begin off=0 orphan", "raw unparsed dy of previous\r\nmore\r\n", "end false"}, okEv(22)...),
+		},
+		{
+			"first byte is a status line", http1.Response,
+			[]step{data(ok)},
+			okEv(0),
+		},
+		{
+			"first byte is a request line", http1.Request,
+			[]step{data("GET / HTTP/1.1\r\n\r\n")},
+			[]string{"begin off=0", "raw head GET / HTTP/1.1\r\n\r\n", "head GET / HTTP/1.1", "end true"},
+		},
+		{
+			"starts with a gap", http1.Response,
+			[]step{gap(100), data(ok)},
+			append([]string{"begin off=0 orphan", "gap unparsed 100", "end false"}, okEv(100)...),
+		},
+		{
+			"non-http stream", http1.Request,
+			[]step{data("\x16\x03\x01\x02\x00\x01\x00\x01\xfc\x03\x03\n\x00GET"), closeFin()},
+			[]string{"begin off=0 orphan", "raw unparsed \x16\x03\x01\x02\x00\x01\x00\x01\xfc\x03\x03\n\x00GET", "end false"},
+		},
+		{"nothing fed", http1.Request, []step{closeFin()}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checkAllChunkings(t, tt.kind, resync, tt.want, tt.steps...)
+		})
+	}
+}
+
+func TestScanLongLine(t *testing.T) {
+	const next = "GET /2 HTTP/1.1\r\n\r\n"
+	nextEv := func(off int) []string {
+		return []string{fmt.Sprintf("begin off=%d", off), "raw head " + next, "head GET /2 HTTP/1.1", "end true"}
+	}
+	// 请求行长度是 k+16 字节（含 CRLF）。
+	reqLine := func(k int) string { return "GET /" + strings.Repeat("a", k) + " HTTP/1.1\r\n" }
+	ok, long := reqLine(8176), reqLine(8177) // 8192 和 8193 字节
+	tests := []struct {
+		name   string
+		resync bool
+		in     string
+		want   []string
+	}{
+		{"8 KiB line is a candidate", true, ok + "\r\n",
+			[]string{"begin off=0", "raw head " + ok + "\r\n", "head GET /" + strings.Repeat("a", 8176) + " HTTP/1.1", "end true"}},
+		{"longer line is not a candidate", true, long + "\r\n" + next,
+			append([]string{"begin off=0 orphan", "raw unparsed " + long + "\r\n", "end false"}, nextEv(8195)...)},
+		{"limit applies only while scanning", false, long + "\r\n",
+			[]string{"begin off=0", "raw head " + long + "\r\n", "head GET /" + strings.Repeat("a", 8177) + " HTTP/1.1", "end true"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, c := range []int{0, 1, 1460} {
+				got := run(http1.Request, http1.Options{Resync: tt.resync}, c, data(tt.in))
+				if strings.Join(got.ev, "\n") != strings.Join(tt.want, "\n") {
+					t.Errorf("chunk=%d events:\n  got:  %.200q\n  want: %.200q", c, got.ev, tt.want)
+				}
+			}
+		})
+	}
+}

@@ -60,7 +60,12 @@ type Parser struct {
 
 // NewParser 创建一个解析器。
 func NewParser(kind Kind, sink Sink, opt Options) *Parser {
-	return &Parser{kind: kind, sink: sink, opt: opt}
+	p := &Parser{kind: kind, sink: sink, opt: opt}
+	if opt.Resync {
+		// 流的第一个字节算作行首。
+		p.st, p.bol = stScan, true
+	}
+	return p
 }
 
 // Feed 按序喂入从流偏移 off 开始的字节 b。b 只在调用期间使用，不保留。
