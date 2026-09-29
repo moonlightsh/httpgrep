@@ -37,7 +37,7 @@ func TestMain(m *testing.M) {
 func ms(n float64) time.Time { return t0.Add(time.Duration(n * float64(time.Millisecond))) }
 
 // opts 按命令行参数解析选项。
-func opts(t *testing.T, args ...string) cli.Options {
+func opts(t testing.TB, args ...string) cli.Options {
 	t.Helper()
 	o, err := cli.Parse(args)
 	if err != nil {
@@ -47,7 +47,7 @@ func opts(t *testing.T, args ...string) cli.Options {
 }
 
 // capture 用 build 生成一份以太网抓包。
-func capture(t *testing.T, build func(w *pcapgen.Writer)) []byte {
+func capture(t testing.TB, build func(w *pcapgen.Writer)) []byte {
 	t.Helper()
 	var b bytes.Buffer
 	w := pcapgen.NewWriter(&b, pcap.LinkEthernet)
