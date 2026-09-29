@@ -617,6 +617,43 @@ func TestZeroLengthTSO(t *testing.T) {
 			t.Errorf("Missing = %d, want 0（基本头不能算进负载）", seg.Missing)
 		}
 	})
+
+	// 负载长度 0 时必须用线上长度（减链路层头）推算，而非抓到的长度
+	t.Run("v6/ethernet/snaplen", func(t *testing.T) {
+		ip6 := ipv6Packet(tcpSegment(5, 6, 7, 8, 0x18, nil, payload))
+		binary.BigEndian.PutUint16(ip6[4:6], 0)
+		frame := ethernet(0x86DD, ip6)
+		origLen := len(frame)
+		captured := frame[:len(frame)-6] // 少抓 6 字节
+		var seg decode.Segment
+		if got := decode.Decode(pcap.LinkEthernet, captured, origLen, &seg); got != decode.OK {
+			t.Fatalf("Decode = %v, want OK", got)
+		}
+		if len(seg.Payload) != len(payload)-6 {
+			t.Errorf("抓到负载 %d 字节, want %d", len(seg.Payload), len(payload)-6)
+		}
+		if seg.Missing != 6 {
+			t.Errorf("Missing = %d, want 6", seg.Missing)
+		}
+	})
+
+	// TSO + 扩展头 + snaplen 截断
+	t.Run("v6/ext/snaplen", func(t *testing.T) {
+		ip6 := ipv6ExtPacket(0, 1, tcpSegment(5, 6, 7, 8, 0x18, nil, payload))
+		binary.BigEndian.PutUint16(ip6[4:6], 0)
+		origLen := len(ip6)
+		captured := ip6[:len(ip6)-6]
+		var seg decode.Segment
+		if got := decode.Decode(pcap.LinkRaw, captured, origLen, &seg); got != decode.OK {
+			t.Fatalf("Decode = %v, want OK", got)
+		}
+		if len(seg.Payload) != len(payload)-6 {
+			t.Errorf("抓到负载 %d 字节, want %d", len(seg.Payload), len(payload)-6)
+		}
+		if seg.Missing != 6 {
+			t.Errorf("Missing = %d, want 6", seg.Missing)
+		}
+	})
 }
 
 // ---- 行为 12：Malformed 与 NotTCP ----
