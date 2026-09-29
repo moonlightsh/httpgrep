@@ -275,3 +275,103 @@ func TestReadUntilCloseResponse(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 服务端 FIN 或 RST 之后，在途交互随之结束：没收到响应的是 no-response(closed)，
+// 响应收到一半的是 incomplete。同一四元组上出现新连接时，旧连接按同样规则处理。
+func TestConnectionClosed(t *testing.T) {
+	cases := []struct {
+		name               string
+		build              func(w *pcapgen.Writer)
+		want               string
+		closed, incomplete int64 // Stats.NoResponseClosed、Stats.Incomplete
+	}{
+		{
+			name: "server FIN before responses",
+			build: func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				c.ClientSend(ms(0), []byte("GET /TOKEN-A HTTP/1.1\r\n\r\n"))
+				c.ServerFin(ms(5))
+				c.ClientSend(ms(6), []byte("GET /TOKEN-B HTTP/1.1\r\n\r\n"))
+				c.ClientFin(ms(7))
+			},
+			want: "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(closed)\n" +
+				"GET /TOKEN-A HTTP/1.1\r\n\r\n" +
+				"--\n" +
+				"2026-09-28 15:30:12.351 10.0.0.1:52814 -> 10.0.0.2:80 no-response(closed)\n" +
+				"GET /TOKEN-B HTTP/1.1\r\n\r\n",
+			closed: 2, incomplete: 0,
+		},
+		{
+			name: "RST before response",
+			build: func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				c.ClientSend(ms(0), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+				c.ClientRst(ms(3))
+			},
+			want: "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(closed)\n" +
+				"GET /TOKEN HTTP/1.1\r\n\r\n",
+			closed: 1, incomplete: 0,
+		},
+		{
+			name: "RST in the middle of a response",
+			build: func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\n\r\n"))
+				c.ServerSend(ms(2), []byte("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nTOKEN"))
+				c.ClientRst(ms(8))
+			},
+			want: "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 2.0ms\n" +
+				"GET /a HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nTOKEN\n",
+			closed: 0, incomplete: 1,
+		},
+		{
+			name: "replaced before response",
+			build: func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				c.ClientSend(ms(0), []byte("GET /TOKEN-OLD HTTP/1.1\r\n\r\n"))
+				n := pcapgen.NewConn(w, cli1, srv)
+				n.ClientISN, n.ServerISN = 5000000, 6000000
+				n.Handshake(ms(10))
+				n.ClientSend(ms(11), []byte("GET /TOKEN-NEW HTTP/1.1\r\n\r\n"))
+				n.ServerSend(ms(12), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+			},
+			want: "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(closed)\n" +
+				"GET /TOKEN-OLD HTTP/1.1\r\n\r\n" +
+				"--\n" +
+				"2026-09-28 15:30:12.356 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\n" +
+				"GET /TOKEN-NEW HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 204 No Content\r\n\r\n",
+			closed: 1, incomplete: 0,
+		},
+		{
+			name: "replaced in the middle of a response",
+			build: func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\n\r\n"))
+				c.ServerSend(ms(3), []byte("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nTOKEN\r\n"))
+				n := pcapgen.NewConn(w, cli1, srv)
+				n.ClientISN, n.ServerISN = 5000000, 6000000
+				n.Handshake(ms(10))
+			},
+			want: "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 3.0ms\n" +
+				"GET /a HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nTOKEN\r\n",
+			closed: 0, incomplete: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, tc.build)
+			check(t, out, tc.want)
+			if st.NoResponseClosed != tc.closed || st.Incomplete != tc.incomplete {
+				t.Fatalf("NoResponseClosed %d Incomplete %d, want %d %d", st.NoResponseClosed, st.Incomplete, tc.closed, tc.incomplete)
+			}
+		})
+	}
+}
