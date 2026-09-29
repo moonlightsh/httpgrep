@@ -141,18 +141,10 @@ func sampleBlock() *output.Block {
 func TestDesignDocSample(t *testing.T) {
 	got := string(render(t, output.Options{Location: tz}, sampleBlock()))
 	want := "2026-09-28 15:30:12.345 127.0.0.1:52814 -> 127.0.0.1:7010 complete 12.0ms\n" +
-		"POST /api/device/bind HTTP/1.1\n" +
-		"Host: 127.0.0.1:7010\n" +
-		"Content-Type: application/json\n" +
-		"Content-Length: 38\n" +
-		"\n" +
+		"POST /api/device/bind HTTP/1.1\r\nHost: 127.0.0.1:7010\r\nContent-Type: application/json\r\nContent-Length: 38\r\n\r\n" +
 		"{\"sn\":\"490419C6117A0087747906\",\"ch\":1}\n" +
-		"HTTP/1.1 200 OK\n" +
-		"Content-Type: application/json\n" +
-		"Transfer-Encoding: chunked\r\n\r\n15\n" +
-		"{\"code\":0,\"msg\":\"ok\"}\n" +
-		"0\n" +
-		"\n"
+		"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
+		"Transfer-Encoding: chunked\r\n\r\n15\r\n{\"code\":0,\"msg\":\"ok\"}\r\n0\r\n\r\n"
 	if got != want {
 		t.Errorf("设计文档样例输出不正确\n得到:\n%q\n期望:\n%q", got, want)
 	}
