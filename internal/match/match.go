@@ -225,7 +225,7 @@ func (s *Scanner) Break() {
 		return
 	}
 	if s.m.fast {
-		s.fastTail = nil // 跨 Break 的候选作废
+		s.fastTail = s.fastTail[:0] // 跨 Break 的候选作废，保留容量
 		return
 	}
 	s.processLine(s.buf)
@@ -239,7 +239,7 @@ func (s *Scanner) Matched() bool { return s.matched }
 func (s *Scanner) Reset() {
 	s.matched = false
 	s.buf = s.buf[:0]
-	s.fastTail = nil
+	s.fastTail = s.fastTail[:0]
 }
 
 // processLine 处理一行完整的行（不含 \n）。行尾的 \r 不算行内容，先去掉。
