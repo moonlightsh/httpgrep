@@ -538,3 +538,28 @@ func TestNonTTYNoEscapeByteForByte(t *testing.T) {
 		t.Errorf("非 TTY 模式逐字节不变被破坏\n得到: %q\n期望: %q", got, want)
 	}
 }
+
+func TestTTYHighlightOnRawBytes(t *testing.T) {
+	// Highlight 收到的必须是原始字节（只去掉 \n 和行尾 \r），不是转义后的。
+	// 关键词 \x01 的正则形式 "a.b" 应在原始内容 "a\x01b" 上命中。
+	hl := func(line []byte) [][2]int {
+		if i := bytes.Index(line, []byte("a\x01b")); i >= 0 {
+			return [][2]int{{i, i + 3}}
+		}
+		// 转义后的行 "a\\x01b" 不应命中；若命中说明传错了
+		if bytes.Index(line, []byte(`a\x01b`)) >= 0 {
+			t.Errorf("Highlight 收到了转义后的行: %q", line)
+		}
+		return nil
+	}
+	b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+		Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte("xx a\x01b yy\n")}}}}}
+	got := string(render(t, output.Options{Location: tz, TTY: true, Highlight: hl}, b))
+	// 期望：命中区间 [3,6) 对应原始 "a\x01b"，转义后 a\x01b 变成 a\x01b（4 字节
+	// 0x01 转成 \x01 4 个字符），红色包住转义后的这一段。
+	want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
+		"xx \x1b[01;31ma\\x01b\x1b[m yy\n"
+	if got != want {
+		t.Errorf("原始字节高亮不正确\n得到: %q\n期望: %q", got, want)
+	}
+}

@@ -71,7 +71,6 @@ type Writer struct {
 	buf  []byte
 	prev bool   // 之前是否已经写过块
 	line []byte // TTY 模式下暂存还没写完的行
-	esc  []byte // TTY 模式下转义后的行缓冲
 }
 
 // NewWriter 创建一个 Writer。
@@ -165,7 +164,9 @@ func (w *Writer) appendHighlighted(data []byte) {
 	}
 }
 
-// flushLine 把暂存的行写出。有换行时 lineEnd 是 "\n"，行尾的 \r 不逃逸不参与高亮。
+// flushLine 把暂存的行写出。有换行时行尾的 \r 不转义不参与高亮。
+// Highlight 收到的是去掉 \n 和行尾 \r 的原始字节；命中区间按原始偏移给出，
+// 输出时按区间分段转义并插入颜色码，不需要偏移映射。
 func (w *Writer) flushLine(newline bool) {
 	line := w.line
 	tail := ""
@@ -173,28 +174,31 @@ func (w *Writer) flushLine(newline bool) {
 		tail = "\r"
 		line = line[:len(line)-1]
 	}
-	// 先转义到临时缓冲区，再把转义后的行传给 Highlight
-	w.esc = w.esc[:0]
-	w.esc = appendEscapedTo(w.esc, line)
-	start := len(w.buf)
-	w.buf = append(w.buf, w.esc...)
+	var ranges [][2]int
 	if w.opt.Highlight != nil {
-		ranges := w.opt.Highlight(w.esc)
-		// 逆序应用区间，避免位置移动
-		for i := len(ranges) - 1; i >= 0; i-- {
-			lo, hi := ranges[i][0], ranges[i][1]
-			if lo < 0 {
-				lo = 0
-			}
-			if hi > len(w.esc) {
-				hi = len(w.esc)
-			}
-			if lo >= hi {
-				continue
-			}
-			w.colorize(start+lo, start+hi, "\x1b[01;31m", "\x1b[m")
-		}
+		ranges = w.opt.Highlight(line)
 	}
+	// 按区间顺序分段写：区间外原样转义，区间内先写起始码，转义后写结束码。
+	// 分段转义与整行转义结果相同：转义是逐字节局部的，不依赖上下文。
+	prev := 0
+	for _, r := range ranges {
+		lo, hi := r[0], r[1]
+		if lo < 0 {
+			lo = 0
+		}
+		if hi > len(line) {
+			hi = len(line)
+		}
+		if lo >= hi {
+			continue
+		}
+		w.buf = appendEscapedTo(w.buf, line[prev:lo])
+		w.buf = append(w.buf, "\x1b[01;31m"...)
+		w.buf = appendEscapedTo(w.buf, line[lo:hi])
+		w.buf = append(w.buf, "\x1b[m"...)
+		prev = hi
+	}
+	w.buf = appendEscapedTo(w.buf, line[prev:])
 	if tail != "" {
 		w.buf = append(w.buf, tail...)
 	}
