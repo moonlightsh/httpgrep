@@ -749,3 +749,20 @@ func TestUpgradeHeldBytesOnServerFin(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// Upgrade 被拒后回放出一个没发完的请求，它的响应提前到达，然后 RST：
+// 请求最后一个包的时间是它缓存时的时间（ms1），不是回放发生时的时间（ms2）。
+func TestUpgradeReplayedRequestTiming(t *testing.T) {
+	out, _ := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+		c.ClientSend(ms(1), []byte("POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc"))
+		c.ServerSend(ms(2), []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"))
+		c.ServerSend(ms(5), []byte("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"))
+		c.ClientRst(ms(6))
+	})
+	check(t, out, "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 4.0ms\n"+
+		"POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc\n"+
+		"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n")
+}
