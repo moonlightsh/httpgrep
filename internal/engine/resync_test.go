@@ -321,3 +321,30 @@ func TestEncodedBodyGapIsBinary(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 一条 Orphan 消息被丢弃之后（这里是 ACK 校验不通过），它在解析器里还没结束。之后服务端方向
+// 又出现缺口时，缺口照样归入队首请求的响应：/TOKEN-a 是 incomplete，带上这 40 字节的缺口标记；
+// 下一个响应和 /TOKEN-b 配对，不错位。被丢弃的 9 字节 garbage 是抓到的字节，不算在缺口里。
+// 缺口在 ms2 客户端的包确认到服务端 49 字节处时认定；/TOKEN-b 耗时 3-2=1.0ms。
+func TestGapAfterDroppedOrphan(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /TOKEN-a HTTP/1.1\r\n\r\n"))
+		c.Raw(ms(1), false, c.ServerISN+1, c.ClientISN+1, decode.ACK|decode.PSH, []byte("garbage\r\n"))
+		c.SkipServer(9)
+		c.SkipServer(len("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nr1"))
+		c.ClientSend(ms(2), []byte("GET /TOKEN-b HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(3), []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nr2"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 incomplete\n"+
+		"GET /TOKEN-a HTTP/1.1\r\n\r\n"+
+		"[gap: 40 bytes missing]\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.347 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\n"+
+		"GET /TOKEN-b HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nr2\n")
+	if st.Exchanges != 2 || st.Incomplete != 1 || st.Complete != 1 || st.Orphans != 1 || st.Gaps != 1 || st.GapBytes != 40 {
+		t.Fatalf("stats: %+v", st)
+	}
+}

@@ -77,3 +77,27 @@ func TestMidStreamRequestBodyFirst(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 半路连接开头的残余字节作为 Orphan 丢弃后，它在解析器里还没结束。定角色之后服务端方向
+// 丢了一整个响应：缺口归入队首请求 /TOKEN-a 的响应，它是 incomplete；r2 和 /TOKEN-b 配对。
+// 缺口在 ms20 客户端的包确认到服务端 45 字节处时认定；/TOKEN-b 耗时 22-20=2.0ms。
+func TestMidStreamGapAfterOrphan(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.ServerSend(ms(0), []byte("tail\n"))
+		c.ClientSend(ms(10), []byte("GET /TOKEN-a HTTP/1.1\r\n\r\n"))
+		c.SkipServer(len("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nr1"))
+		c.ClientSend(ms(20), []byte("GET /TOKEN-b HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(22), []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nr2"))
+	})
+	check(t, out, "2026-09-28 15:30:12.355 10.0.0.1:52814 -> 10.0.0.2:80 incomplete\n"+
+		"GET /TOKEN-a HTTP/1.1\r\n\r\n"+
+		"[gap: 40 bytes missing]\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.365 10.0.0.1:52814 -> 10.0.0.2:80 complete 2.0ms\n"+
+		"GET /TOKEN-b HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nr2\n")
+	if st.Exchanges != 2 || st.Incomplete != 1 || st.Complete != 1 || st.Orphans != 1 || st.Gaps != 1 || st.GapBytes != 40 {
+		t.Fatalf("stats: %+v", st)
+	}
+}

@@ -488,23 +488,7 @@ func (s *reqSink) Desync(off int64) { s.c.e.stats.Desyncs++ }
 func (s *resSink) Begin(b http1.Begin) {
 	s.cur = nil
 	c := s.c
-	x := c.noReq
-	if x != nil {
-		c.noReq = nil
-		if b.Orphan {
-			x.incomplete = true
-		}
-	} else {
-		for _, q := range c.queue {
-			if !q.resDone {
-				x = q
-				break
-			}
-		}
-		if x != nil && b.PeerAck >= 0 && b.PeerAck <= x.reqOff {
-			x = nil
-		}
-	}
+	x := s.target(b.PeerAck)
 	if x == nil {
 		if b.Orphan {
 			c.e.stats.Orphans++
@@ -514,9 +498,33 @@ func (s *resSink) Begin(b http1.Begin) {
 		x.noReq, x.reqDone = true, true
 		x.start = b.TS
 	}
+	s.open(x, b.Orphan)
+}
+
+// target 找响应要归入的交互：先是收完 1xx、在等最终响应的缺请求交互，
+// 再是第一个还没收完最终响应的交互（要通过 ACK 校验）。都没有时返回 nil。
+func (s *resSink) target(peerAck int64) *exchange {
+	c := s.c
+	if x := c.noReq; x != nil {
+		c.noReq = nil
+		return x
+	}
+	for _, q := range c.queue {
+		if !q.resDone {
+			if peerAck >= 0 && peerAck <= q.reqOff {
+				return nil
+			}
+			return q
+		}
+	}
+	return nil
+}
+
+// open 在交互 x 上开始一条响应消息。orphan 表示它是失步后没有状态行的字节。
+func (s *resSink) open(x *exchange, orphan bool) {
 	x.hasRes = true
-	x.resOrphan = b.Orphan
-	if b.Orphan {
+	x.resOrphan = orphan
+	if orphan {
 		x.incomplete = true
 	}
 	x.resMsg = x.addMessage(dirRes)
@@ -567,10 +575,19 @@ func (s *resSink) Body(b []byte) {
 	}
 }
 
+// Gap 实现 http1.Sink。cur 为 nil 时解析器里还开着一条被丢弃的 Orphan 消息
+// （ACK 校验不通过、没有交互可归，或者是半路连接定角色之前的残余字节），解析器不会为
+// 这个缺口再 Begin。缺口里可能正是队首请求的响应，按 Orphan 的规则（缺口没有 PeerAck，
+// 不做 ACK 校验）归入它，此后的 Unparsed 字节也记在这条消息上，重新对齐时由 End(false) 结束。
 func (s *resSink) Gap(sec http1.Section, n int64) {
-	if x := s.cur; x != nil {
-		x.gap(x.resMsg, sec, n)
+	x := s.cur
+	if x == nil {
+		if x = s.target(-1); x == nil {
+			return
+		}
+		s.open(x, true)
 	}
+	x.gap(x.resMsg, sec, n)
 }
 
 func (s *resSink) End(complete bool, ts time.Time) {
