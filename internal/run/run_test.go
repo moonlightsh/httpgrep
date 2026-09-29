@@ -2,6 +2,8 @@ package run_test
 
 import (
 	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 
 	"httpgrep/internal/pcapgen"
@@ -31,4 +33,36 @@ func TestRunFileOutputsMatchedExchange(t *testing.T) {
 	check(t, out.String(), "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 12.0ms\n"+
 		"GET /a HTTP/1.1\r\nHost: x\r\n\r\n"+
 		"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nid=TOKEN-42\n")
+}
+
+// 输入远大于一批（256 KiB）和整个批次池：包跨批次、批次复用之后，
+// 每个交互的数据都不能串。400 个交互共约 1.7 MB，命中其中 4 个。
+func TestRunLargeInputAcrossBatches(t *testing.T) {
+	in := capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		for i := range 400 {
+			body := fmt.Sprintf("row-%03d:", i) + strings.Repeat("a", 3992)
+			c.ClientSend(ms(float64(i*10)), fmt.Appendf(nil, "GET /%d HTTP/1.1\r\n\r\n", i))
+			c.ServerSend(ms(float64(i*10+1)), []byte("HTTP/1.1 200 OK\r\nContent-Length: 4000\r\n\r\n"+body))
+		}
+	})
+	var out bytes.Buffer
+	matched, st, err := run.Run(run.Config{Input: bytes.NewReader(in), Stdout: &out, Opts: opts(t, "-E", "row-.07:")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pad := strings.Repeat("a", 3992)
+	block := func(ts, i, row string) string {
+		return "2026-09-28 " + ts + " 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\n" +
+			"GET /" + i + " HTTP/1.1\r\n\r\n" +
+			"HTTP/1.1 200 OK\r\nContent-Length: 4000\r\n\r\nrow-" + row + ":" + pad + "\n"
+	}
+	check(t, out.String(), block("15:30:12.415", "7", "007")+"--\n"+
+		block("15:30:13.415", "107", "107")+"--\n"+
+		block("15:30:14.415", "207", "207")+"--\n"+
+		block("15:30:15.415", "307", "307"))
+	if !matched || st.Exchanges != 400 || st.Matched != 4 {
+		t.Fatalf("matched %v, stats %+v", matched, st)
+	}
 }
