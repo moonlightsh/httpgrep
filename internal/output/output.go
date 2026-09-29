@@ -218,9 +218,11 @@ func (w *Writer) flushLine(newline bool) {
 	w.line = w.line[:0]
 }
 
+// appendEscapedTo 把 data 转义后追加到 buf。转成 \xNN 的有：
 // \t、\r、\n 以外的 C0 字符和 DEL；合法 UTF-8 编码的 C1 字符（C2 80–C2 9F，
 // 两字节都转义）；以及不成 UTF-8 序列的单个 0x80–0x9F 字节。其他字节原样。
-func appendEscapedTo(buf, data []byte) []byte {
+// 同时接受 string，占位行里的头部值不必转成 []byte 再转义。
+func appendEscapedTo[T string | []byte](buf []byte, data T) []byte {
 	for i := 0; i < len(data); {
 		c := data[i]
 		switch {
@@ -239,7 +241,7 @@ func appendEscapedTo(buf, data []byte) []byte {
 		case c >= 0xc2:
 			// 可能是合法 UTF-8 序列的引导字节，用 utf8 判断；
 			// DecodeRune 同时拒绝过长编码和代理区编码
-			_, size := utf8.DecodeRune(data[i:])
+			size := runeSize(data[i:])
 			if size > 1 {
 				buf = append(buf, data[i:i+size]...)
 				i += size
@@ -253,6 +255,16 @@ func appendEscapedTo(buf, data []byte) []byte {
 		}
 	}
 	return buf
+}
+
+// runeSize 返回 data 开头 UTF-8 序列的长度，非法时为 1。
+func runeSize[T string | []byte](data T) int {
+	if s, ok := any(data).(string); ok {
+		_, size := utf8.DecodeRuneInString(s)
+		return size
+	}
+	_, size := utf8.DecodeRune([]byte(data))
+	return size
 }
 
 // appendHex 追加小写十六进制形式的 \xNN。
@@ -314,7 +326,8 @@ func (w *Writer) writeLocationLine(b *Block) {
 }
 
 // writeBinaryMessage 写二进制 body 的消息：从第一个 body 类 Piece 起的连续一段
-// 换成一行占位，其余 Piece 原样输出。
+// 换成一行占位，其余 Piece 原样输出。没有任何 body 类 Piece 时（比如带
+// Content-Encoding 的空 body）占位行仍然写在所有 Piece 之后。
 func (w *Writer) writeBinaryMessage(m *Message) {
 	i := 0
 	for ; i < len(m.Pieces); i++ {
@@ -335,13 +348,13 @@ func (w *Writer) writeBinaryMessage(m *Message) {
 	}
 	w.buf = append(w.buf, "[binary body omitted: "...)
 	if m.ContentEncoding != "" {
-		w.buf = append(w.buf, m.ContentEncoding...)
+		w.appendField(m.ContentEncoding)
 		if m.ContentType != "" {
 			w.buf = append(w.buf, ", "...)
 		}
 	}
 	if m.ContentType != "" {
-		w.buf = append(w.buf, m.ContentType...)
+		w.appendField(m.ContentType)
 		w.buf = append(w.buf, ", "...)
 	} else if m.ContentEncoding != "" {
 		w.buf = append(w.buf, ", "...)
@@ -366,6 +379,16 @@ func (w *Writer) writeBinaryMessage(m *Message) {
 	}
 	if n := len(w.buf); n > 0 && w.buf[n-1] != '\n' {
 		w.buf = append(w.buf, '\n')
+	}
+}
+
+// appendField 追加占位行里来自线上头部的值：TTY 模式下和 Piece 内容一样转义，
+// 防止终端控制序列注入；非 TTY 模式下原样输出。
+func (w *Writer) appendField(s string) {
+	if w.opt.TTY {
+		w.buf = appendEscapedTo(w.buf, s)
+	} else {
+		w.buf = append(w.buf, s...)
 	}
 }
 
