@@ -93,7 +93,7 @@ func peerAckOf(peer *dir, ack uint32, hasAck bool) int64 {
 		return -1
 	}
 	if off := peer.offset(ack); off >= 0 {
-		return off
+		return peer.limit(off) // 确认 FIN 的那个序号不算流里的字节
 	}
 	return -1
 }
@@ -130,5 +130,9 @@ func (a *Assembler) expireReorder(c *conn, s Side, now time.Time) {
 			return
 		}
 		a.skipTo(c, s, d.buf[oldest].off, now)
+	}
+	// FIN 之前的空洞也按 FIN 到达的时间计时。
+	if d.finSeen && d.next < d.finOff && now.Sub(d.finTs) >= a.cfg.ReorderTimeout {
+		a.skipTo(c, s, d.finOff, now)
 	}
 }

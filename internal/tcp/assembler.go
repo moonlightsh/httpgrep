@@ -37,7 +37,12 @@ func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 	}
 	c.last = ts
 	a.lru.touch(c)
-	s := c.side(seg.Src)
+	a.segment(c, c.side(seg.Src), seg, ts)
+	a.settle(c, ts)
+}
+
+// segment 把一个段应用到连接的 side 方向。
+func (a *Assembler) segment(c *conn, s Side, seg *decode.Segment, ts time.Time) {
 	d, peer := &c.d[s], &c.d[1-s]
 	if seg.Flags&decode.SYN != 0 {
 		if s == 1 && !d.started {
@@ -54,10 +59,15 @@ func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 		// 对端的数据已经送达，只是没抓到。
 		a.skipTo(c, 1-s, peerAck, ts)
 	}
+	off := d.offset(seg.Seq)
+	if seg.Flags&decode.FIN != 0 && !d.finSeen {
+		d.finSeen = true
+		d.finOff = off + int64(len(seg.Payload)) + int64(max(seg.Missing, 0))
+		d.finTs = ts
+	}
 	if len(seg.Payload) == 0 && seg.Missing <= 0 {
 		return
 	}
-	off := d.offset(seg.Seq)
 	if off > d.next {
 		a.buffer(d, off, seg.Payload, int64(max(seg.Missing, 0)), seg.Ack, hasAck, ts)
 		a.limitReorder(c, s, ts)
@@ -68,6 +78,32 @@ func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 		// 截断的字节紧跟在负载之后，按缺口交付。
 		a.skipTo(c, s, off+int64(len(seg.Payload))+int64(seg.Missing), ts)
 	}
+}
+
+// settle 回调已经生效的 FIN；两个方向都结束后关闭连接。
+func (a *Assembler) settle(c *conn, ts time.Time) {
+	for s := range Side(2) {
+		d := &c.d[s]
+		if d.finSeen && !d.finDone && d.next >= d.finOff {
+			d.finDone = true
+			c.h.Fin(s, ts)
+		}
+	}
+	if c.d[0].finDone && c.d[1].finDone {
+		a.close(c, CloseFin, ts)
+	}
+}
+
+// close 把连接移出连接表，再回调 Closed。
+func (a *Assembler) close(c *conn, reason CloseReason, ts time.Time) {
+	delete(a.conns, c.key)
+	delete(a.conns, Key{c.key.B, c.key.A})
+	a.lru.remove(c)
+	for s := range c.d {
+		a.buffered -= c.d[s].bufLen
+		c.d[s].buf, c.d[s].bufLen = nil, 0
+	}
+	c.h.Closed(reason, ts)
 }
 
 // deliver 交付从 off 开始、off <= next 的负载，已交付的前缀跳过。
@@ -134,6 +170,7 @@ func (a *Assembler) Advance(now time.Time) {
 		next := c.newer // 回调里可能关闭 c
 		a.expireReorder(c, 0, now)
 		a.expireReorder(c, 1, now)
+		a.settle(c, now)
 		c = next
 	}
 }

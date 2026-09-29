@@ -12,6 +12,19 @@ type dir struct {
 	next    int64  // 下一个期望交付的偏移
 	buf     []chunk
 	bufLen  int64 // buf 里的字节数
+
+	finSeen bool
+	finDone bool      // 已回调 Fin
+	finOff  int64     // FIN 的偏移，即这个方向流的长度
+	finTs   time.Time // FIN 到达的时间
+}
+
+// limit 把要跳到的偏移限制在 FIN 之前。
+func (d *dir) limit(off int64) int64 {
+	if d.finSeen {
+		return min(off, d.finOff)
+	}
+	return off
 }
 
 // start 以 seq 作为偏移 0 的序号。
