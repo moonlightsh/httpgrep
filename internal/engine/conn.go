@@ -648,7 +648,8 @@ func (s *resSink) open(x *exchange, orphan bool) {
 }
 
 // Raw 实现 http1.Sink。占位上的字节是迟到响应（整个响应迟到，或者超时时收到一半的响应
-// 剩下的部分迟到），只计数。
+// 剩下的部分迟到），只计数。Late 的口径是“超时之后还有字节或缺口归到这个占位”，
+// 失步后归入占位的 Orphan（Unparsed）字节也算，虽然它们不一定是一个完整的响应。
 func (s *resSink) Raw(sec http1.Section, b []byte) {
 	if x := s.cur; x != nil && x.ghost {
 		s.c.markLate(x)

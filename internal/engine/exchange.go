@@ -116,6 +116,8 @@ const (
 )
 
 // touch 记下 ts 收到了属于这个交互的数据。
+// 缺口不调用 touch：缺口说明那段数据没抓到（或 ACK 表明已送达），不是收到了数据，
+// 不给交互续命。缺口通常紧挨着真正收到的数据，那些数据照常续命。
 func (x *exchange) touch(ts time.Time) {
 	if ts.After(x.last) {
 		x.last = ts

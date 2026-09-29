@@ -158,7 +158,9 @@ func inFlight(n int) func(w *pcapgen.Writer) {
 
 // BenchmarkAdvance 测 Advance 的开销和在途交互总数的关系。
 // expire：每次 Advance 恰好到期一个交互；idle：每次 Advance 都没有交互到期。
-// 两种情况下，n=100 和 n=10000 的 ns/op 应当同一量级（最小堆是 O(log n)）。
+// 这两项的时钟每次只推进 1µs 以内，tcp.Assembler.Advance 每 100ms（抓包时间）一次的
+// 全表扫描被跳过，测的是引擎自己的定时器：n=100 和 n=10000 的 ns/op 应当同一量级（最小堆是 O(log n)）。
+// idle-scan：每次推进 100ms，每次都触发 tcp 的全表扫描，这部分和连接数成正比，不属于引擎的定时器。
 func BenchmarkAdvance(b *testing.B) {
 	for _, n := range []int{100, 10000} {
 		pkts, _ := decodeAll(b, inFlight(n))
@@ -199,6 +201,27 @@ func BenchmarkAdvance(b *testing.B) {
 			for range b.N {
 				now = now.Add(time.Nanosecond)
 				e.Advance(now)
+			}
+			b.StopTimer()
+			if st := e.Stats(); st.NoResponseTimeout != 0 {
+				b.Fatalf("NoResponseTimeout %d", st.NoResponseTimeout)
+			}
+		})
+		b.Run("idle-scan/n="+strconv.Itoa(n), func(b *testing.B) {
+			b.ReportAllocs()
+			var e *engine.Engine
+			var now time.Time
+			k := 0
+			for range b.N {
+				// 推进到 25s 后重建，免得交互到期或连接空闲释放。
+				if k == 0 {
+					b.StopTimer()
+					e, now = setup(), pkts[len(pkts)-1].ts
+					b.StartTimer()
+				}
+				now = now.Add(100 * time.Millisecond)
+				e.Advance(now)
+				k = (k + 1) % 250
 			}
 			b.StopTimer()
 			if st := e.Stats(); st.NoResponseTimeout != 0 {
