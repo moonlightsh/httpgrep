@@ -335,6 +335,9 @@ func (s *resSink) Head(h *http1.Head) {
 		// 对 Upgrade 请求的决定要立即交给请求解析器：同一个段里可能紧跟着
 		// 下一个响应，它要配给 Upgrade 请求之后缓存着的请求。两个方向的解析器
 		// 互相独立，请求解析器回放时只改动队列和 rq，不碰响应解析器和 rs.cur。
+		// 放在 Head 而不是 End：响应没有 body 时两者之间没有别的字节，没有区别；
+		// 只有 Upgrade 请求的响应带 body，或者读到关闭为止时，body 期间到达的
+		// 请求字节放在 Head 里回放会及时解析，放在 End 里要等响应收完。
 		c := s.c
 		switch {
 		case h.Tunnel:
