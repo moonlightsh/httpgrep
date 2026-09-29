@@ -402,3 +402,43 @@ func TestConnSendAbsoluteSeq(t *testing.T) {
 		}
 	}
 }
+
+// FIN 和 RST 的标志位正确，FIN 消耗一个序号，FIN 之后数据段序号继续推进。
+func TestConnFinRstSeq(t *testing.T) {
+	client := netip.MustParseAddrPort("10.0.0.1:50003")
+	server := netip.MustParseAddrPort("10.0.0.2:80")
+	t0 := time.Unix(1700000000, 0)
+	path := writePcap(t, "finrst.pcap", pcap.LinkEthernet, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, client, server)
+		c.Handshake(t0)
+		c.ClientSend(t0.Add(10*time.Millisecond), []byte("abc")) // 3 字节，序号到 1004
+		c.ServerAck(t0.Add(11 * time.Millisecond))
+		c.ClientFin(t0.Add(20 * time.Millisecond)) // 占用 1004，之后 1005
+		c.ClientSend(t0.Add(30*time.Millisecond), []byte("d"))
+		c.ClientRst(t0.Add(40 * time.Millisecond))
+	})
+	// 期望值手写：ISN=1000。
+	want := [][]string{
+		{"0x0002"}, // SYN
+		{"0x0012"}, // SYN-ACK
+		{"0x0010"}, // ACK
+		{"0x0018"}, // 数据 abc：seq 1001
+		{"0x0010"}, // ServerAck：ack 1004
+		{"0x0011"}, // ClientFin：seq 1004
+		{"0x0018"}, // 数据 d：seq 1005
+		{"0x0014"}, // RST：seq 1006
+	}
+	rows := tsharkFields(t, path, nil, "tcp.flags", "tcp.seq_raw")
+	if len(rows) != len(want) {
+		t.Fatalf("包数 = %d，想要 %d", len(rows), len(want))
+	}
+	wantSeq := []string{"1000", "2000", "1001", "1001", "2001", "1004", "1005", "1006"}
+	for i, row := range rows {
+		if row[0] != want[i][0] {
+			t.Errorf("第 %d 个包 flags = %s，想要 %s", i+1, row[0], want[i][0])
+		}
+		if row[1] != wantSeq[i] {
+			t.Errorf("第 %d 个包 seq = %s，想要 %s", i+1, row[1], wantSeq[i])
+		}
+	}
+}
