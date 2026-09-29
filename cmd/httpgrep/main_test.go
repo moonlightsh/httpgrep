@@ -405,11 +405,15 @@ func (b *notifyBuffer) waitFor(d time.Duration, ok func(string) bool) bool {
 }
 
 // piped 是一个从管道读标准输入、还在运行的进程。
+// cmd.Wait 只能调用一次（第二次调用会一直阻塞），所以只在一个协程里调用它，
+// 结果放在 err 里，done 关闭后可读；waitExit 和 Cleanup 都从 done 取结果。
 type piped struct {
 	cmd            *exec.Cmd
 	stdin          io.WriteCloser
 	stdout, stderr *notifyBuffer
 	cancel         context.CancelFunc
+	done           chan struct{}
+	err            error
 }
 
 // startPiped 启动进程，标准输入是一个由测试持有写端的管道。进程最多运行 30 秒。
@@ -418,7 +422,7 @@ func startPiped(t *testing.T, args ...string) *piped {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env = append(os.Environ(), "TZ=UTC")
-	p := &piped{cmd: cmd, stdout: newNotifyBuffer(), stderr: newNotifyBuffer(), cancel: cancel}
+	p := &piped{cmd: cmd, stdout: newNotifyBuffer(), stderr: newNotifyBuffer(), cancel: cancel, done: make(chan struct{})}
 	cmd.Stdout, cmd.Stderr = p.stdout, p.stderr
 	var err error
 	if p.stdin, err = cmd.StdinPipe(); err != nil {
@@ -427,18 +431,23 @@ func startPiped(t *testing.T, args ...string) *piped {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	go func() {
+		p.err = cmd.Wait()
+		close(p.done)
+	}()
 	t.Cleanup(func() {
+		// 先杀掉进程再等：测试失败时进程可能还在运行。
 		cancel()
 		p.stdin.Close()
-		cmd.Wait()
+		<-p.done
 	})
 	return p
 }
 
-// wait 关闭标准输入之前不调用；返回退出码。
+// wait 在关闭标准输入之后调用，等进程退出（最多 10 秒），返回退出码。
 func (p *piped) wait(t *testing.T) int {
 	t.Helper()
-	return exitCode(t, p.cmd.Wait())
+	return p.waitExit(t, 10*time.Second)
 }
 
 const slowReq = "GET /slow HTTP/1.1\r\nHost: x\r\n\r\n"
@@ -519,14 +528,12 @@ func startSlow(t *testing.T) *piped {
 	return p
 }
 
-// waitExit 等进程退出，最多 d；超时 t.Fatal。
+// waitExit 等进程退出，最多 d；超时 t.Fatal（Cleanup 随后杀掉进程）。
 func (p *piped) waitExit(t *testing.T, d time.Duration) int {
 	t.Helper()
-	done := make(chan error, 1)
-	go func() { done <- p.cmd.Wait() }()
 	select {
-	case err := <-done:
-		return exitCode(t, err)
+	case <-p.done:
+		return exitCode(t, p.err)
 	case <-time.After(d):
 		t.Fatalf("still running after %v; stdout %q", d, p.stdout.String())
 		return -1
