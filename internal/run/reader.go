@@ -3,6 +3,7 @@ package run
 import (
 	"errors"
 	"io"
+	"sync/atomic"
 	"time"
 
 	"httpgrep/internal/decode"
@@ -39,7 +40,7 @@ type batch struct {
 	err  error    // 读取结束的原因（io.EOF 或读错误），只出现在最后一批
 	work [][]item // 按分片分好的段，只在多分片时使用
 	// pending 是还在处理这一批的分片数，减到 0 时批次放回空闲池。
-	pending int32
+	pending atomic.Int32
 }
 
 // reset 清空批次以便复用，保留已分配的容量。

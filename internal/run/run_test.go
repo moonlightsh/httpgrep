@@ -211,3 +211,37 @@ func TestRunStopReadsUntilEOF(t *testing.T) {
 	check(t, out.String(), "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 4.0ms\n"+
 		"GET /a HTTP/1.1\r\nX: HIT\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n")
 }
+
+// --cpus 4 时每个分片的内存上限是 --max-memory 的 1/4：一个缓存了约 100 KB 的在途请求
+// 在 256K 的上限下放得下，在 64K 的分片上限下被丢弃，stderr 写一行告警。
+func TestRunShardMemoryLimit(t *testing.T) {
+	in := capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("POST /up HTTP/1.1\r\nX: HIT\r\nContent-Length: 200000\r\n\r\n"))
+		c.ClientSend(ms(1), bytes.Repeat([]byte("b"), 100000))
+	})
+	for _, tc := range []struct {
+		cpus        string
+		matched     bool
+		evicted     int64
+		stderr      string
+		stdoutEmpty bool
+	}{
+		{"1", true, 0, "", false},
+		{"4", false, 1, "httpgrep: dropped 1 in-flight exchanges (1 matched) to stay under --max-memory\n", true},
+	} {
+		t.Run("cpus="+tc.cpus, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			matched, st, err := run.Run(run.Config{Input: bytes.NewReader(in), Stdout: &out, Stderr: &errOut,
+				Opts: opts(t, "--cpus", tc.cpus, "--max-memory", "256K", "--max-message", "128K", "HIT")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if matched != tc.matched || st.Evicted != tc.evicted || (out.Len() == 0) != tc.stdoutEmpty {
+				t.Fatalf("matched %v, Evicted %d, stdout %d bytes", matched, st.Evicted, out.Len())
+			}
+			check(t, errOut.String(), tc.stderr)
+		})
+	}
+}

@@ -79,7 +79,8 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 	}
 	out := &sink{w: output.NewWriter(cfg.Stdout, oo), stderr: cfg.Stderr}
 
-	rd := startReader(cfg.Input, 1)
+	n := max(o.CPUs, 1)
+	rd := startReader(cfg.Input, n)
 	defer close(rd.done)
 	// Stop 关闭后最多再读 stopGrace，或者读到输入结束为止；读取协程卡在阻塞的 read 上时不等它。
 	stop := cfg.Stop
@@ -112,7 +113,12 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 		Emit:       out.emit,
 		Warn:       out.warn,
 	}
-	var d dispatcher = &single{e: engine.New(ecfg), free: rd.free}
+	var d dispatcher
+	if n > 1 {
+		d = newMulti(n, ecfg, rd.free)
+	} else {
+		d = &single{e: engine.New(ecfg), free: rd.free}
+	}
 
 	l := loop{link: h.link, d: d}
 	var tick <-chan time.Time
