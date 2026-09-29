@@ -374,3 +374,23 @@ func TestTimeoutUnfinishedUpgradeRequest(t *testing.T) {
 		}
 	}
 }
+
+// 占位上迟到的 1xx 之后还有迟到的最终响应：100 不结束占位，200 也归占位，
+// 下一个请求和它自己的 204 配对，不错位。
+func TestLateInterimResponse(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(35000), []byte("HTTP/1.1 100 Continue\r\n\r\n"))
+		c.ClientSend(ms(36000), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(37000), []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"))
+		c.ServerSend(ms(37001), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+	check(t, out, "2026-09-28 15:30:48.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 1001.0ms\n"+
+		"GET /TOKEN HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 204 No Content\r\n\r\n")
+	if st.Late != 1 || st.Complete != 1 || st.NoResponseTimeout != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
