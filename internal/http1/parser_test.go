@@ -1112,3 +1112,34 @@ func TestMethodCalledOncePerFinalResponse(t *testing.T) {
 		}
 	}
 }
+
+// 没有原因短语、行尾是 CRLF 的状态行：正常状态、失步后和 Resync 模式下，任意切分都能识别。
+func TestStatusLineWithoutReasonCRLF(t *testing.T) {
+	const s204 = "HTTP/1.1 204\r\n\r\n"
+	const s304 = "HTTP/1.1 304 X\r\n\r\n"
+	ev204 := func(off int) []string {
+		return []string{fmt.Sprintf("begin off=%d", off), "raw head " + s204, "head 204 HTTP/1.1", "end true"}
+	}
+	ev304 := func(off int) []string {
+		return []string{fmt.Sprintf("begin off=%d", off), "raw head " + s304, "head 304 HTTP/1.1", "end true"}
+	}
+	cat := func(parts ...[]string) []string {
+		var out []string
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+	t.Run("normal", func(t *testing.T) {
+		checkAllChunkings(t, http1.Response, http1.Options{}, cat(ev204(0), ev304(16)), data(s204+s304))
+	})
+	t.Run("resync", func(t *testing.T) {
+		want := cat([]string{"begin off=0 orphan", "raw unparsed junk\r\n", "end false"}, ev204(6), ev304(22))
+		checkAllChunkings(t, http1.Response, http1.Options{Resync: true}, want, data("junk\r\n"+s204+s304))
+	})
+	t.Run("after desync", func(t *testing.T) {
+		const ok = "HTTP/1.1 200 OK\r\n"
+		want := cat([]string{"begin off=0", "raw head " + ok, "desync 17", "raw unparsed nocolon\r\n", "end false"}, ev204(26))
+		checkAllChunkings(t, http1.Response, http1.Options{}, want, data(ok+"nocolon\r\n"+s204))
+	})
+}

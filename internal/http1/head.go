@@ -200,7 +200,8 @@ func startPrefix(kind Kind, s []byte, blank bool) bool {
 	const pat = "HTTP/1.x ddd"
 	for j, c := range s {
 		if j >= len(pat) {
-			return c == ' '
+			// 三位状态码之后是原因短语前的空格，或者行尾 CRLF 的 '\r'（没有原因短语）。
+			return c == ' ' || c == '\r' && j == len(s)-1
 		}
 		switch pat[j] {
 		case 'x':
