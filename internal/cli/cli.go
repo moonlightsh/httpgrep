@@ -75,20 +75,6 @@ func Parse(args []string) (Options, error) {
 			name, val, hasVal := cut(arg[2:], "=")
 			var err error
 			switch name {
-			case "e":
-				if !hasVal {
-					i, val, err = takeArg(args, i, "--e")
-					if err != nil {
-						return opts, err
-					}
-				}
-				opts.Patterns = append(opts.Patterns, splitLines(val)...)
-				hasE = true
-			case "E":
-				if hasVal {
-					return opts, &Error{"option --E does not take an argument"}
-				}
-				opts.Regex = true
 			case "timeout":
 				if !hasVal {
 					i, val, err = takeArg(args, i, "--timeout")
@@ -244,18 +230,34 @@ func parseSize(s string) (int64, error) {
 	case 'g', 'G':
 		mult, s = 1<<30, s[:len(s)-1]
 	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
+	if !isDigits(s) {
 		return 0, &Error{"invalid size: " + s}
 	}
-	if n <= 0 || n > (1<<63-1)/mult {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n <= 0 || n > (1<<63-1)/mult {
 		return 0, &Error{"invalid size: " + s}
 	}
 	return n * mult, nil
 }
 
-// parseInt 解析不小于 1 的整数。
+// isDigits 报告 s 非空且全是 ASCII 数字。
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// parseInt 解析不小于 1 的纯数字整数。
 func parseInt(s string) (int, error) {
+	if !isDigits(s) {
+		return 0, &Error{"invalid value: " + s}
+	}
 	n, err := strconv.Atoi(s)
 	if err != nil || n < 1 {
 		return 0, &Error{"invalid value: " + s}

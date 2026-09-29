@@ -57,6 +57,25 @@ func TestParsePositionalPatternAndFile(t *testing.T) {
 	}
 }
 
+// 第 2 条：-e 可以写多次，关键词按出现顺序累积。
+func TestParseMultipleE(t *testing.T) {
+	opts, err := cli.Parse([]string{"-e", "a", "-e", "b"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(opts.Patterns) != 2 || opts.Patterns[0] != "a" || opts.Patterns[1] != "b" {
+		t.Errorf("Patterns = %v, want [a b]", opts.Patterns)
+	}
+
+	opts, err = cli.Parse([]string{"-e", "a\nb", "-ec"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(opts.Patterns) != 3 || opts.Patterns[0] != "a" || opts.Patterns[1] != "b" || opts.Patterns[2] != "c" {
+		t.Errorf("Patterns = %v, want [a b c]", opts.Patterns)
+	}
+}
+
 // 第 2 条：文件参数最多一个。
 func TestParseTooManyFiles(t *testing.T) {
 	_, err := cli.Parse([]string{"keyword", "a.pcap", "b.pcap"})
@@ -182,6 +201,7 @@ func TestParseSizes(t *testing.T) {
 		{"1M", 1 << 20},
 		{"1m", 1 << 20},
 		{"2G", 2 << 30},
+		{"2g", 2 << 30},
 	}
 	for _, c := range cases {
 		opts, err := cli.Parse([]string{"--max-memory=" + c.in, "--max-message=1", "kw"})
@@ -192,21 +212,66 @@ func TestParseSizes(t *testing.T) {
 			t.Errorf("--max-memory %s = %d, want %d", c.in, opts.MaxMemory, c.want)
 		}
 	}
-	for _, bad := range []string{"0", "-5", "abc", "", "1Q", "1Kx"} {
+	// 溢出与 ParseInt 越界都必须报错；前导 + 不算纯数字。
+	for _, bad := range []string{"0", "-5", "abc", "", "1Q", "1Kx", "+5", "8589934592G", "9223372036854775807K", "99999999999999999999"} {
 		_, err := cli.Parse([]string{"--max-memory=" + bad, "kw"})
 		if err == nil {
 			t.Errorf("--max-memory %q 应报错", bad)
 		}
 	}
-	// MaxMessage 大于 MaxMemory 时报错。
+	// MaxMessage 大于 MaxMemory 时报错；相等则合法。
 	_, err := cli.Parse([]string{"--max-memory=1M", "--max-message=2M", "kw"})
 	if err == nil {
 		t.Error("max-message > max-memory 应报错")
 	}
-	// 负数形式会被当成选项串处理，必须报错而不是被当成文件。
+	opts, err := cli.Parse([]string{"--max-memory=1M", "--max-message=1M", "kw"})
+	if err != nil {
+		t.Fatalf("max-message == max-memory 应合法: %v", err)
+	}
+	if opts.MaxMessage != 1<<20 {
+		t.Errorf("MaxMessage = %d, want %d", opts.MaxMessage, int64(1<<20))
+	}
+	// 选项值是负数时直接作为选项值取走，同样报错而不是被当成文件。
 	_, err = cli.Parse([]string{"--max-memory", "-5", "kw"})
 	if err == nil {
 		t.Error("--max-memory -5 应报错")
+	}
+}
+
+// 第 5 条：--max-message 单独走同一套大小解析。
+func TestParseMaxMessageSizes(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		{"100", 100},
+		{"512K", 524288},
+		{"1M", 1 << 20},
+		{"2G", 2 << 30},
+		{"2g", 2 << 30},
+	}
+	for _, c := range cases {
+		opts, err := cli.Parse([]string{"--max-memory=8G", "--max-message=" + c.in, "kw"})
+		if err != nil {
+			t.Fatalf("--max-message %s: %v", c.in, err)
+		}
+		if opts.MaxMessage != c.want {
+			t.Errorf("--max-message %s = %d, want %d", c.in, opts.MaxMessage, c.want)
+		}
+	}
+	for _, bad := range []string{"0", "-5", "abc", "", "1Q", "1Kx", "+5", "8589934592G", "99999999999999999999"} {
+		_, err := cli.Parse([]string{"--max-message=" + bad, "kw"})
+		if err == nil {
+			t.Errorf("--max-message %q 应报错", bad)
+		}
+	}
+	// 空格形式同样支持。
+	opts, err := cli.Parse([]string{"--max-message", "512K", "kw"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if opts.MaxMessage != 524288 {
+		t.Errorf("MaxMessage = %d, want 524288", opts.MaxMessage)
 	}
 }
 
@@ -228,7 +293,7 @@ func TestParseDurationAndCPUs(t *testing.T) {
 			t.Errorf("--timeout %q 应报错", bad)
 		}
 	}
-	for _, bad := range []string{"0", "-1", "x"} {
+	for _, bad := range []string{"0", "-1", "x", "+5", "+4", "1.5"} {
 		_, err := cli.Parse([]string{"--cpus=" + bad, "kw"})
 		if err == nil {
 			t.Errorf("--cpus %q 应报错", bad)
@@ -293,6 +358,15 @@ func TestParseErrors(t *testing.T) {
 	_, err = cli.Parse([]string{"-x", "kw"})
 	if err == nil || err.Error() != "unknown option: -x" {
 		t.Fatalf("err = %v, want unknown option: -x", err)
+	}
+	// 长选项形式只有 --timeout 等，--e/--E 未定义，应报未知选项。
+	_, err = cli.Parse([]string{"--e", "kw"})
+	if err == nil || err.Error() != "unknown option: --e" {
+		t.Fatalf("err = %v, want unknown option: --e", err)
+	}
+	_, err = cli.Parse([]string{"--E", "kw"})
+	if err == nil || err.Error() != "unknown option: --E" {
+		t.Fatalf("err = %v, want unknown option: --E", err)
 	}
 	_, err = cli.Parse([]string{"--timeout"})
 	if err == nil || err.Error() != "option requires an argument: --timeout" {
