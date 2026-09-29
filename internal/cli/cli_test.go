@@ -445,3 +445,11 @@ func TestParseFlagRejectsValue(t *testing.T) {
 		}
 	}
 }
+
+// 非 ASCII 短选项的报错消息按完整字符输出，不出现乱码。
+func TestParseUnknownNonASCIIShortOption(t *testing.T) {
+	_, err := cli.Parse([]string{"-é", "kw"})
+	if err == nil || err.Error() != "unknown option: -é" {
+		t.Fatalf("err = %v, want unknown option: -é", err)
+	}
+}

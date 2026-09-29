@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Usage 是英文帮助文本，覆盖设计文档第 2 节的全部选项。
@@ -157,7 +158,8 @@ func Parse(args []string) (Options, error) {
 				case 'E':
 					opts.Regex = true
 				default:
-					return opts, &errBadArg{"unknown option: -" + string(c)}
+					r, _ := utf8.DecodeRuneInString(arg[j:])
+					return opts, &errBadArg{"unknown option: -" + string(r)}
 				}
 			}
 		default:
