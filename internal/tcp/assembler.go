@@ -215,8 +215,16 @@ func (a *Assembler) Flush(now time.Time) {
 	}
 }
 
-// Release 主动释放连接，回调 Closed(CloseEvicted)。连接不存在时返回 false。
-func (a *Assembler) Release(k Key, now time.Time) bool { return false }
+// Release 主动释放连接（内存超限时用），回调 Closed(CloseEvicted)。连接不存在时返回 false。
+// k 的两个方向都可以。乱序缓存直接丢弃，不再交付。
+func (a *Assembler) Release(k Key, now time.Time) bool {
+	c := a.conns[k]
+	if c == nil {
+		return false
+	}
+	a.close(c, CloseEvicted, now)
+	return true
+}
 
 // BufferedBytes 返回乱序缓存里的字节数。
 func (a *Assembler) BufferedBytes() int64 { return 0 }
@@ -225,4 +233,9 @@ func (a *Assembler) BufferedBytes() int64 { return 0 }
 func (a *Assembler) Len() int { return len(a.conns) / 2 }
 
 // LeastRecent 返回最久没有收到包的连接。
-func (a *Assembler) LeastRecent() (Key, bool) { return Key{}, false }
+func (a *Assembler) LeastRecent() (Key, bool) {
+	if a.lru.oldest == nil {
+		return Key{}, false
+	}
+	return a.lru.oldest.key, true
+}

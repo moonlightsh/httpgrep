@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"httpgrep/internal/decode"
+	"httpgrep/internal/tcp"
 )
 
 // 第 12 条：FIN 按序号生效，两个方向都 Fin 后 Closed(CloseFin)。
@@ -163,5 +164,67 @@ func TestFlush(t *testing.T) {
 	)
 	if n := h.a.Len(); n != 0 {
 		t.Fatalf("Len() = %d, want 0", n)
+	}
+}
+
+// 第 19 条：Release 之后回调 Closed(CloseEvicted)，之后的包当新连接处理。
+func TestRelease(t *testing.T) {
+	h := newHarness(t, defaultConfig())
+	h.handshake(at(0))
+	h.add(c2s(1005, 5001, pshAck, "ef"), at(1))
+	h.expect("open A=10.0.0.1:40000 B=10.0.0.2:80 known=true")
+
+	k := tcp.Key{A: cli, B: srv}
+	if !h.a.Release(k, at(2)) {
+		t.Fatal("Release() = false, want true")
+	}
+	h.expect("closed evicted")
+	if h.a.Release(k, at(2)) {
+		t.Fatal("second Release() = true, want false")
+	}
+	if n := h.a.Len(); n != 0 {
+		t.Fatalf("Len() = %d, want 0", n)
+	}
+
+	h.add(s2c(5001, 1007, ack, ""), at(3)) // 第 4 条：裸 ACK 不建连接
+	h.expect()
+	h.add(s2c(5001, 1007, pshAck, "HTTP"), at(4)) // 第 3 条：数据包建连接
+	h.expect("open A=10.0.0.2:80 B=10.0.0.1:40000 known=false", `data 0 off=0 "HTTP" ack=0`)
+}
+
+// 第 19 条：Release 也接受反向的 Key。
+func TestReleaseReversedKey(t *testing.T) {
+	h := newHarness(t, defaultConfig())
+	h.handshake(at(0))
+	h.log = nil
+	if !h.a.Release(tcp.Key{A: srv, B: cli}, at(1)) {
+		t.Fatal("Release() = false, want true")
+	}
+	h.expect("closed evicted")
+}
+
+// 第 19 条：LeastRecent 返回最后一个包时间最早的连接。
+func TestLeastRecent(t *testing.T) {
+	c2 := netip.MustParseAddrPort("10.0.0.3:50000")
+	c3 := netip.MustParseAddrPort("10.0.0.4:50000")
+	h := newHarness(t, defaultConfig())
+	if _, ok := h.a.LeastRecent(); ok {
+		t.Fatal("LeastRecent() on empty table: ok = true")
+	}
+	h.add(pkt{src: cli, dst: srv, seq: 1, ack: 1, flags: pshAck, payload: "a"}, at(0))
+	h.add(pkt{src: c2, dst: srv, seq: 1, ack: 1, flags: pshAck, payload: "a"}, at(1))
+	h.add(pkt{src: c3, dst: srv, seq: 1, ack: 1, flags: pshAck, payload: "a"}, at(2))
+	h.add(pkt{src: srv, dst: cli, seq: 1, ack: 2, flags: ack}, at(3)) // cli 那条连接又收到包
+
+	want := []tcp.Key{{A: c2, B: srv}, {A: c3, B: srv}, {A: cli, B: srv}}
+	for i, w := range want {
+		k, ok := h.a.LeastRecent()
+		if !ok || k != w {
+			t.Fatalf("step %d: LeastRecent() = %v, %v; want %v, true", i, k, ok, w)
+		}
+		h.a.Release(k, at(4))
+	}
+	if _, ok := h.a.LeastRecent(); ok {
+		t.Fatal("LeastRecent() after releasing all: ok = true")
 	}
 }
