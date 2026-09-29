@@ -126,3 +126,32 @@ func TestWholeResponseLost(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// tlsRecord 返回一段像 TLS 记录的二进制字节，中间夹着关键词。
+func tlsRecord(n int) []byte {
+	b := []byte{0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00}
+	for i := range n {
+		b = append(b, byte(i*7+3))
+	}
+	return append(b, "TOKEN-42"...)
+}
+
+// 客户端方向的 Orphan 消息只计数、丢弃：一条 TLS 连接不产生交互，也不输出任何块，
+// 即使字节里含关键词。服务端方向同样找不到状态行，队列为空，Orphan 也丢弃。
+// 两个方向各失步一次，各开始一条 Orphan 消息（找不到起始行，一直不结束）。
+func TestTLSConnectionOrphans(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN-42")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), tlsRecord(300))
+		c.ServerSend(ms(1), tlsRecord(3000))
+		c.ClientSend(ms(2), tlsRecord(500))
+		c.ServerSend(ms(3), tlsRecord(800))
+		c.ClientFin(ms(4))
+		c.ServerFin(ms(5))
+	})
+	check(t, out, "")
+	if st.Exchanges != 0 || st.Orphans != 2 || st.Desyncs != 2 {
+		t.Fatalf("stats: %+v", st)
+	}
+}

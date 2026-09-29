@@ -221,8 +221,10 @@ func (c *conn) finish(x *exchange) {
 }
 
 // Begin 实现 http1.Sink：开始一个新的交互，排到队尾。
+// 客户端方向的 Orphan 消息（连请求行都没抓到）丢弃，只计数。
 func (s *reqSink) Begin(b http1.Begin) {
 	if b.Orphan {
+		s.c.e.stats.Orphans++
 		s.cur = nil
 		return
 	}
@@ -323,6 +325,10 @@ func (s *resSink) Begin(b http1.Begin) {
 		}
 	}
 	if x == nil {
+		// 不属于任何交互的 Orphan 消息丢弃，只计数。
+		if b.Orphan {
+			s.c.e.stats.Orphans++
+		}
 		return
 	}
 	x.hasRes = true
