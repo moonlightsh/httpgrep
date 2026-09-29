@@ -446,31 +446,49 @@ func TestRunBadPattern(t *testing.T) {
 	}
 }
 
-// 每批包处理完，时钟推进广播给所有分片：连接 1 在 0 秒只发请求，连接 2（落在另一个分片）
-// 在 40 秒还有流量。读普通文件、没有真实时间兜底时，连接 1 所在的分片虽然再没收到包，
-// 也要按 --timeout 30s 以 no-response(timeout) 结束，而不是等到输入结束才以 eof 结束。
+// 每批包处理完，时钟推进到这批包的最大时间戳，广播给所有分片：连接 1 在 0 秒只发请求，
+// 之后 40 秒还有一条记录。读普通文件、没有真实时间兜底时，连接 1 也要按 --timeout 30s
+// 以 no-response(timeout) 结束，而不是等到输入结束才以 eof 结束。
+//   - conn2：40 秒的记录是连接 2（落在另一个分片）的流量，--cpus 4 时连接 1 所在的分片再没收到包。
+//   - udp：40 秒的记录是一个 UDP 包，不交给任何引擎；--cpus 1 时只有批次末尾的 Advance
+//     能让连接 1 超时（引擎的 Segment 只在处理 TCP 段时先结束超时的交互）。
 func TestRunBatchAdvanceReachesQuietShard(t *testing.T) {
-	in := capture(t, func(w *pcapgen.Writer) {
-		c := pcapgen.NewConn(w, cli1, srv)
-		c.Handshake(ms(-1))
-		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nX: HIT\r\n\r\n"))
-		c2 := pcapgen.NewConn(w, cli2, srv)
-		c2.Handshake(ms(39999))
-		c2.ClientSend(ms(40000), []byte("GET /b HTTP/1.1\r\n\r\n"))
-		c2.ServerSend(ms(40001), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
-	})
-	for _, cpus := range []string{"1", "4"} {
-		t.Run("cpus="+cpus, func(t *testing.T) {
-			var out bytes.Buffer
-			_, st, err := run.Run(run.Config{Input: bytes.NewReader(in), Stdout: &out, Opts: opts(t, "--cpus", cpus, "--timeout", "30s", "HIT")})
-			if err != nil {
-				t.Fatal(err)
-			}
-			check(t, out.String(), "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n"+
-				"GET /a HTTP/1.1\r\nX: HIT\r\n\r\n")
-			if st.NoResponseTimeout != 1 || st.NoResponseEOF != 0 || st.Complete != 1 {
-				t.Fatalf("stats %+v", st)
-			}
+	udp := pcapgen.TCP(cli2, srv, 100, 0, decode.SYN, nil)
+	udp[9] = 17 // 协议号改成 UDP
+	for _, tc := range []struct {
+		name     string
+		tail     func(w *pcapgen.Writer)
+		complete int64
+	}{
+		{"conn2", func(w *pcapgen.Writer) {
+			c2 := pcapgen.NewConn(w, cli2, srv)
+			c2.Handshake(ms(39999))
+			c2.ClientSend(ms(40000), []byte("GET /b HTTP/1.1\r\n\r\n"))
+			c2.ServerSend(ms(40001), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+		}, 1},
+		{"udp", func(w *pcapgen.Writer) {
+			w.Record(ms(40000), pcapgen.Frame(pcap.LinkEthernet, udp), 0)
+		}, 0},
+	} {
+		in := capture(t, func(w *pcapgen.Writer) {
+			c := pcapgen.NewConn(w, cli1, srv)
+			c.Handshake(ms(-1))
+			c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nX: HIT\r\n\r\n"))
+			tc.tail(w)
 		})
+		for _, cpus := range []string{"1", "4"} {
+			t.Run(tc.name+"/cpus="+cpus, func(t *testing.T) {
+				var out bytes.Buffer
+				_, st, err := run.Run(run.Config{Input: bytes.NewReader(in), Stdout: &out, Opts: opts(t, "--cpus", cpus, "--timeout", "30s", "HIT")})
+				if err != nil {
+					t.Fatal(err)
+				}
+				check(t, out.String(), "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n"+
+					"GET /a HTTP/1.1\r\nX: HIT\r\n\r\n")
+				if st.NoResponseTimeout != 1 || st.NoResponseEOF != 0 || st.Complete != tc.complete {
+					t.Fatalf("stats %+v", st)
+				}
+			})
+		}
 	}
 }
