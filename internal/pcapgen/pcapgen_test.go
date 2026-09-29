@@ -105,3 +105,51 @@ func TestRecordTCPFields(t *testing.T) {
 		}
 	}
 }
+
+// 行为 2：各种链路层类型和 IPv6 下 tshark 都能解码出 TCP。
+func TestFrameLinkTypes(t *testing.T) {
+	c4 := netip.MustParseAddrPort("10.0.0.1:12345")
+	s4 := netip.MustParseAddrPort("10.0.0.2:80")
+	c6 := netip.MustParseAddrPort("[2001:db8::1]:12345")
+	s6 := netip.MustParseAddrPort("[2001:db8::2]:80")
+	ts := time.Unix(1700000000, 0)
+
+	cases := []struct {
+		name string
+		link pcap.LinkType
+		ip   []byte
+		src  string
+	}{
+		{"ethernet", pcap.LinkEthernet, pcapgen.TCP(c4, s4, 1, 0, decode.SYN, nil), "10.0.0.1"},
+		{"sll", pcap.LinkLinuxSLL, pcapgen.TCP(c4, s4, 1, 0, decode.SYN, nil), "10.0.0.1"},
+		{"sll2", pcap.LinkLinuxSLL2, pcapgen.TCP(c4, s4, 1, 0, decode.SYN, nil), "10.0.0.1"},
+		{"null", pcap.LinkNull, pcapgen.TCP(c4, s4, 1, 0, decode.SYN, nil), "10.0.0.1"},
+		{"loop", pcap.LinkLoop, pcapgen.TCP(c4, s4, 1, 0, decode.SYN, nil), "10.0.0.1"},
+		{"raw", pcap.LinkRaw, pcapgen.TCP(c4, s4, 1, 0, decode.SYN, nil), "10.0.0.1"},
+		{"ipv6", pcap.LinkEthernet, pcapgen.TCP(c6, s6, 1, 0, decode.SYN, nil), "2001:db8::1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writePcap(t, tc.name+".pcap", tc.link, func(w *pcapgen.Writer) {
+				if err := w.Record(ts, pcapgen.Frame(tc.link, tc.ip), 0); err != nil {
+					t.Fatal(err)
+				}
+			})
+			rows := tsharkFields(t, path, nil, "ip.src", "ipv6.src", "tcp.srcport", "tcp.flags")
+			if len(rows) != 1 {
+				t.Fatalf("包数 = %d，想要 1；文件 %s", len(rows), path)
+			}
+			row := rows[0]
+			gotSrc := row[0]
+			if gotSrc == "" {
+				gotSrc = row[1] // IPv6 时 ip.src 为空，取 ipv6.src
+			}
+			if gotSrc != tc.src {
+				t.Errorf("源地址 = %q，想要 %q", gotSrc, tc.src)
+			}
+			if row[2] != "12345" || row[3] != "0x0002" {
+				t.Errorf("端口/标志 = %q/%q，想要 12345/0x0002", row[2], row[3])
+			}
+		})
+	}
+}
