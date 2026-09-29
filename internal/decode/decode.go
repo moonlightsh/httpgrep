@@ -168,7 +168,7 @@ func decodeIPv4(ip []byte, origLen int, seg *Segment) Result {
 			return Malformed
 		}
 	}
-	return decodeTCP(ip, true, hl, total, seg)
+	return decodeTCP(ip, true, hl, capTotal(total, origLen, len(ip)), seg)
 }
 
 // decodeIPv6 解码 IPv6 包，跳过逐跳选项、路由、目的选项扩展头。
@@ -204,7 +204,14 @@ func decodeIPv6(ip []byte, origLen int, seg *Segment) Result {
 	if total < hl {
 		return Malformed
 	}
-	return decodeTCP(ip, false, hl, total, seg)
+	return decodeTCP(ip, false, hl, capTotal(total, origLen, len(ip)), seg)
+}
+
+// capTotal 把 IP 长度字段给出的报文总长封顶到线上长度 origLen（已扣链路层头）：
+// 长度字段写大的坏包不能凭空多出缺口，只有 snaplen 截掉的部分才算缺失。
+// origLen 异常地小于抓到的长度时，以抓到的长度为准。
+func capTotal(total, origLen, captured int) int {
+	return min(total, max(origLen, captured))
 }
 
 // addrPortFrom4 用 4 字节 IPv4 地址和端口拼 AddrPort，不分配内存。

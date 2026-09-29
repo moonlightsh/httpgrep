@@ -823,3 +823,48 @@ func BenchmarkDecodeIPv6(b *testing.B) {
 		decode.Decode(pcap.LinkRaw, ip6, len(ip6), &seg)
 	}
 }
+
+// ---- IP 长度字段大于线上长度：只有 snaplen 截掉的部分算缺口 ----
+
+func TestLengthFieldExceedsWire(t *testing.T) {
+	payload := make([]byte, 100)
+	tcp := tcpSegment(1, 2, 3, 4, 0x18, nil, payload)
+
+	t.Run("v4/抓全", func(t *testing.T) {
+		ip := ipv4Packet(addr4(1, 1, 1, 1), addr4(2, 2, 2, 2), 0, nil, tcp)
+		binary.BigEndian.PutUint16(ip[2:4], 140+3000) // 总长度多写 3000
+		var seg decode.Segment
+		if got := decode.Decode(pcap.LinkRaw, ip, 140, &seg); got != decode.OK {
+			t.Fatalf("Decode = %v, want OK", got)
+		}
+		if len(seg.Payload) != 100 || seg.Missing != 0 {
+			t.Errorf("payload %d missing %d, want 100 0", len(seg.Payload), seg.Missing)
+		}
+	})
+
+	t.Run("v4/ethernet/截断", func(t *testing.T) {
+		ip := ipv4Packet(addr4(1, 1, 1, 1), addr4(2, 2, 2, 2), 0, nil, tcp)
+		binary.BigEndian.PutUint16(ip[2:4], 140+3000)
+		frame := ethernet(0x0800, ip)
+		captured := frame[:len(frame)-70]
+		var seg decode.Segment
+		if got := decode.Decode(pcap.LinkEthernet, captured, len(frame), &seg); got != decode.OK {
+			t.Fatalf("Decode = %v, want OK", got)
+		}
+		if len(seg.Payload) != 30 || seg.Missing != 70 {
+			t.Errorf("payload %d missing %d, want 30 70", len(seg.Payload), seg.Missing)
+		}
+	})
+
+	t.Run("v6/抓全", func(t *testing.T) {
+		ip6 := ipv6Packet(tcp)
+		binary.BigEndian.PutUint16(ip6[4:6], 120+3000)
+		var seg decode.Segment
+		if got := decode.Decode(pcap.LinkRaw, ip6, 160, &seg); got != decode.OK {
+			t.Fatalf("Decode = %v, want OK", got)
+		}
+		if len(seg.Payload) != 100 || seg.Missing != 0 {
+			t.Errorf("payload %d missing %d, want 100 0", len(seg.Payload), seg.Missing)
+		}
+	})
+}

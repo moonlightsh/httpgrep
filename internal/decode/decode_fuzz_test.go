@@ -1,15 +1,12 @@
 package decode_test
 
 import (
-	"os"
 	"testing"
 	"unsafe"
 
 	"httpgrep/internal/decode"
 	"httpgrep/internal/pcap"
 )
-
-var skipKnown = os.Getenv("HTTPGREP_FUZZ_SKIP_KNOWN") == "1"
 
 // fuzzLinks 是 fuzz 时轮流尝试的链路层类型，含两个不支持的。
 var fuzzLinks = []pcap.LinkType{
@@ -71,12 +68,6 @@ func FuzzDecode(f *testing.F) {
 				if p < lo || p+uintptr(n) > hi {
 					t.Fatalf("payload [%#x,+%d) outside frame [%#x,%#x)", p, n, lo, hi)
 				}
-			}
-			// IP 长度字段大于线上长度时，Missing 按长度字段算，会凭空多出缺口（评审发现，
-			// 见 testdata/fuzz/FuzzDecode/0b9074a237da8ffe）。HTTPGREP_FUZZ_SKIP_KNOWN=1
-			// 时跳过这项，便于继续探索其他问题。
-			if skipKnown && len(seg.Payload)+seg.Missing > origLen {
-				continue
 			}
 			if len(seg.Payload)+seg.Missing > origLen {
 				t.Fatalf("payload %d + missing %d > origLen %d", len(seg.Payload), seg.Missing, origLen)
