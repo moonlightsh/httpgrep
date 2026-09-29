@@ -24,7 +24,7 @@ func main() {
 }
 
 // httpgrep 执行一次检索，返回退出码。
-func httpgrep(args []string, stdin *os.File, stdout, stderr io.Writer) int {
+func httpgrep(args []string, stdin, stdout *os.File, stderr io.Writer) int {
 	opts, err := cli.Parse(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "httpgrep: %v\nTry 'httpgrep --help' for more information.\n", err)
@@ -52,9 +52,10 @@ func httpgrep(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		return fail(stderr, err)
 	}
 	pipe := !fi.Mode().IsRegular()
+	tty := isTerminal(stdout)
 	stop := watchSignals()
 	start := time.Now()
-	matched, st, err := run.Run(run.Config{Input: f, Pipe: pipe, Stop: stop, Stdout: stdout, Stderr: stderr, Opts: opts})
+	matched, st, err := run.Run(run.Config{Input: f, Pipe: pipe, Stop: stop, Stdout: stdout, Stderr: stderr, TTY: tty, Opts: opts})
 	if opts.Stats {
 		printStats(stderr, st, time.Since(start))
 	}

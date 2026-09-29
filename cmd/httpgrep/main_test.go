@@ -613,3 +613,90 @@ func TestIsTerminal(t *testing.T) {
 		t.Error("pty: isTerminal = false, want true")
 	}
 }
+
+// ctlHeader 是请求头里带控制字符 \x01 和 ESC 的抓包。
+func ctlHeader(t testing.TB) []byte {
+	return capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /c HTTP/1.1\r\nX-Ctl: a\x01b\x1bc\r\n\r\n"))
+		c.ServerSend(ms(1), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+}
+
+// ctlBlock 是 ctlHeader 不转义时的输出块。
+const ctlBlock = "2026-09-28 07:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\n" +
+	"GET /c HTTP/1.1\r\nX-Ctl: a\x01b\x1bc\r\n\r\n" +
+	"HTTP/1.1 204 No Content\r\n\r\n"
+
+// 输出到普通文件或管道时不转义、不加颜色，逐字节等于抓到的内容。
+func TestNonTerminalOutputIsRaw(t *testing.T) {
+	in := writeFile(t, ctlHeader(t))
+	t.Run("pipe", func(t *testing.T) {
+		want(t, runBin(t, nil, "X-Ctl", in), ctlBlock, "", 0)
+	})
+	t.Run("file", func(t *testing.T) {
+		out := filepath.Join(t.TempDir(), "out")
+		f, err := os.Create(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		cmd := exec.Command(bin, "X-Ctl", in)
+		cmd.Env = append(os.Environ(), "TZ=UTC")
+		cmd.Stdout = f
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != ctlBlock {
+			t.Fatalf("file content %q, want %q", got, ctlBlock)
+		}
+	})
+}
+
+// 输出到终端时：控制字符转成 \xNN，定位行标紫，命中的文字标红。
+// 伪终端会把 \n 转成 \r\n，所以只比较不跨行的片段。
+func TestTerminalOutputIsEscaped(t *testing.T) {
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Skip("no pty: ", err)
+	}
+	defer master.Close()
+	cmd := exec.Command(bin, "X-Ctl", writeFile(t, ctlHeader(t)))
+	cmd.Env = append(os.Environ(), "TZ=UTC")
+	cmd.Stdout = slave
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	slave.Close() // 只留子进程持有从端，子进程退出后读主端才会结束
+	read := make(chan []byte, 1)
+	go func() {
+		b, _ := io.ReadAll(master) // 从端全部关闭后返回 EIO 或 EOF
+		read <- b
+	}()
+	if code := exitCode(t, cmd.Wait()); code != 0 {
+		t.Fatalf("code %d", code)
+	}
+	var got []byte
+	select {
+	case got = <-read:
+	case <-time.After(10 * time.Second):
+		t.Fatal("pty read did not finish")
+	}
+	for _, s := range []string{
+		"\x1b[35m2026-09-28 07:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\x1b[m",
+		"\x1b[01;31mX-Ctl\x1b[m",
+		`a\x01b\x1bc`,
+	} {
+		if !bytes.Contains(got, []byte(s)) {
+			t.Errorf("terminal output lacks %q:\n%q", s, got)
+		}
+	}
+	if bytes.IndexByte(got, 0x01) >= 0 {
+		t.Errorf("terminal output has raw \\x01: %q", got)
+	}
+}
