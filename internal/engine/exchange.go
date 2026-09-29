@@ -254,7 +254,11 @@ func (x *exchange) uncharge() {
 func (x *exchange) raw(mi int, sec http1.Section, b []byte, limit int64) int {
 	m := &x.msgs[mi]
 	var over int64
-	if limit > 0 && m.size+int64(len(b)) > limit {
+	if m.trunc != 0 {
+		// 已经截断（可能是缺口标记放不下时改成的截断，那时 size 还没到 limit）：
+		// 之后的字节都并入截断标记，截断标记始终是这条消息的最后一段。
+		over, b = int64(len(b)), b[:0]
+	} else if limit > 0 && m.size+int64(len(b)) > limit {
 		keep := int(max(limit-m.size, 0))
 		over = int64(len(b) - keep)
 		b = b[:keep]

@@ -71,6 +71,28 @@ func TestGapPiecesCountTowardMaxMessage(t *testing.T) {
 	}
 }
 
+// 新的缺口标记放不进 --max-message 时改为截断：头部 40 字节加 body 200 字节之后是 240，
+// 缺口标记计 64 会到 304，超过 300，这 10 字节并入截断标记，后面的 20 字节也并进去，一共 30。
+func TestGapMarkerOverMaxMessageTruncates(t *testing.T) {
+	const req = "GET /TOKEN HTTP/1.1\r\n\r\n"
+	const head = "HTTP/1.1 200 OK\r\nContent-Length: 230\r\n\r\n" // 40 字节
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMessage: 300}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte(req))
+		c.ServerSend(ms(1), []byte(head+strings.Repeat("a", 200)))
+		truncServer(w, ms(2), uint32(2001+240), 1001+uint32(len(req)), []byte("bbbbbbbbbb"), 0)
+		c.SkipServer(10)
+		c.ServerSend(ms(3), []byte(strings.Repeat("c", 20)))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 3.0ms\n"+
+		req+head+strings.Repeat("a", 200)+"\n"+
+		"[truncated: 30 bytes over --max-message]\n")
+	if st.Truncated != 1 || st.Gaps != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
+
 // 1xx 中间响应的消息和片段计入内存：一个请求（38 字节）后面跟 40 个 100 Continue
 // （每个 25 字节，同一个包里）。连接 2048，在途交互 1024，缓存 38 + 1000 字节；
 // 交互的前 2 条消息、前 4 个片段含在 1024 里，其余每条消息 128、每个片段 64：
