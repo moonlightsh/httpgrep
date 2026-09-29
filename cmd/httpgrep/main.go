@@ -56,9 +56,7 @@ func httpgrep(args []string, stdin, stdout *os.File, stderr io.Writer) int {
 	tty := isTerminal(stdout)
 	// 默认只用 1 个核，--cpus N 时用 N 个（run 按连接分给 N 个分片）。
 	runtime.GOMAXPROCS(opts.CPUs)
-	// Go 运行时的软内存上限是 --max-memory 的 1.5 倍（设计文档第 8 节）。
-	// --max-memory 大到乘积溢出时结果为负，SetMemoryLimit 对负数不做调整，等于不设上限。
-	debug.SetMemoryLimit(opts.MaxMemory / 2 * 3)
+	debug.SetMemoryLimit(memoryLimit(opts.MaxMemory))
 	stop := watchSignals()
 	start := time.Now()
 	matched, st, err := run.Run(run.Config{Input: f, Pipe: pipe, Stop: stop, Stdout: stdout, Stderr: stderr, TTY: tty, Opts: opts})
@@ -74,21 +72,45 @@ func httpgrep(args []string, stdin, stdout *os.File, stderr io.Writer) int {
 	return 0
 }
 
+// memoryLimit 返回 Go 运行时的软内存上限：--max-memory 的 1.5 倍（设计文档第 8 节）。
+// --max-memory 大到结果溢出时为负，SetMemoryLimit 对负数不做调整，等于不设上限。
+// 先除后乘会截断很小的值（1 字节时得 0，SetMemoryLimit(0) 会让 GC 一直运行），所以写成加法。
+func memoryLimit(maxMemory int64) int64 { return maxMemory + maxMemory/2 }
+
 // fail 写出错信息，返回退出码 2。
 func fail(stderr io.Writer, err error) int {
 	fmt.Fprintf(stderr, "httpgrep: %v\n", err)
 	return 2
 }
 
-// versionString 返回 --version 的输出：版本号，构建信息里有 vcs.revision 时附在后面。
+// versionString 返回 --version 的输出，见 versionFrom。
 func versionString() string {
-	s := "httpgrep " + version
+	var settings []debug.BuildSetting
 	if bi, ok := debug.ReadBuildInfo(); ok {
-		for _, kv := range bi.Settings {
-			if kv.Key == "vcs.revision" && kv.Value != "" {
-				s += " (revision " + kv.Value + ")"
-			}
+		settings = bi.Settings
+	}
+	return versionFrom(settings)
+}
+
+// versionFrom 按构建信息 settings 返回 --version 的输出：版本号，有 vcs.revision 时附在后面；
+// 构建时工作区有未提交的改动（vcs.modified=true）时，revision 后面加 -dirty。
+func versionFrom(settings []debug.BuildSetting) string {
+	var rev string
+	dirty := false
+	for _, kv := range settings {
+		switch kv.Key {
+		case "vcs.revision":
+			rev = kv.Value
+		case "vcs.modified":
+			dirty = kv.Value == "true"
 		}
+	}
+	s := "httpgrep " + version
+	if rev != "" {
+		if dirty {
+			rev += "-dirty"
+		}
+		s += " (revision " + rev + ")"
 	}
 	return s + "\n"
 }
@@ -130,6 +152,7 @@ func printStats(w io.Writer, st engine.Stats, elapsed time.Duration) {
 		{"gaps", st.Gaps},
 		{"gap bytes", st.GapBytes},
 		{"desyncs", st.Desyncs},
+		{"non-HTTP connections", st.NonHTTP},
 		{"ip fragments", st.Fragments},
 		{"not tcp", st.NotTCP},
 		{"malformed", st.Malformed},
@@ -141,8 +164,9 @@ func printStats(w io.Writer, st engine.Stats, elapsed time.Duration) {
 	fmt.Fprintf(w, "peak connections: %d\n", st.PeakConns)
 }
 
-// watchSignals 在第一次收到 SIGINT 或 SIGTERM 时关闭返回的通道；之后再收到 SIGINT
-// 立即以退出码 130 退出，再收到 SIGTERM 不处理（已经在收尾）。
+// watchSignals 在第一次收到 SIGINT 或 SIGTERM 时关闭返回的通道；之后再收到任意一个
+// 立即退出，退出码是 128 加信号值（SIGINT 130，SIGTERM 143）。进程卡在写标准输出上
+// （下游不读）时主循环观察不到第一次信号，第二次信号仍然能让它退出。
 // SIGPIPE 不注册，保持 Go 的默认行为：写标准输出遇到 EPIPE 时进程被 SIGPIPE 终止。
 func watchSignals() <-chan struct{} {
 	sigs := make(chan os.Signal, 2)
@@ -152,9 +176,7 @@ func watchSignals() <-chan struct{} {
 		<-sigs
 		close(stop)
 		for sig := range sigs {
-			if sig == syscall.SIGINT {
-				os.Exit(130)
-			}
+			os.Exit(128 + int(sig.(syscall.Signal)))
 		}
 	}()
 	return stop

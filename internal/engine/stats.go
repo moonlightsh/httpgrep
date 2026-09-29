@@ -17,9 +17,11 @@ type Stats struct {
 	Complete, NoRequest, Incomplete                    int64
 	NoResponseTimeout, NoResponseClosed, NoResponseEOF int64
 	Late, Evicted, EvictedMatched, Truncated           int64
-	Gaps, GapBytes, Desyncs, Orphans                   int64
-	PeakBuffered                                       int64
-	PeakInFlight, PeakConns                            int
+	// Desyncs 和 Orphans 不计从未对齐过起始行的连接（比如 TLS），这样的连接计入 NonHTTP，
+	// 每条连接一次；对齐之前的失步和 Orphan 在第一次对齐时补计。
+	Gaps, GapBytes, Desyncs, Orphans, NonHTTP int64
+	PeakBuffered                              int64
+	PeakInFlight, PeakConns                   int
 }
 
 // Merge 合并多个分片的统计：计数相加，峰值相加，FirstTS 取最早，LastTS 取最晚。
@@ -53,6 +55,7 @@ func (s *Stats) Merge(o Stats) {
 	s.GapBytes += o.GapBytes
 	s.Desyncs += o.Desyncs
 	s.Orphans += o.Orphans
+	s.NonHTTP += o.NonHTTP
 	s.PeakBuffered += o.PeakBuffered
 	s.PeakInFlight += o.PeakInFlight
 	s.PeakConns += o.PeakConns

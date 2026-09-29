@@ -13,7 +13,8 @@ type Assembler struct {
 	conns map[Key]*conn // 两个方向的四元组都指向同一条连接
 	lru   lru
 
-	buffered int64 // 所有连接乱序缓存的字节数
+	buffered int64 // 所有连接乱序缓存的计量之和
+	n        int   // 连接数。自连接（A == B）在 conns 里只有一个条目，不能用 len(conns)/2
 
 	scanned time.Time // 上次扫描全部连接的时间
 }
@@ -92,7 +93,8 @@ func (a *Assembler) segment(c *conn, s Side, seg *decode.Segment, ts time.Time) 
 	off := d.offset(seg.Seq)
 	if seg.Flags&decode.FIN != 0 && !d.finSeen {
 		d.finSeen = true
-		d.finOff = off + int64(len(seg.Payload)) + int64(max(seg.Missing, 0))
+		// 序号远远落后（比如落后 2³¹ 左右）的 FIN 会算出负的偏移：不早于已交付的位置。
+		d.finOff = max(off+int64(len(seg.Payload))+int64(max(seg.Missing, 0)), d.next)
 		d.finTs = ts
 	}
 	if len(seg.Payload) == 0 && seg.Missing <= 0 {
@@ -133,10 +135,11 @@ func (a *Assembler) fins(c *conn, ts time.Time) bool {
 func (a *Assembler) close(c *conn, reason CloseReason, ts time.Time) {
 	delete(a.conns, c.key)
 	delete(a.conns, Key{c.key.B, c.key.A})
+	a.n--
 	a.lru.remove(c)
 	for s := range c.d {
 		a.buffered -= c.d[s].bufLen
-		c.d[s].buf, c.d[s].bufLen = nil, 0
+		c.d[s].clearBuf()
 	}
 	c.h.Closed(reason, ts)
 }
@@ -192,6 +195,7 @@ func (a *Assembler) create(seg *decode.Segment, ts time.Time) *conn {
 	c.h = a.open(info)
 	a.conns[info.Key] = c
 	a.conns[Key{info.Key.B, info.Key.A}] = c
+	a.n++
 	a.lru.pushNewest(c)
 	return c
 }
@@ -237,11 +241,12 @@ func (a *Assembler) Release(k Key, now time.Time) bool {
 	return true
 }
 
-// BufferedBytes 返回乱序缓存里的字节数。
+// BufferedBytes 返回乱序缓存的计量：负载字节数，加每段 128 字节的固定开销
+// （只记缺口的段也算）。MaxReorderBytes 按同样的口径限制每个方向。
 func (a *Assembler) BufferedBytes() int64 { return a.buffered }
 
 // Len 返回当前的连接数。
-func (a *Assembler) Len() int { return len(a.conns) / 2 }
+func (a *Assembler) Len() int { return a.n }
 
 // LeastRecent 返回最久没有收到包的连接。
 func (a *Assembler) LeastRecent() (Key, bool) {

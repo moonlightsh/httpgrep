@@ -183,6 +183,12 @@ func TestBadArgumentsExit2(t *testing.T) {
 		{nil, "httpgrep: no pattern given\n" + try},
 		{[]string{"--bogus", "x"}, "httpgrep: unknown option: --bogus\n" + try},
 		{[]string{"x", "a.pcap", "b.pcap"}, "httpgrep: only one input file is supported\n" + try},
+		{[]string{"--cpus", "100000", "x"}, "httpgrep: invalid value for --cpus: 100000 (at most 1024)\n" + try},
+		{[]string{"--cpus", "4", "--max-memory", "64K", "--max-message", "32K", "x"},
+			"httpgrep: --max-message cannot exceed --max-memory divided by --cpus (16384 bytes per worker with --cpus 4)\n" + try},
+		{[]string{"--max-memory", "1000", "--cpus", "1024", "x"},
+			"httpgrep: --max-memory cannot be less than --cpus (1024 bytes are needed for --cpus 1024)\n" + try},
+		{[]string{"--timeout", "1500000h", "x"}, "httpgrep: invalid duration for --timeout: 1500000h (at most 8760h)\n" + try},
 	} {
 		t.Run(fmt.Sprint(tc.args), func(t *testing.T) {
 			want(t, runBin(t, bytes.NewReader(twoExchanges(t)), tc.args...), "", tc.stderr, 2)
@@ -255,10 +261,11 @@ func TestHelp(t *testing.T) {
 		"Usage: httpgrep [OPTION]... PATTERN [FILE]",
 		"-e PATTERN", "-E ", "--timeout DUR", "(default 30s)",
 		"--max-memory SIZE", "Approximate limit for buffered data (default 256M)",
-		"-E line buffers", "Upgrade", "resync",
-		"--max-message SIZE", "(default 8M)", "--cpus N", "(default 1)",
+		"-E line buffers", "Upgrade", "partial header lines",
+		"--max-message SIZE", "(default 8M)", "--cpus N", "1 to 1024 (default 1)",
 		"--stats", "--help", "--version",
 		"K, M, G", "Exit status is 0 if an exchange matched, 1 if none matched, 2 on error.",
+		"tcpdump -i lo -U --immediate-mode -w - port 7010 | httpgrep PATTERN",
 	} {
 		if !strings.Contains(got.stdout, s) {
 			t.Errorf("help lacks %q", s)
@@ -267,7 +274,7 @@ func TestHelp(t *testing.T) {
 }
 
 // --version 输出 "httpgrep <版本>"；版本默认是 dev，可以用 -ldflags -X main.version 注入；
-// 构建信息里有 vcs.revision 时附在后面。
+// 构建信息里有 vcs.revision 时附在后面，构建时工作区有未提交的改动（git status 有输出）时加 -dirty。
 func TestVersion(t *testing.T) {
 	if os.Getenv("HTTPGREP_BIN") != "" {
 		t.Skip("HTTPGREP_BIN 指向外部程序，版本号未知")
@@ -277,8 +284,16 @@ func TestVersion(t *testing.T) {
 		if err != nil {
 			t.Skip("git 不可用：", err)
 		}
+		status, err := exec.Command("git", "status", "--porcelain").Output()
+		if err != nil {
+			t.Skip("git 不可用：", err)
+		}
+		dirty := ""
+		if len(status) > 0 {
+			dirty = "-dirty"
+		}
 		got := runBin(t, nil, "--version")
-		wantOut := "httpgrep dev (revision " + strings.TrimSpace(string(rev)) + ")\n"
+		wantOut := "httpgrep dev (revision " + strings.TrimSpace(string(rev)) + dirty + ")\n"
 		if got.code != 0 || got.stderr != "" || got.stdout != wantOut {
 			t.Fatalf("code %d, stdout %q, stderr %q; want stdout %q", got.code, got.stdout, got.stderr, wantOut)
 		}
@@ -338,6 +353,7 @@ func TestStats(t *testing.T) {
 		{"gaps", "0"},
 		{"gap bytes", "0"},
 		{"desyncs", "0"},
+		{"non-HTTP connections", "0"},
 		{"ip fragments", "0"},
 		{"not tcp", "0"},
 		{"malformed", "0"},
@@ -404,11 +420,15 @@ func (b *notifyBuffer) waitFor(d time.Duration, ok func(string) bool) bool {
 }
 
 // piped 是一个从管道读标准输入、还在运行的进程。
+// cmd.Wait 只能调用一次（第二次调用会一直阻塞），所以只在一个协程里调用它，
+// 结果放在 err 里，done 关闭后可读；waitExit 和 Cleanup 都从 done 取结果。
 type piped struct {
 	cmd            *exec.Cmd
 	stdin          io.WriteCloser
 	stdout, stderr *notifyBuffer
 	cancel         context.CancelFunc
+	done           chan struct{}
+	err            error
 }
 
 // startPiped 启动进程，标准输入是一个由测试持有写端的管道。进程最多运行 30 秒。
@@ -417,7 +437,7 @@ func startPiped(t *testing.T, args ...string) *piped {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env = append(os.Environ(), "TZ=UTC")
-	p := &piped{cmd: cmd, stdout: newNotifyBuffer(), stderr: newNotifyBuffer(), cancel: cancel}
+	p := &piped{cmd: cmd, stdout: newNotifyBuffer(), stderr: newNotifyBuffer(), cancel: cancel, done: make(chan struct{})}
 	cmd.Stdout, cmd.Stderr = p.stdout, p.stderr
 	var err error
 	if p.stdin, err = cmd.StdinPipe(); err != nil {
@@ -426,61 +446,71 @@ func startPiped(t *testing.T, args ...string) *piped {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	go func() {
+		p.err = cmd.Wait()
+		close(p.done)
+	}()
 	t.Cleanup(func() {
+		// 先杀掉进程再等：测试失败时进程可能还在运行。
 		cancel()
 		p.stdin.Close()
-		cmd.Wait()
+		<-p.done
 	})
 	return p
 }
 
-// wait 关闭标准输入之前不调用；返回退出码。
+// wait 在关闭标准输入之后调用，等进程退出（最多 10 秒），返回退出码。
 func (p *piped) wait(t *testing.T) int {
 	t.Helper()
-	return exitCode(t, p.cmd.Wait())
-}
-
-// slowRequest 是只有一个请求、没有响应的抓包。
-func slowRequest(t testing.TB) []byte {
-	return capture(t, func(w *pcapgen.Writer) {
-		c := pcapgen.NewConn(w, cli1, srv)
-		c.Handshake(ms(-1))
-		c.ClientSend(ms(0), []byte("GET /slow HTTP/1.1\r\nHost: x\r\n\r\n"))
-	})
+	return p.waitExit(t, 10*time.Second)
 }
 
 const slowReq = "GET /slow HTTP/1.1\r\nHost: x\r\n\r\n"
 
 // 标准输入是管道时，超过 1 秒没有新包，时钟按真实时间往前推：
 // 管道不关，请求也会在 --timeout 之后以 no-response(timeout) 输出。
+//   - 2s：计划里的参数，约 2 秒（不到 3 秒）输出。
+//   - 300ms：比 1 秒的阈值短，兜底要等 1 秒没有新包才开始推时钟，不能约 300ms 就输出。
+//
+// 输入用 slowInput（请求后面跟约 256 KiB 的纯 ACK）：Write 返回时进程已经读到了最后几批包，
+// 计时从这时算起，不受进程启动慢（macOS 首次执行要做签名检查）的影响。
+// 下界各留 100ms 余量给计时误差。上界多留约 1 秒：新编译的程序第一次运行时，
+// macOS 上偶尔观察到输出晚约 0.8 秒。
 func TestPipeRealTimeFallback(t *testing.T) {
-	p := startPiped(t, "--timeout", "1s", "slow")
-	if _, err := p.stdin.Write(slowRequest(t)); err != nil {
-		t.Fatal(err)
-	}
-	const block = "2026-09-28 07:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n" + slowReq
-	start := time.Now()
-	if !p.stdout.waitFor(10*time.Second, func(s string) bool { return s == block }) {
-		t.Fatalf("after %v stdout %q, want %q", time.Since(start), p.stdout.String(), block)
-	}
-	// 兜底要等 1 秒没有新包才开始推时钟，再过 --timeout 才超时；留 100ms 余量给计时误差。
-	if d := time.Since(start); d < 900*time.Millisecond {
-		t.Fatalf("block came after %v, want >= 1s", d)
-	}
-	p.stdin.Close()
-	if code := p.wait(t); code != 0 {
-		t.Fatalf("code %d, stderr %q", code, p.stderr.String())
+	for _, tc := range []struct {
+		timeout  string
+		min, max time.Duration
+	}{
+		{"2s", 1900 * time.Millisecond, 4 * time.Second},
+		{"300ms", 900 * time.Millisecond, 3 * time.Second},
+	} {
+		t.Run(tc.timeout, func(t *testing.T) {
+			t.Parallel()
+			p := startPiped(t, "--timeout", tc.timeout, "slow")
+			if _, err := p.stdin.Write(slowInput(t)); err != nil {
+				t.Fatal(err)
+			}
+			const block = "2026-09-28 07:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n" + slowReq
+			start := time.Now()
+			if !p.stdout.waitFor(10*time.Second, func(s string) bool { return s == block }) {
+				t.Fatalf("after %v stdout %q, want %q", time.Since(start), p.stdout.String(), block)
+			}
+			if d := time.Since(start); d < tc.min || d > tc.max {
+				t.Fatalf("block came after %v, want between %v and %v", d, tc.min, tc.max)
+			}
+			p.stdin.Close()
+			if code := p.wait(t); code != 0 {
+				t.Fatalf("code %d, stderr %q", code, p.stderr.String())
+			}
+		})
 	}
 }
 
-// startSlow 启动一个读管道的进程，写入一个没有响应的请求，管道不关。
-// 请求后面跟约 256 KiB 的纯 ACK，远大于管道缓冲（64 KiB）：Write 返回时进程一定已经在
-// run.Run 里读输入，信号也已经注册（注册在 run.Run 之前）。不用固定时长的 sleep，
-// 因为 macOS 首次执行新编译的程序可能要花几百毫秒做签名检查。
-func startSlow(t *testing.T) *piped {
-	t.Helper()
-	p := startPiped(t, "slow")
-	in := capture(t, func(w *pcapgen.Writer) {
+// slowInput 是一个没有响应的请求，后面跟约 256 KiB 的纯 ACK，远大于管道缓冲（64 KiB）：
+// 把它写进管道，Write 返回时进程一定已经在 run.Run 里读输入，信号也已经注册
+// （注册在 run.Run 之前）。所有包的时间戳相同，ACK 不影响交互。
+func slowInput(t testing.TB) []byte {
+	return capture(t, func(w *pcapgen.Writer) {
 		c := pcapgen.NewConn(w, cli1, srv)
 		c.Handshake(ms(-1))
 		c.ClientSend(ms(0), []byte(slowReq))
@@ -488,6 +518,14 @@ func startSlow(t *testing.T) *piped {
 			c.ClientAck(ms(0))
 		}
 	})
+}
+
+// startSlow 启动一个读管道的进程，写入 slowInput，管道不关。
+// 不用固定时长的 sleep 等进程就绪，因为 macOS 首次执行新编译的程序可能要花几百毫秒做签名检查。
+func startSlow(t *testing.T) *piped {
+	t.Helper()
+	p := startPiped(t, "slow")
+	in := slowInput(t)
 	done := make(chan error, 1)
 	go func() {
 		_, err := p.stdin.Write(in)
@@ -505,14 +543,12 @@ func startSlow(t *testing.T) *piped {
 	return p
 }
 
-// waitExit 等进程退出，最多 d；超时 t.Fatal。
+// waitExit 等进程退出，最多 d；超时 t.Fatal（Cleanup 随后杀掉进程）。
 func (p *piped) waitExit(t *testing.T, d time.Duration) int {
 	t.Helper()
-	done := make(chan error, 1)
-	go func() { done <- p.cmd.Wait() }()
 	select {
-	case err := <-done:
-		return exitCode(t, err)
+	case <-p.done:
+		return exitCode(t, p.err)
 	case <-time.After(d):
 		t.Fatalf("still running after %v; stdout %q", d, p.stdout.String())
 		return -1
@@ -537,17 +573,25 @@ func TestSignalEndsInFlight(t *testing.T) {
 	}
 }
 
-// 第二次 SIGINT 立即退出，退出码 130，不再输出在途交互。
+// 第二次 SIGINT 立即退出，退出码 130，不再输出在途交互；第二次 SIGTERM 同样立即退出，
+// 退出码 143（进程卡在写标准输出上、观察不到第一次信号时，kill 两次也能退出）。
 func TestSecondSIGINTExits130(t *testing.T) {
-	p := startSlow(t)
-	for range 2 {
-		if err := p.cmd.Process.Signal(syscall.SIGINT); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if code := p.waitExit(t, 5*time.Second); code != 130 || p.stdout.String() != "" {
-		t.Fatalf("code %d, stdout %q; want 130 and no output", code, p.stdout.String())
+	for _, tc := range []struct {
+		sig  syscall.Signal
+		code int
+	}{{syscall.SIGINT, 130}, {syscall.SIGTERM, 143}} {
+		t.Run(tc.sig.String(), func(t *testing.T) {
+			p := startSlow(t)
+			for range 2 {
+				if err := p.cmd.Process.Signal(tc.sig); err != nil {
+					t.Fatal(err)
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			if code := p.waitExit(t, 5*time.Second); code != tc.code || p.stdout.String() != "" {
+				t.Fatalf("code %d, stdout %q; want %d and no output", code, p.stdout.String(), tc.code)
+			}
+		})
 	}
 }
 
@@ -573,6 +617,33 @@ func TestClosedStdoutKilledBySIGPIPE(t *testing.T) {
 	}
 	if ws, ok := ee.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGPIPE {
 		t.Fatalf("exit %v, stderr %q; want killed by SIGPIPE", err, stderr.String())
+	}
+}
+
+// 写标准输出出错（EPIPE 以外）：stdout 是只读打开的 /dev/null，写入得到 EBADF，
+// 报错并以退出码 2 结束；--cpus 4 时同样如此。
+func TestWriteErrorExits2(t *testing.T) {
+	if os.Getenv("HTTPGREP_BIN") != "" {
+		// 经包装脚本（比如 docker run）运行时，只读的 stdout 交给的是包装进程，
+		// httpgrep 自己写的是包装进程的管道，测不到它写失败时的行为。
+		t.Skip("HTTPGREP_BIN 指向外部程序，stdout 的文件描述符不会原样传给 httpgrep")
+	}
+	for _, cpus := range []string{"1", "4"} {
+		t.Run("cpus="+cpus, func(t *testing.T) {
+			ro, err := os.Open(os.DevNull)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ro.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			cmd, _, stderr := command(ctx, bytes.NewReader(twoExchanges(t)), "--cpus", cpus, "TOKEN-42")
+			cmd.Stdout = ro
+			code := exitCode(t, cmd.Run())
+			if want := "httpgrep: write /dev/stdout: bad file descriptor\n"; code != 2 || stderr.String() != want {
+				t.Fatalf("code %d, stderr %q; want 2, %q", code, stderr.String(), want)
+			}
+		})
 	}
 }
 

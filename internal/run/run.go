@@ -35,6 +35,12 @@ type sink struct {
 	matched bool
 	err     error         // 第一次写出失败的错误，之后不再写
 	fail    chan struct{} // 写出失败时关闭，通知主循环停下
+
+	// 内存告警由 sink 统一限频：引擎只在统计里计数，--cpus N 时也只有一路告警。dropped、droppedMatched 是距上一次告警以来各分片丢弃的
+	// 交互数之和和其中已命中的；warnedAt 是上一次告警的抓包时间，warned 表示告警过。
+	dropped, droppedMatched int64
+	warnedAt                time.Time
+	warned                  bool
 }
 
 // emit 是引擎的 Emit 回调。
@@ -52,14 +58,54 @@ func (s *sink) emit(b *output.Block) {
 	s.matched = true
 }
 
-// warn 是引擎的 Warn 回调，一条告警写一行。
-func (s *sink) warn(msg string) {
-	if s.stderr == nil {
+// warnInterval 是内存告警的最小间隔，按抓包时钟。
+const warnInterval = 10 * time.Second
+
+// drop 累计分片报来的 n 个因内存上限丢弃的交互（其中 m 个已命中），now 是这时的抓包时钟。
+// 有累计数，并且从没告警过或者距上一次告警已满 10 秒时，写一行告警。
+// 分片按批报告（见 dispatcher.flush），同一批包里各分片的丢弃合成一行。
+func (s *sink) drop(n, m int64, now time.Time) {
+	if n == 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	io.WriteString(s.stderr, "httpgrep: "+msg+"\n")
+	s.dropped += n
+	s.droppedMatched += m
+	if !s.warned || !now.Before(s.warnedAt.Add(warnInterval)) {
+		s.warn(now)
+	}
+}
+
+// flushWarn 在所有分片结束输入之后调用：还有没报告过的累计数时再告警一次。
+func (s *sink) flushWarn() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dropped > 0 {
+		s.warn(s.warnedAt)
+	}
+}
+
+// warn 写一行告警，报告累计数，然后清零。调用方持有锁。
+func (s *sink) warn(now time.Time) {
+	if s.stderr != nil {
+		fmt.Fprintf(s.stderr, "httpgrep: dropped %d in-flight exchanges (%d matched) to stay under --max-memory\n",
+			s.dropped, s.droppedMatched)
+	}
+	s.dropped, s.droppedMatched = 0, 0
+	s.warnedAt, s.warned = now, true
+}
+
+// seen 记下一个引擎已经报告给 sink 的丢弃数，用来算增量。
+type seen struct {
+	evicted, matched int64
+}
+
+// delta 返回引擎统计 st 里还没报告过的丢弃数和其中已命中的，并记为已报告。
+func (v *seen) delta(st engine.Stats) (n, m int64) {
+	n, m = st.Evicted-v.evicted, st.EvictedMatched-v.matched
+	v.evicted, v.matched = st.Evicted, st.EvictedMatched
+	return n, m
 }
 
 // failed 返回写出失败的错误。
@@ -92,10 +138,16 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 	// Stop 关闭后最多再读 stopGrace，或者读到输入结束为止；读取协程卡在阻塞的 read 上时不等它。
 	stop := cfg.Stop
 	var grace <-chan time.Time
+	var graceTimer *time.Timer
+	defer func() {
+		if graceTimer != nil {
+			graceTimer.Stop()
+		}
+	}()
 	onStop := func() {
 		stop = nil
-		t := time.NewTimer(stopGrace)
-		grace = t.C
+		graceTimer = time.NewTimer(stopGrace)
+		grace = graceTimer.C
 	}
 	var h header
 	for waiting := true; waiting; {
@@ -104,8 +156,8 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 			waiting = false
 		case <-stop:
 			onStop()
-		case <-grace: // 文件头都没等到：当作没有任何包
-			return false, st, nil
+		case <-grace: // 文件头都没等到：和读到空输入一样，按输入为空出错
+			return false, st, pcap.ErrEmpty
 		}
 	}
 	if h.err != nil {
@@ -121,13 +173,13 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 		MaxMemory:  o.MaxMemory,
 		MaxMessage: o.MaxMessage,
 		Emit:       out.emit,
-		Warn:       out.warn,
+		// 内存告警由 sink 按各引擎统计里 Evicted 的增量统一限频（见 sink.drop）。
 	}
 	var d dispatcher
 	if n > 1 {
-		d = newMulti(n, ecfg, rd.free)
+		d = newMulti(n, ecfg, rd.free, out)
 	} else {
-		d = &single{e: engine.New(ecfg), free: rd.free}
+		d = &single{e: engine.New(ecfg), free: rd.free, out: out}
 	}
 
 	l := loop{link: h.link, d: d}
@@ -153,6 +205,7 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 		}
 	}
 	st = l.stats(d.finish(l.clock))
+	out.flushWarn()
 	if err := out.failed(); err != nil {
 		return out.matched, st, err
 	}

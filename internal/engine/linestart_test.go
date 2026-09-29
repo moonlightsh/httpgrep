@@ -33,7 +33,7 @@ func TestMidStreamBodyTailWithoutNewline(t *testing.T) {
 }
 
 // E2-7 的真实形态：同 TestResponseHeadGapDesync，但失步期间的 body 是 "r1"，不以换行结尾。
-// 下一个响应在新的段开头，要能重新对齐，不被吞进 /a 的 Unparsed。
+// 下一个响应在新的段开头，要能重新对齐，不被吞进 /a 的 Unparsed。/a 的响应最后一个包是 ms4 抓到的，耗时 4.0ms。
 func TestResponseDesyncTailWithoutNewline(t *testing.T) {
 	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
 		c := pcapgen.NewConn(w, cli1, srv)
@@ -46,7 +46,7 @@ func TestResponseDesyncTailWithoutNewline(t *testing.T) {
 		c.ClientAck(ms(5))
 		c.ServerSend(ms(6), []byte("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-2"))
 	})
-	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 5.0ms\n"+
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 4.0ms\n"+
 		"GET /a HTTP/1.1\r\n\r\n"+
 		"HTTP/1.1 200 OK\r\n"+
 		"[gap: 19 bytes missing]\n"+

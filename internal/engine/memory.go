@@ -1,33 +1,38 @@
 package engine
 
-import (
-	"strconv"
-	"time"
-)
+import "time"
 
-// 计入内存上限的固定开销。
+// 计入内存上限的固定开销，按 64 位下实测的堆占用标定（留了余量）。
 const (
-	connOverhead     = 1024 // 每条连接
-	exchangeOverhead = 512  // 每个在途交互
+	// connOverhead 是每条连接：engine.conn、tcp.conn、连接表里两个方向的条目和两个解析器。
+	// 实测约 1.55 KiB；连接不断新建、释放（比如 SYN 洪水）时连接表只增不缩，约 2 KiB。
+	connOverhead = 2048
+	// probeOverhead 是半路连接定角色之前多出来的：另外两个解析器和 probe 数组，实测约 0.9 KiB。
+	probeOverhead = 1024
+	// exchangeOverhead 是每个在途交互：交互对象、四个扫描器，以及前 freeMessages 条消息和
+	// 前 freePieces 个片段，实测约 1 KiB。
+	exchangeOverhead = 1024
+	// 超出的消息（比如一连串 1xx）和片段（比如数据和缺口交替）每个另计。
+	freeMessages    = 2
+	freePieces      = 4
+	messageOverhead = 128
+	pieceOverhead   = 64
 	// ghostOverhead 是每个占位的固定开销：占位只剩交互对象（64 位下 352 字节）和队列里的
 	// 一个指针，缓存和扫描器都已释放（见 exchange.bury）。
 	ghostOverhead = 384
 )
 
-// Memory 返回当前的内存计量值：在途交互缓存的消息字节、乱序缓存、
-// 每条连接、每个在途交互和每个占位的固定开销。内存上限按它判断。
+// Memory 返回当前的内存计量值：在途交互缓存的消息字节和超出的消息、片段，乱序缓存
+// （含每段的固定开销），解析器内部的缓存（没收完的行、Upgrade 请求之后缓存的字节），
+// 每条连接、每个定角色之前的半路连接、每个在途交互和每个占位的固定开销。内存上限按它判断。
 //
-// 已知的漏计（都不在计划列出的计量项里）：
-//   - 正则模式（以及含 \r 的字面关键词）下，扫描器缓存着没写完的行，最多 8 MiB，
-//     body 里没有换行时它和缓存的 body 差不多大，实际内存最多约为计量值的两倍。
-//     字面关键词走快速路径，不缓存行。match 没有导出行缓存的大小，引擎无法区分这两种情况。
-//   - http1 解析器内部的缓存：Upgrade 请求之后缓存的字节（每条连接最多 64 KiB）、
-//     没收完的头部行（最多 64 KiB），以及半路连接定角色之前多出来的两个解析器。
-//     每条连接 1 KiB 的固定开销不覆盖这些缓存。
+// 已知的漏计：正则模式（以及含 \r 的字面关键词）下，扫描器缓存着没写完的行，最多 8 MiB，
+// body 里没有换行时它和缓存的 body 差不多大，实际内存最多约为计量值的两倍。
+// 字面关键词走快速路径，不缓存行。match 没有导出行缓存的大小，引擎无法区分这两种情况。
 func (e *Engine) Memory() int64 {
-	return e.buffered + e.asm.BufferedBytes() +
-		int64(e.asm.Len())*connOverhead + int64(e.inFlight)*exchangeOverhead +
-		int64(e.ghosts)*ghostOverhead
+	return e.buffered + e.extra + e.parsers + e.asm.BufferedBytes() +
+		int64(e.asm.Len())*connOverhead + int64(e.probing)*probeOverhead +
+		int64(e.inFlight)*exchangeOverhead + int64(e.ghosts)*ghostOverhead
 }
 
 // bury 把已经结束的交互 x 变成占位，计入占位数。
@@ -65,30 +70,11 @@ func (e *Engine) recycle(x *exchange) {
 // enforce 在超过内存上限时丢弃在途交互，从最早开始的起（见 track），直到不超限；
 // 在途交互都丢完了仍然超限，就释放最久没有收到包的连接。
 // 在 Assembler 的回调之外调用（回调里不能调用 Release），所以计量最多超出上限一个包的量。
-// 之后如果有没报告过的丢弃，并且距上一次告警已满 10 秒（抓包时钟），调用 Warn。
-// 只释放连接、没有丢弃交互时不告警：告警说的是丢了多少交互。
 func (e *Engine) enforce(now time.Time) {
 	limit := e.cfg.MaxMemory
 	if limit > 0 && e.Memory() > limit {
 		e.shrink(limit, now)
 	}
-	if e.dropped > 0 && (!e.warned || !now.Before(e.warnedAt.Add(warnInterval))) {
-		e.warn(now)
-	}
-}
-
-// warnInterval 是内存告警的最小间隔，按抓包时钟。
-const warnInterval = 10 * time.Second
-
-// warn 报告距上一次告警以来丢弃的交互数，然后清零。
-func (e *Engine) warn(now time.Time) {
-	if e.cfg.Warn != nil {
-		msg := "dropped " + strconv.FormatInt(e.dropped, 10) + " in-flight exchanges (" +
-			strconv.FormatInt(e.droppedMatched, 10) + " matched) to stay under --max-memory"
-		e.cfg.Warn(msg)
-	}
-	e.dropped, e.droppedMatched = 0, 0
-	e.warnedAt, e.warned = now, true
 }
 
 // shrink 把计量降到 limit 以内，见 enforce。
@@ -149,13 +135,12 @@ func (c *conn) evict(x *exchange, now time.Time) {
 	e.timers.remove(x)
 	e.untrack(x)
 	e.stats.Evicted++
-	e.dropped++
 	if x.matched() {
 		e.stats.EvictedMatched++
-		e.droppedMatched++
 	}
 	e.inFlight--
 	e.buffered -= int64(len(x.buf))
+	x.uncharge()
 	x.evicted = true
 	e.bury(x)
 	// 和超时一样，还在等决定的 Upgrade 请求按被拒处理，缓存在它后面的请求回放出来。
@@ -163,4 +148,5 @@ func (c *conn) evict(x *exchange, now time.Time) {
 	c.giveUp(x)
 	// 排在它后面的请求轮到队首，从现在起计时。
 	c.rearm(now)
+	c.syncParsers()
 }

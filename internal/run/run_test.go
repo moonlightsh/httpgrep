@@ -160,6 +160,45 @@ func TestRunPipeRealTimeFallback(t *testing.T) {
 	}
 }
 
+// 真实时间兜底要等超过 1 秒没有新包才启用：--timeout 300ms 时，只有请求的交互不能在
+// 300ms 之后就超时（管道输入短暂停顿不该让时钟按真实时间往前推），而是在第 1 秒之后的
+// 第一次检查（约 1.0–1.2 秒）才以 no-response(timeout) 输出。
+func TestRunPipeIdleThreshold(t *testing.T) {
+	in := capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nX: HIT\r\n\r\n"))
+	})
+	for _, cpus := range []string{"1", "4"} {
+		t.Run("cpus="+cpus, func(t *testing.T) {
+			t.Parallel()
+			pr, pw := io.Pipe()
+			defer pw.Close()
+			out := newNotifyWriter()
+			ch := goRun(run.Config{Input: pr, Pipe: true, Stdout: out, Opts: opts(t, "--cpus", cpus, "--timeout", "300ms", "HIT")})
+			start := time.Now()
+			if _, err := pw.Write(in); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-out.wrote:
+			case <-time.After(3 * time.Second):
+				t.Fatal("no output within 3s")
+			}
+			if el := time.Since(start); el < 900*time.Millisecond || el > 2*time.Second {
+				t.Fatalf("output after %v, want between 0.9s and 2s", el)
+			}
+			pw.Close()
+			r := wait(t, ch, 2*time.Second)
+			if r.err != nil || !r.matched || r.st.NoResponseTimeout != 1 {
+				t.Fatalf("matched %v err %v stats %+v", r.matched, r.err, r.st)
+			}
+			check(t, out.String(), "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n"+
+				"GET /a HTTP/1.1\r\nX: HIT\r\n\r\n")
+		})
+	}
+}
+
 // Stop 关闭后最多再读 1 秒：读取卡在阻塞的 read 上（管道一直不关）时不等它，
 // 约 1 秒后结束在途交互，只有请求的交互以 no-response(eof) 输出。
 func TestRunStopGivesUpBlockedRead(t *testing.T) {
@@ -194,6 +233,21 @@ func TestRunStopGivesUpBlockedRead(t *testing.T) {
 	}
 }
 
+// Stop 关闭后 1 秒内连文件头都没等到（管道一直没有数据）：按输入为空处理，返回 pcap.ErrEmpty
+// （设计文档第 2 节：输入为空按出错处理，退出码 2）。
+func TestRunStopBeforeHeader(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	stop := make(chan struct{})
+	var out bytes.Buffer
+	ch := goRun(run.Config{Input: pr, Pipe: true, Stop: stop, Stdout: &out, Opts: opts(t, "HIT")})
+	close(stop)
+	r := wait(t, ch, 3*time.Second)
+	if r.err != pcap.ErrEmpty || r.matched || out.Len() != 0 {
+		t.Fatalf("matched %v err %v stdout %q, want false %v and no output", r.matched, r.err, out.String(), pcap.ErrEmpty)
+	}
+}
+
 // Stop 关闭后 1 秒内写入的数据照样处理（连文件头都在 Stop 之后才到）；
 // 读到输入结束就收尾，不等满 1 秒。
 func TestRunStopReadsUntilEOF(t *testing.T) {
@@ -225,14 +279,14 @@ func TestRunStopReadsUntilEOF(t *testing.T) {
 		"GET /a HTTP/1.1\r\nX: HIT\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n")
 }
 
-// --cpus 4 时每个分片的内存上限是 --max-memory 的 1/4：一个缓存了约 100 KB 的在途请求
-// 在 256K 的上限下放得下，在 64K 的分片上限下被丢弃，stderr 写一行告警。
+// --cpus 4 时每个分片的内存上限是 --max-memory 的 1/4：一个缓存了 64053 字节的在途请求
+// 在 256K 的上限下放得下，在 64K 的分片上限下（加上连接和交互的固定开销）被丢弃，stderr 写一行告警。
 func TestRunShardMemoryLimit(t *testing.T) {
 	in := capture(t, func(w *pcapgen.Writer) {
 		c := pcapgen.NewConn(w, cli1, srv)
 		c.Handshake(ms(-1))
 		c.ClientSend(ms(0), []byte("POST /up HTTP/1.1\r\nX: HIT\r\nContent-Length: 200000\r\n\r\n"))
-		c.ClientSend(ms(1), bytes.Repeat([]byte("b"), 100000))
+		c.ClientSend(ms(1), bytes.Repeat([]byte("b"), 64000))
 	})
 	for _, tc := range []struct {
 		cpus        string
@@ -247,7 +301,7 @@ func TestRunShardMemoryLimit(t *testing.T) {
 		t.Run("cpus="+tc.cpus, func(t *testing.T) {
 			var out, errOut bytes.Buffer
 			matched, st, err := run.Run(run.Config{Input: bytes.NewReader(in), Stdout: &out, Stderr: &errOut,
-				Opts: opts(t, "--cpus", tc.cpus, "--max-memory", "256K", "--max-message", "128K", "HIT")})
+				Opts: opts(t, "--cpus", tc.cpus, "--max-memory", "256K", "--max-message", "64K", "HIT")})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -255,6 +309,69 @@ func TestRunShardMemoryLimit(t *testing.T) {
 				t.Fatalf("matched %v, Evicted %d, stdout %d bytes", matched, st.Evicted, out.Len())
 			}
 			check(t, errOut.String(), tc.stderr)
+		})
+	}
+}
+
+// 内存告警由所有分片共用、按抓包时钟统一限频：同一批包里各分片的丢弃合成一行；
+// 距上一次告警不到 10 秒的丢弃累计到下一次，满 10 秒的一批报一次，输入结束时补报剩下的。
+// 输入分四段写进管道，每段各成一批：0 秒丢 3 个（告警），5 秒丢 3 个（累计），
+// 12 秒丢 2 个（告警 5 个），15 秒丢 3 个（输入结束时告警）。每个交互缓存约 70 KB，
+// --max-message 取每个分片上限（单核 64K、四核 16K），截断后加上固定开销仍然放不下，所以每个都被丢弃；
+// 每段的连接落在不止一个分片上（--cpus 4 时分片各自告警就会多出几行）。
+func TestRunShardWarnsRateLimited(t *testing.T) {
+	var capture bytes.Buffer
+	w := pcapgen.NewWriter(&capture, pcap.LinkEthernet)
+	port := uint16(41000)
+	var cuts []int // 每段结束时的字节偏移
+	for _, ph := range []struct {
+		at    float64 // 毫秒
+		conns int
+	}{{0, 3}, {5000, 3}, {12000, 2}, {15000, 3}} {
+		for k := range ph.conns {
+			c := pcapgen.NewConn(w, netip.AddrPortFrom(cli1.Addr(), port), srv)
+			port++
+			at := ph.at + float64(k*10)
+			c.Handshake(ms(at))
+			c.ClientSend(ms(at+1), []byte("POST /up HTTP/1.1\r\nX: HIT\r\nContent-Length: 200000\r\n\r\n"))
+			c.ClientSend(ms(at+2), bytes.Repeat([]byte("b"), 70000))
+		}
+		cuts = append(cuts, capture.Len())
+	}
+	if err := w.Err(); err != nil {
+		t.Fatal(err)
+	}
+	in := capture.Bytes()
+	for i, c := range cuts {
+		if i > 0 && c-cuts[i-1] > 256<<10 || c > 256<<10 && i == 0 { // 一批是 256 KiB
+			t.Fatalf("phase %d too large for one batch: %v", i, cuts)
+		}
+	}
+	const want = "httpgrep: dropped 3 in-flight exchanges (3 matched) to stay under --max-memory\n" +
+		"httpgrep: dropped 5 in-flight exchanges (5 matched) to stay under --max-memory\n" +
+		"httpgrep: dropped 3 in-flight exchanges (3 matched) to stay under --max-memory\n"
+	for _, tc := range []struct{ cpus, maxMsg string }{{"1", "64K"}, {"4", "16K"}} {
+		t.Run("cpus="+tc.cpus, func(t *testing.T) {
+			pr, pw := io.Pipe()
+			defer pw.Close()
+			var out, errOut bytes.Buffer
+			ch := goRun(run.Config{Input: pr, Stdout: &out, Stderr: &errOut,
+				Opts: opts(t, "--cpus", tc.cpus, "--max-memory", "64K", "--max-message", tc.maxMsg, "HIT")})
+			prev := 0
+			for _, c := range cuts {
+				// io.Pipe 的一次 Write 由读端一次读完；读下一段之前，读取协程先交出已经读到的包，
+				// 所以每段各成一批。
+				if _, err := pw.Write(in[prev:c]); err != nil {
+					t.Fatal(err)
+				}
+				prev = c
+			}
+			pw.Close()
+			r := wait(t, ch, 5*time.Second)
+			if r.err != nil || r.matched || r.st.Evicted != 11 || r.st.EvictedMatched != 11 {
+				t.Fatalf("matched %v err %v stats %+v", r.matched, r.err, r.st)
+			}
+			check(t, errOut.String(), want)
 		})
 	}
 }
@@ -446,31 +563,49 @@ func TestRunBadPattern(t *testing.T) {
 	}
 }
 
-// 每批包处理完，时钟推进广播给所有分片：连接 1 在 0 秒只发请求，连接 2（落在另一个分片）
-// 在 40 秒还有流量。读普通文件、没有真实时间兜底时，连接 1 所在的分片虽然再没收到包，
-// 也要按 --timeout 30s 以 no-response(timeout) 结束，而不是等到输入结束才以 eof 结束。
+// 每批包处理完，时钟推进到这批包的最大时间戳，广播给所有分片：连接 1 在 0 秒只发请求，
+// 之后 40 秒还有一条记录。读普通文件、没有真实时间兜底时，连接 1 也要按 --timeout 30s
+// 以 no-response(timeout) 结束，而不是等到输入结束才以 eof 结束。
+//   - conn2：40 秒的记录是连接 2（落在另一个分片）的流量，--cpus 4 时连接 1 所在的分片再没收到包。
+//   - udp：40 秒的记录是一个 UDP 包，不交给任何引擎；--cpus 1 时只有批次末尾的 Advance
+//     能让连接 1 超时（引擎的 Segment 只在处理 TCP 段时先结束超时的交互）。
 func TestRunBatchAdvanceReachesQuietShard(t *testing.T) {
-	in := capture(t, func(w *pcapgen.Writer) {
-		c := pcapgen.NewConn(w, cli1, srv)
-		c.Handshake(ms(-1))
-		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nX: HIT\r\n\r\n"))
-		c2 := pcapgen.NewConn(w, cli2, srv)
-		c2.Handshake(ms(39999))
-		c2.ClientSend(ms(40000), []byte("GET /b HTTP/1.1\r\n\r\n"))
-		c2.ServerSend(ms(40001), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
-	})
-	for _, cpus := range []string{"1", "4"} {
-		t.Run("cpus="+cpus, func(t *testing.T) {
-			var out bytes.Buffer
-			_, st, err := run.Run(run.Config{Input: bytes.NewReader(in), Stdout: &out, Opts: opts(t, "--cpus", cpus, "--timeout", "30s", "HIT")})
-			if err != nil {
-				t.Fatal(err)
-			}
-			check(t, out.String(), "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n"+
-				"GET /a HTTP/1.1\r\nX: HIT\r\n\r\n")
-			if st.NoResponseTimeout != 1 || st.NoResponseEOF != 0 || st.Complete != 1 {
-				t.Fatalf("stats %+v", st)
-			}
+	udp := pcapgen.TCP(cli2, srv, 100, 0, decode.SYN, nil)
+	udp[9] = 17 // 协议号改成 UDP
+	for _, tc := range []struct {
+		name     string
+		tail     func(w *pcapgen.Writer)
+		complete int64
+	}{
+		{"conn2", func(w *pcapgen.Writer) {
+			c2 := pcapgen.NewConn(w, cli2, srv)
+			c2.Handshake(ms(39999))
+			c2.ClientSend(ms(40000), []byte("GET /b HTTP/1.1\r\n\r\n"))
+			c2.ServerSend(ms(40001), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+		}, 1},
+		{"udp", func(w *pcapgen.Writer) {
+			w.Record(ms(40000), pcapgen.Frame(pcap.LinkEthernet, udp), 0)
+		}, 0},
+	} {
+		in := capture(t, func(w *pcapgen.Writer) {
+			c := pcapgen.NewConn(w, cli1, srv)
+			c.Handshake(ms(-1))
+			c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nX: HIT\r\n\r\n"))
+			tc.tail(w)
 		})
+		for _, cpus := range []string{"1", "4"} {
+			t.Run(tc.name+"/cpus="+cpus, func(t *testing.T) {
+				var out bytes.Buffer
+				_, st, err := run.Run(run.Config{Input: bytes.NewReader(in), Stdout: &out, Opts: opts(t, "--cpus", cpus, "--timeout", "30s", "HIT")})
+				if err != nil {
+					t.Fatal(err)
+				}
+				check(t, out.String(), "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n"+
+					"GET /a HTTP/1.1\r\nX: HIT\r\n\r\n")
+				if st.NoResponseTimeout != 1 || st.NoResponseEOF != 0 || st.Complete != tc.complete {
+					t.Fatalf("stats %+v", st)
+				}
+			})
+		}
 	}
 }

@@ -11,7 +11,8 @@ type dir struct {
 	base    uint32 // 偏移 0 对应的序号
 	next    int64  // 下一个期望交付的偏移
 	buf     []chunk
-	bufLen  int64 // buf 里的字节数
+	bufLen  int64     // buf 的计量：负载字节加每段的固定开销，见 chunk.cost
+	arr     *arrivals // 缓存段按到达先后的记录，第一次缓存时才分配，见 oldest
 
 	finSeen bool
 	finDone bool      // 已回调 Fin

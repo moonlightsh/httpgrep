@@ -18,7 +18,7 @@ func TestStatsMerge(t *testing.T) {
 		Complete: 10, NoRequest: 11, Incomplete: 12,
 		NoResponseTimeout: 13, NoResponseClosed: 14, NoResponseEOF: 15,
 		Late: 16, Evicted: 17, EvictedMatched: 18, Truncated: 19,
-		Gaps: 20, GapBytes: 21, Desyncs: 22, Orphans: 23,
+		Gaps: 20, GapBytes: 21, Desyncs: 22, Orphans: 23, NonHTTP: 27,
 		PeakBuffered: 24, PeakInFlight: 25, PeakConns: 26,
 	}
 	b := engine.Stats{
@@ -28,7 +28,7 @@ func TestStatsMerge(t *testing.T) {
 		Complete: 1000, NoRequest: 1100, Incomplete: 1200,
 		NoResponseTimeout: 1300, NoResponseClosed: 1400, NoResponseEOF: 1500,
 		Late: 1600, Evicted: 1700, EvictedMatched: 1800, Truncated: 1900,
-		Gaps: 2000, GapBytes: 2100, Desyncs: 2200, Orphans: 2300,
+		Gaps: 2000, GapBytes: 2100, Desyncs: 2200, Orphans: 2300, NonHTTP: 2700,
 		PeakBuffered: 2400, PeakInFlight: 2500, PeakConns: 2600,
 	}
 	want := engine.Stats{
@@ -38,7 +38,7 @@ func TestStatsMerge(t *testing.T) {
 		Complete: 1010, NoRequest: 1111, Incomplete: 1212,
 		NoResponseTimeout: 1313, NoResponseClosed: 1414, NoResponseEOF: 1515,
 		Late: 1616, Evicted: 1717, EvictedMatched: 1818, Truncated: 1919,
-		Gaps: 2020, GapBytes: 2121, Desyncs: 2222, Orphans: 2323,
+		Gaps: 2020, GapBytes: 2121, Desyncs: 2222, Orphans: 2323, NonHTTP: 2727,
 		PeakBuffered: 2424, PeakInFlight: 2525, PeakConns: 2626,
 	}
 	got := a

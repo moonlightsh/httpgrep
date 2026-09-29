@@ -312,6 +312,16 @@ func TestParseDurationAndCPUs(t *testing.T) {
 			t.Errorf("--cpus %q 应报错", bad)
 		}
 	}
+	// --cpus 最多 1024：太大时起不了那么多线程，每个分片的内存上限也会被压到几乎为 0。
+	if opts, err := cli.Parse([]string{"--cpus", "1024", "kw"}); err != nil || opts.CPUs != 1024 {
+		t.Errorf("--cpus 1024: CPUs %d, err %v", opts.CPUs, err)
+	}
+	for _, bad := range []string{"1025", "100000", "99999999999999999999"} {
+		_, err := cli.Parse([]string{"--cpus", bad, "kw"})
+		if want := "invalid value for --cpus: " + bad + " (at most 1024)"; err == nil || err.Error() != want {
+			t.Errorf("--cpus %s: err %v, want %q", bad, err, want)
+		}
+	}
 }
 
 // 第 7 条：关键词里的换行拆成多个。
@@ -451,5 +461,59 @@ func TestParseUnknownNonASCIIShortOption(t *testing.T) {
 	_, err := cli.Parse([]string{"-é", "kw"})
 	if err == nil || err.Error() != "unknown option: -é" {
 		t.Fatalf("err = %v, want unknown option: -é", err)
+	}
+}
+
+// --cpus N 时每个分片的内存上限是 --max-memory 的 1/N，--max-message 不能超过它，
+// 否则本该截断的大消息会整笔因内存上限丢弃。没给 --max-message 时默认值随之下调。
+func TestParseMaxMessagePerCPU(t *testing.T) {
+	_, err := cli.Parse([]string{"--cpus", "4", "--max-memory", "64K", "--max-message", "32K", "kw"})
+	if want := "--max-message cannot exceed --max-memory divided by --cpus (16384 bytes per worker with --cpus 4)"; err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	opts, err := cli.Parse([]string{"--cpus", "4", "--max-memory", "64K", "--max-message", "16K", "kw"})
+	if err != nil || opts.MaxMessage != 16384 {
+		t.Fatalf("--max-message 16K: MaxMessage %d, err %v", opts.MaxMessage, err)
+	}
+	// --max-memory 小于 --cpus 时每个分片分不到 1 字节：报错，不能让默认的 --max-message
+	// 跟着降到 0、分片上限也变成 0（0 表示不限），整个内存上限失效。
+	for _, args := range [][]string{
+		{"--max-memory", "1000", "--cpus", "1024", "kw"},
+		{"--max-memory", "3", "--cpus", "4", "--max-message", "1", "kw"},
+	} {
+		_, err := cli.Parse(args)
+		if want := "--max-memory cannot be less than --cpus (" + args[3] + " bytes are needed for --cpus " + args[3] + ")"; err == nil || err.Error() != want {
+			t.Errorf("%v: err %v, want %q", args, err, want)
+		}
+	}
+	if opts, err := cli.Parse([]string{"--max-memory", "4", "--cpus", "4", "kw"}); err != nil || opts.MaxMessage != 1 {
+		t.Errorf("--max-memory 4 --cpus 4: MaxMessage %d, err %v; want 1", opts.MaxMessage, err)
+	}
+	for _, tc := range []struct {
+		args []string
+		want int64
+	}{
+		{[]string{"--cpus", "64", "kw"}, 4 << 20},
+		{[]string{"--cpus", "32", "kw"}, 8 << 20},
+		{[]string{"--max-memory", "1M", "kw"}, 1 << 20},
+		{[]string{"--max-memory", "1M", "--cpus", "3", "kw"}, 349525},
+	} {
+		opts, err := cli.Parse(tc.args)
+		if err != nil || opts.MaxMessage != tc.want {
+			t.Errorf("%v: MaxMessage %d, err %v; want %d", tc.args, opts.MaxMessage, err, tc.want)
+		}
+	}
+}
+
+// --timeout 最多 8760h（一年）：再大时两倍超时（连接空闲释放）会溢出成负数。
+func TestParseTimeoutLimit(t *testing.T) {
+	if opts, err := cli.Parse([]string{"--timeout", "8760h", "kw"}); err != nil || opts.Timeout != 8760*time.Hour {
+		t.Fatalf("--timeout 8760h: %v, %v", opts.Timeout, err)
+	}
+	for _, bad := range []string{"8760h0m1s", "1500000h"} {
+		_, err := cli.Parse([]string{"--timeout", bad, "kw"})
+		if want := "invalid duration for --timeout: " + bad + " (at most 8760h)"; err == nil || err.Error() != want {
+			t.Errorf("--timeout %s: err %v, want %q", bad, err, want)
+		}
 	}
 }

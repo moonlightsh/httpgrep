@@ -83,15 +83,15 @@ func TestReorderTimeout(t *testing.T) {
 // 第 10 条：单方向乱序缓存超过 MaxReorderBytes 时立即认定缺口。
 func TestReorderBufferLimit(t *testing.T) {
 	cfg := defaultConfig()
-	cfg.MaxReorderBytes = 6
+	cfg.MaxReorderBytes = 6 + 2*128 // 每段另计 128 字节
 	h := newHarness(t, cfg)
 	h.handshake(at(0))
 	h.expect("open A=10.0.0.1:40000 B=10.0.0.2:80 known=true")
-	h.add(c2s(1005, 5001, pshAck, "efgh"), at(1)) // 缓存 4 字节
-	h.add(c2s(1011, 5001, pshAck, "kl"), at(2))   // 缓存 6 字节，没超过
+	h.add(c2s(1005, 5001, pshAck, "efgh"), at(1)) // 缓存 4 字节（计 132）
+	h.add(c2s(1011, 5001, pshAck, "kl"), at(2))   // 缓存 6 字节（计 262），没超过
 	h.add(s2c(5001, 1001, pshAck, "HTTP/1.1"), at(3))
 	h.expect(`data 1 off=0 "HTTP/1.1" ack=0`)  // 另一方向不受影响
-	h.add(c2s(1013, 5001, pshAck, "m"), at(4)) // 缓存 7 字节，超过
+	h.add(c2s(1013, 5001, pshAck, "m"), at(4)) // 缓存 7 字节（计 391），超过
 	h.expect("gap 0 off=0 n=4", `data 0 off=4 "efgh" ack=0`)
 }
 

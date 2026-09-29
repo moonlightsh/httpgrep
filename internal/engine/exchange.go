@@ -123,6 +123,8 @@ type exchange struct {
 	msgs   []message
 
 	keep int64 // 在回收列表里时计入 Engine.freeBuf 的字节数，见 Engine.recycle
+
+	extra int64 // 计入 Engine.extra 的字节数，见 charge
 }
 
 // maxKeepBuf 是交互复用时保留的缓存容量上限，超过就释放。
@@ -220,7 +222,30 @@ func (x *exchange) matched() bool {
 // addMessage 在方向 dir 上追加一条消息，返回下标。
 func (x *exchange) addMessage(dir uint8) int {
 	x.msgs = append(x.msgs, message{dir: dir})
+	if len(x.msgs) > freeMessages {
+		x.charge(messageOverhead)
+	}
 	return len(x.msgs) - 1
+}
+
+// addPiece 追加一个片段。
+func (x *exchange) addPiece(p piece) {
+	x.pieces = append(x.pieces, p)
+	if len(x.pieces) > freePieces {
+		x.charge(pieceOverhead)
+	}
+}
+
+// charge 把超出的消息或片段的 n 字节计入内存计量。
+func (x *exchange) charge(n int64) {
+	x.extra += n
+	x.c.e.extra += n
+}
+
+// uncharge 在交互结束（或被丢弃）时撤销 charge 计入的部分。
+func (x *exchange) uncharge() {
+	x.c.e.extra -= x.extra
+	x.extra = 0
 }
 
 // raw 缓存消息 mi 的一段线上字节，并按分类喂给扫描器，返回缓存的字节数。
@@ -229,7 +254,11 @@ func (x *exchange) addMessage(dir uint8) int {
 func (x *exchange) raw(mi int, sec http1.Section, b []byte, limit int64) int {
 	m := &x.msgs[mi]
 	var over int64
-	if limit > 0 && m.size+int64(len(b)) > limit {
+	if m.trunc != 0 {
+		// 已经截断（可能是缺口标记放不下时改成的截断，那时 size 还没到 limit）：
+		// 之后的字节都并入截断标记，截断标记始终是这条消息的最后一段。
+		over, b = int64(len(b)), b[:0]
+	} else if limit > 0 && m.size+int64(len(b)) > limit {
 		keep := int(max(limit-m.size, 0))
 		over = int64(len(b) - keep)
 		b = b[:keep]
@@ -258,7 +287,7 @@ func (x *exchange) cache(mi int, sec http1.Section, b []byte) {
 			goto feed
 		}
 	}
-	x.pieces = append(x.pieces, piece{msg: mi, kind: kind, lo: lo, hi: len(x.buf)})
+	x.addPiece(piece{msg: mi, kind: kind, lo: lo, hi: len(x.buf)})
 feed:
 	switch sec {
 	case http1.SecHead:
@@ -277,7 +306,7 @@ func (x *exchange) truncate(mi int, n int64) {
 	m := &x.msgs[mi]
 	if m.trunc == 0 {
 		lo := len(x.buf)
-		x.pieces = append(x.pieces, piece{msg: mi, kind: output.PieceTruncated, lo: lo, hi: lo})
+		x.addPiece(piece{msg: mi, kind: output.PieceTruncated, lo: lo, hi: lo})
 		m.trunc = len(x.pieces)
 		x.c.e.stats.Truncated++
 		// 这里不断行：限额以内的 body 字节随后才由 Body 喂入，要和前面的内容接成一行。
@@ -289,7 +318,10 @@ func (x *exchange) truncate(mi int, n int64) {
 // gap 在消息 mi 里记下 n 字节没抓到：输出缺口标记，交互不完整，
 // 这个方向在缺口处断行，缺口两边的内容不会拼成一行去匹配。
 // 带 Content-Encoding 的 body 里有缺口时也算二进制（解码后的大小不可知）。
-func (x *exchange) gap(mi int, sec http1.Section, n int64) {
+// 紧接在同一消息的缺口标记之后的缺口并进这个标记（snaplen 截断的长下载每个包都是一个缺口）。
+// 新的缺口标记按 pieceOverhead 计入消息大小，超过 limit（不大于 0 时不限）就改为截断：
+// 数据和缺口交替出现时片段不能合并，这样片段数也受 MaxMessage 限制。
+func (x *exchange) gap(mi int, sec http1.Section, n int64, limit int64) {
 	m := &x.msgs[mi]
 	x.incomplete = true
 	if m.trunc != 0 {
@@ -301,8 +333,19 @@ func (x *exchange) gap(mi int, sec http1.Section, n int64) {
 	if inBody && m.ce != "" {
 		m.binary = true
 	}
+	if k := len(x.pieces); k > 0 {
+		if p := &x.pieces[k-1]; p.kind == output.PieceGap && p.msg == mi && p.inBody == inBody {
+			p.n += n
+			return
+		}
+	}
+	if limit > 0 && m.size+pieceOverhead > limit {
+		x.truncate(mi, n)
+		return
+	}
+	m.size += pieceOverhead
 	lo := len(x.buf)
-	x.pieces = append(x.pieces, piece{msg: mi, kind: output.PieceGap, lo: lo, hi: lo, n: n, inBody: inBody})
+	x.addPiece(piece{msg: mi, kind: output.PieceGap, lo: lo, hi: lo, n: n, inBody: inBody})
 	x.lineBreak(m.dir)
 }
 
