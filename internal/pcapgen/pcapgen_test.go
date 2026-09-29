@@ -549,3 +549,38 @@ func TestConnServerSkipFin(t *testing.T) {
 		})
 	}
 }
+
+// ClientSend 按 Conn.MSS 切段；MSS 不大于 0 时按默认 1460 切。
+func TestConnMSS(t *testing.T) {
+	client := netip.MustParseAddrPort("10.0.0.1:50005")
+	server := netip.MustParseAddrPort("10.0.0.2:80")
+	t0 := time.Unix(1700000000, 0)
+	cases := []struct {
+		name string
+		mss  int
+		n    int
+		want []string // 数据段的 seq_raw 和 tcp.len，手写
+	}{
+		{"mss-500", 500, 1200, []string{"1001:500", "1501:500", "2001:200"}},
+		{"mss-0", 0, 3000, []string{"1001:1460", "2461:1460", "3921:80"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writePcap(t, tc.name+".pcap", pcap.LinkEthernet, func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, client, server)
+				c.MSS = tc.mss
+				c.Handshake(t0)
+				c.ClientSend(t0.Add(10*time.Millisecond), make([]byte, tc.n))
+			})
+			var got []string
+			for _, row := range tsharkFields(t, path, nil, "tcp.seq_raw", "tcp.len") {
+				if row[1] != "0" {
+					got = append(got, row[0]+":"+row[1])
+				}
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("数据段 seq:len = %v，想要 %v", got, tc.want)
+			}
+		})
+	}
+}
