@@ -271,6 +271,11 @@ func TestParseMaxMessageSizes(t *testing.T) {
 		_, err := cli.Parse([]string{"--max-message=" + bad, "kw"})
 		if err == nil {
 			t.Errorf("--max-message %q 应报错", bad)
+			continue
+		}
+		want := "invalid size for --max-message: " + bad
+		if err.Error() != want {
+			t.Errorf("err = %q, want %q", err.Error(), want)
 		}
 	}
 	// 空格形式同样支持。
@@ -399,6 +404,44 @@ func TestUsageCoversOptions(t *testing.T) {
 	for _, opt := range []string{"-e", "-E", "--timeout", "--max-memory", "--max-message", "--cpus", "--stats", "--help", "--version"} {
 		if !strings.Contains(cli.Usage, opt) {
 			t.Errorf("Usage 缺少 %s", opt)
+		}
+	}
+}
+
+// 第 9 条：每个取值选项缺少选项值时，报错都指向该选项本身。
+func TestParseMissingOptionValue(t *testing.T) {
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"kw", "--timeout"}, "option requires an argument: --timeout"},
+		{[]string{"kw", "--max-memory"}, "option requires an argument: --max-memory"},
+		{[]string{"kw", "--max-message"}, "option requires an argument: --max-message"},
+		{[]string{"kw", "--cpus"}, "option requires an argument: --cpus"},
+		{[]string{"kw", "-e"}, "option requires an argument: -e"},
+	}
+	for _, c := range cases {
+		_, err := cli.Parse(c.args)
+		if err == nil || err.Error() != c.want {
+			t.Errorf("Parse(%q) err = %v, want %q", c.args, err, c.want)
+		}
+	}
+}
+
+// 开关类长选项不接受 =值 形式。
+func TestParseFlagRejectsValue(t *testing.T) {
+	cases := []struct {
+		arg  string
+		want string
+	}{
+		{"--stats=x", "option --stats does not take an argument"},
+		{"--help=x", "option --help does not take an argument"},
+		{"--version=x", "option --version does not take an argument"},
+	}
+	for _, c := range cases {
+		_, err := cli.Parse([]string{c.arg, "kw"})
+		if err == nil || err.Error() != c.want {
+			t.Errorf("Parse(%q) err = %v, want %q", c.arg, err, c.want)
 		}
 	}
 }
