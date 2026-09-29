@@ -932,10 +932,12 @@ func TestUpgradeFlag(t *testing.T) {
 		{"GET / HTTP/1.1\r\nConnection: keep-alive\r\n\r\n", "head GET / HTTP/1.1"},
 	}
 	for _, tt := range tests {
-		r := run(http1.Request, http1.Options{}, 0, data(tt.in))
-		if len(r.ev) < 3 || r.ev[2] != tt.head {
-			t.Errorf("%q: events %q, want %q", tt.in, r.ev, tt.head)
-		}
+		t.Run(tt.head, func(t *testing.T) {
+			r := run(http1.Request, http1.Options{}, 0, data(tt.in))
+			if len(r.ev) < 3 || r.ev[2] != tt.head {
+				t.Errorf("%q: events %q, want %q", tt.in, r.ev, tt.head)
+			}
+		})
 	}
 	// 响应里的 Upgrade 头不影响 Head.Upgrade。
 	r := run(http1.Response, http1.Options{}, 0, data("HTTP/1.1 426 Upgrade Required\r\nUpgrade: h2c\r\nContent-Length: 0\r\n\r\n"))
@@ -1103,11 +1105,13 @@ func TestMethodCalledOncePerFinalResponse(t *testing.T) {
 		{"HTTP/1.1 101 Switching Protocols\r\n\r\n", 0},
 	}
 	for _, tt := range tests {
-		var calls int
-		run(http1.Response, http1.Options{Method: methodFn("GET", &calls)}, 0, data(tt.in))
-		if calls != tt.calls {
-			t.Errorf("%q: Method called %d times, want %d", tt.in, calls, tt.calls)
-		}
+		t.Run(strings.TrimSpace(strings.SplitN(tt.in, "\r\n", 2)[0]), func(t *testing.T) {
+			var calls int
+			run(http1.Response, http1.Options{Method: methodFn("GET", &calls)}, 0, data(tt.in))
+			if calls != tt.calls {
+				t.Errorf("%q: Method called %d times, want %d", tt.in, calls, tt.calls)
+			}
+		})
 	}
 }
 
@@ -1140,4 +1144,27 @@ func TestStatusLineWithoutReasonCRLF(t *testing.T) {
 		want := cat([]string{"begin off=0", "raw head " + ok, "desync 17", "raw unparsed nocolon\r\n", "end false"}, ev204(26))
 		checkAllChunkings(t, http1.Response, http1.Options{}, want, data(ok+"nocolon\r\n"+s204))
 	})
+}
+
+// 第一个 Content-Type / Content-Encoding 的值为空时，就取空值，不看后面重复的头。
+func TestHeadFieldsFirstValueEmpty(t *testing.T) {
+	in := "HTTP/1.1 200 OK\r\nContent-Type: \r\nContent-Type: text/html\r\n" +
+		"Content-Encoding:\r\nContent-Encoding: gzip\r\nContent-Length: 0\r\n\r\n"
+	r := run(http1.Response, http1.Options{}, 0, data(in))
+	want := http1.Head{Status: 200, Proto: "HTTP/1.1"}
+	if len(r.heads) != 1 || r.heads[0] != want {
+		t.Errorf("heads = %+v, want %+v", r.heads, want)
+	}
+}
+
+// 失步期间调用 Tunnel：当前消息立即以 End(false) 结束，之后的隧道字节不再交付。
+func TestTunnelWhileDesynced(t *testing.T) {
+	const req = "GET /ws HTTP/1.1\r\nUpgrade: websocket\r\n"
+	want := []string{"begin off=0", "raw head " + req, "desync 38", "raw unparsed bad\r\n", "end false"}
+	checkAllChunkings(t, http1.Request, http1.Options{}, want,
+		data(req+"bad\r\n").at(1), tunnel(), data("\x81\x05hello\nGET / HTTP/1.1\r\n\r\n"), closeFin())
+	r := run(http1.Request, http1.Options{}, 0, data(req+"bad\r\n").at(1), tunnel())
+	if len(r.ends) != 1 || !r.ends[0].Equal(t0.Add(time.Second)) {
+		t.Errorf("end times = %v, want the time of the last data", r.ends)
+	}
 }

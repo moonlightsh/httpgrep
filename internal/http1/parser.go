@@ -69,7 +69,8 @@ type Parser struct {
 	lnTS  time.Time
 	lnAck int64
 
-	open bool // 有正在解析的消息（已 Begin 未 End），包括 Orphan 消息
+	open   bool      // 有正在解析的消息（已 Begin 未 End），包括 Orphan 消息
+	lastTS time.Time // 最近一次 Feed 或 Gap 的时间
 
 	// 当前消息的头部。
 	h       Head
@@ -78,6 +79,8 @@ type Parser struct {
 	cl      int64 // Content-Length 的值
 	hasTE   bool  // 出现过 Transfer-Encoding
 	chunked bool  // 最后一个 Transfer-Encoding 的最后一项是 chunked
+	hasCT   bool  // 出现过 Content-Type，只取第一个
+	hasCE   bool  // 出现过 Content-Encoding，只取第一个
 	rem     int64 // Content-Length body 或当前 chunk 数据还剩多少字节
 	trlLen  int   // 已收到的 trailer 字节数
 
@@ -103,6 +106,9 @@ func NewParser(kind Kind, sink Sink, opt Options) *Parser {
 
 // Feed 按序喂入从流偏移 off 开始的字节 b。b 只在调用期间使用，不保留。
 func (p *Parser) Feed(off int64, b []byte, peerAck int64, ts time.Time) {
+	if len(b) > 0 {
+		p.lastTS = ts
+	}
 	for len(b) > 0 && p.st != stDead {
 		n := p.step(off, b, peerAck, ts)
 		off += int64(n)
@@ -377,6 +383,7 @@ func (p *Parser) Gap(off, n int64, ts time.Time) {
 	if n <= 0 {
 		return
 	}
+	p.lastTS = ts
 	switch p.st {
 	case stDead:
 		return
@@ -517,10 +524,18 @@ func (p *Parser) Resume() {
 }
 
 // Tunnel 丢弃 Upgrade 请求之后缓存的字节，此后不再产生事件。只对请求解析器有效。
-// 请求还没结束时调用，请求结束（End）之后不再产生事件。
+// 请求还在正常解析时调用，请求结束（End）之后不再产生事件；
+// 请求已经失步时调用，立即以 End(false) 结束它。
+// 注意：Upgrade 请求失步后不会进入缓存状态，后面的字节马上按 HTTP 扫描，
+// 这期间的字节会作为它的 SecUnparsed 交付，直到调用 Tunnel 或找到下一个起始行。
 func (p *Parser) Tunnel() {
 	if p.kind != Request || p.st == stDead {
 		return
+	}
+	if p.open && p.st == stScan {
+		// 失步中的消息不会再正常结束：立即结束，免得隧道字节都作为它的 Unparsed 交付。
+		p.sink.End(false, p.lastTS)
+		p.open = false
 	}
 	if p.open {
 		p.dec = decTunnel

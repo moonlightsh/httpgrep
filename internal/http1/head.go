@@ -12,6 +12,7 @@ func (p *Parser) begin(line []byte) {
 	p.h = Head{}
 	p.hasCL, p.cl = false, 0
 	p.hasTE, p.chunked = false, false
+	p.hasCT, p.hasCE = false, false
 	p.dec = undecided
 	parseStart(p.kind, trimEOL(line), &p.h)
 	p.sink.Raw(SecHead, line)
@@ -48,12 +49,12 @@ func (p *Parser) headLine(line []byte, ts time.Time) bool {
 		}
 		p.chunked = eqFold(last, "chunked")
 	case eqFold(name, "content-type"):
-		if p.h.ContentType == "" {
-			p.h.ContentType = string(val)
+		if !p.hasCT {
+			p.hasCT, p.h.ContentType = true, string(val)
 		}
 	case eqFold(name, "content-encoding"):
-		if p.h.ContentEncoding == "" {
-			p.h.ContentEncoding = string(val)
+		if !p.hasCE {
+			p.hasCE, p.h.ContentEncoding = true, string(val)
 		}
 	case p.kind == Request && eqFold(name, "upgrade"):
 		p.h.Upgrade = true
