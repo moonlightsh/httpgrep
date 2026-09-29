@@ -413,7 +413,8 @@ func TestConnSendAbsoluteSeq(t *testing.T) {
 	}
 }
 
-// FIN 和 RST 的标志位正确，FIN 消耗一个序号，FIN 之后数据段序号继续推进。
+// FIN 和 RST 的标志位正确，FIN 消耗一个序号，FIN 之后数据段序号继续推进；
+// 纯 ACK、FIN、RST 的确认号都取对端已发送的位置。
 func TestConnFinRstSeq(t *testing.T) {
 	client := netip.MustParseAddrPort("10.0.0.1:50003")
 	server := netip.MustParseAddrPort("10.0.0.2:80")
@@ -423,32 +424,33 @@ func TestConnFinRstSeq(t *testing.T) {
 		c.Handshake(t0)
 		c.ClientSend(t0.Add(10*time.Millisecond), []byte("abc")) // 3 字节，序号到 1004
 		c.ServerAck(t0.Add(11 * time.Millisecond))
+		c.ServerSend(t0.Add(12*time.Millisecond), []byte("xy")) // 2 字节，服务端到 2003
+		c.ClientAck(t0.Add(13 * time.Millisecond))
 		c.ClientFin(t0.Add(20 * time.Millisecond)) // 占用 1004，之后 1005
 		c.ClientSend(t0.Add(30*time.Millisecond), []byte("d"))
 		c.ClientRst(t0.Add(40 * time.Millisecond))
 	})
-	// 期望值手写：ISN=1000。
+	// 期望值手写：客户端 ISN=1000，服务端 ISN=2000。
 	want := [][]string{
-		{"0x0002"}, // SYN
-		{"0x0012"}, // SYN-ACK
-		{"0x0010"}, // ACK
-		{"0x0018"}, // 数据 abc：seq 1001
-		{"0x0010"}, // ServerAck：ack 1004
-		{"0x0011"}, // ClientFin：seq 1004
-		{"0x0018"}, // 数据 d：seq 1005
-		{"0x0014"}, // RST：seq 1006
+		// flags, seq, ack
+		{"0x0002", "1000", "0"},    // SYN
+		{"0x0012", "2000", "1001"}, // SYN-ACK
+		{"0x0010", "1001", "2001"}, // ACK
+		{"0x0018", "1001", "2001"}, // 数据 abc
+		{"0x0010", "2001", "1004"}, // ServerAck 确认 abc
+		{"0x0018", "2001", "1004"}, // 数据 xy
+		{"0x0010", "1004", "2003"}, // ClientAck 确认 xy
+		{"0x0011", "1004", "2003"}, // ClientFin
+		{"0x0018", "1005", "2003"}, // 数据 d
+		{"0x0014", "1006", "2003"}, // RST
 	}
-	rows := tsharkFields(t, path, nil, "tcp.flags", "tcp.seq_raw")
+	rows := tsharkFields(t, path, nil, "tcp.flags", "tcp.seq_raw", "tcp.ack_raw")
 	if len(rows) != len(want) {
 		t.Fatalf("包数 = %d，想要 %d", len(rows), len(want))
 	}
-	wantSeq := []string{"1000", "2000", "1001", "1001", "2001", "1004", "1005", "1006"}
 	for i, row := range rows {
-		if row[0] != want[i][0] {
-			t.Errorf("第 %d 个包 flags = %s，想要 %s", i+1, row[0], want[i][0])
-		}
-		if row[1] != wantSeq[i] {
-			t.Errorf("第 %d 个包 seq = %s，想要 %s", i+1, row[1], wantSeq[i])
+		if !reflect.DeepEqual(row, want[i]) {
+			t.Errorf("第 %d 个包 flags/seq/ack = %v，想要 %v", i+1, row, want[i])
 		}
 	}
 }
