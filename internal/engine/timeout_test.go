@@ -136,3 +136,22 @@ func TestLateRestOfResponseWithGap(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 带 Upgrade 头的请求超时：先按被拒处理（Resume），缓存在它后面的请求照常排队，
+// 从 Upgrade 请求到期（t=30）起计时，t=60 以 no-response(timeout) 结束，而不是等到输入结束。
+func TestTimeoutUpgradeResumesHeld(t *testing.T) {
+	snaps, out, st := replayTicks(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+		c.ClientSend(ms(1000), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+	}, ms(59999.9), ms(60000))
+	want := "2026-09-28 15:30:13.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n" +
+		"GET /TOKEN HTTP/1.1\r\n\r\n"
+	check(t, snaps[0], "")
+	check(t, snaps[1], want)
+	check(t, out, want)
+	if st.NoResponseTimeout != 2 || st.NoResponseEOF != 0 {
+		t.Fatalf("stats: %+v", st)
+	}
+}

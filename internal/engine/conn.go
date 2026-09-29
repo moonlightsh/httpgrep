@@ -380,6 +380,16 @@ func (c *conn) timeout(x *exchange, at time.Time) {
 	}
 	c.e.end(c, x)
 	x.bury()
+	if x.upgrade && !x.decided {
+		// Upgrade 请求等不到决定了，按被拒处理：缓存在它后面的请求回放出来照常排队，
+		// 从现在起计时。请求还没发完时 Resume 只记下决定，发完后直接继续解析。
+		x.decided = true
+		if c.held {
+			c.resumeHeld()
+		} else if !x.reqDone {
+			c.req.Resume()
+		}
+	}
 	c.rearm(at)
 }
 
@@ -480,7 +490,8 @@ func (s *reqSink) Begin(b http1.Begin) {
 	x.reqMsg = x.addMessage(dirReq)
 	c.queue = append(c.queue, x)
 	s.cur = x
-	c.rearm(b.TS)
+	// 从引擎看到它的时刻起计时：回放 Upgrade 请求之后缓存的字节时，b.TS 是缓存段的时间，更早。
+	c.rearm(c.now)
 }
 
 func (s *reqSink) Raw(sec http1.Section, b []byte) {
