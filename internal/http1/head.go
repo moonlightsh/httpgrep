@@ -11,6 +11,7 @@ func (p *Parser) begin(line []byte) {
 	p.open = true
 	p.h = Head{}
 	p.hasCL, p.cl = false, 0
+	p.hasTE, p.chunked = false, false
 	parseStart(p.kind, trimEOL(line), &p.h)
 	p.sink.Raw(SecHead, line)
 	p.headLen = len(line)
@@ -31,6 +32,13 @@ func (p *Parser) headLine(line []byte, ts time.Time) {
 	if eqFold(name, "content-length") {
 		p.hasCL = true
 		p.cl, _ = parseCL(val)
+	} else if eqFold(name, "transfer-encoding") {
+		p.hasTE = true
+		last := val
+		if k := bytes.LastIndexByte(val, ','); k >= 0 {
+			last = trimSpace(val[k+1:])
+		}
+		p.chunked = eqFold(last, "chunked")
 	}
 	p.sink.Raw(SecHead, line)
 }
@@ -38,6 +46,10 @@ func (p *Parser) headLine(line []byte, ts time.Time) {
 // finishHead 在头部结束的空行之后决定 body 的长度。
 func (p *Parser) finishHead(ts time.Time) {
 	p.sink.Head(&p.h)
+	if p.hasTE && p.chunked {
+		p.st = stChunkSize
+		return
+	}
 	if p.hasCL && p.cl > 0 {
 		p.rem = p.cl
 		p.st = stBodyCL
@@ -144,6 +156,27 @@ func parseCL(s []byte) (int64, bool) {
 	var v int64
 	for _, c := range s {
 		v = v*10 + int64(c-'0')
+	}
+	return v, true
+}
+
+// parseChunkSize 解析 chunk 长度行（不含行尾）：十六进制数字，后面可以跟 ";扩展"。
+func parseChunkSize(s []byte) (int64, bool) {
+	if k := bytes.IndexByte(s, ';'); k >= 0 {
+		s = s[:k]
+	}
+	s = trimSpace(s)
+	var v int64
+	for _, c := range s {
+		switch {
+		case '0' <= c && c <= '9':
+			c -= '0'
+		case 'a' <= c && c <= 'f':
+			c -= 'a' - 10
+		case 'A' <= c && c <= 'F':
+			c -= 'A' - 10
+		}
+		v = v<<4 | int64(c)
 	}
 	return v, true
 }

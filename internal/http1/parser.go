@@ -9,12 +9,20 @@ import (
 type state uint8
 
 const (
-	stStart  state = iota // 等起始行（两条消息之间）
-	stHead                // 读头部行
-	stBodyCL              // 读 Content-Length body
+	stStart     state = iota // 等起始行（两条消息之间）
+	stHead                   // 读头部行
+	stBodyCL                 // 读 Content-Length body
+	stChunkSize              // 读 chunk 长度行
+	stChunkData              // 读 chunk 数据
+	stChunkEnd               // 读 chunk 数据后面的 CRLF
+	stTrailer                // 读 trailer
 )
 
-const maxHead = 64 << 10 // 起始行加头部的上限
+const (
+	maxHead      = 64 << 10 // 起始行加头部的上限
+	maxTrailer   = 64 << 10 // trailer 的上限
+	maxChunkLine = 4 << 10  // chunk 长度行的上限
+)
 
 // Parser 解析一个方向的 HTTP/1.x 字节流。
 type Parser struct {
@@ -38,7 +46,10 @@ type Parser struct {
 	headLen int   // 已收到的起始行和头部字节数
 	hasCL   bool  // 出现过 Content-Length
 	cl      int64 // Content-Length 的值
-	rem     int64 // body 还剩多少字节
+	hasTE   bool  // 出现过 Transfer-Encoding
+	chunked bool  // 最后一个 Transfer-Encoding 的最后一项是 chunked
+	rem     int64 // Content-Length body 或当前 chunk 数据还剩多少字节
+	trlLen  int   // 已收到的 trailer 字节数
 }
 
 // NewParser 创建一个解析器。
@@ -79,7 +90,8 @@ func (p *Parser) step(off int64, b []byte, ack int64, ts time.Time) int {
 		p.lb = p.lb[:0]
 		return n
 
-	case stBodyCL:
+	case stBodyCL, stChunkData:
+		// 大段数据直接切片交付，不逐字节处理。
 		k := len(b)
 		if int64(k) > p.rem {
 			k = int(p.rem)
@@ -88,9 +100,53 @@ func (p *Parser) step(off int64, b []byte, ack int64, ts time.Time) int {
 		p.sink.Body(b[:k])
 		p.rem -= int64(k)
 		if p.rem == 0 {
-			p.end(true, ts)
+			if p.st == stBodyCL {
+				p.end(true, ts)
+			} else {
+				p.st = stChunkEnd
+			}
 		}
 		return k
+
+	case stChunkSize:
+		line, n, _ := p.line(off, b, ack, ts, maxChunkLine)
+		if line == nil {
+			return n
+		}
+		size, _ := parseChunkSize(trimEOL(line))
+		p.sink.Raw(SecBody, line)
+		if size == 0 {
+			p.trlLen = 0
+			p.st = stTrailer
+		} else {
+			p.rem = size
+			p.st = stChunkData
+		}
+		p.lb = p.lb[:0]
+		return n
+
+	case stChunkEnd:
+		line, n, _ := p.line(off, b, ack, ts, 2)
+		if line == nil {
+			return n
+		}
+		p.sink.Raw(SecBody, line)
+		p.st = stChunkSize
+		p.lb = p.lb[:0]
+		return n
+
+	case stTrailer:
+		line, n, _ := p.line(off, b, ack, ts, maxTrailer-p.trlLen)
+		if line == nil {
+			return n
+		}
+		p.trlLen += len(line)
+		p.sink.Raw(SecTrailer, line)
+		if len(trimEOL(line)) == 0 {
+			p.end(true, ts)
+		}
+		p.lb = p.lb[:0]
+		return n
 	}
 	return len(b)
 }

@@ -281,3 +281,84 @@ func TestSkipBlankLinesBeforeStartLine(t *testing.T) {
 	}
 	checkAllChunkings(t, http1.Request, http1.Options{}, want, data("\r\n\nGET / HTTP/1.1\r\n\r\n"))
 }
+
+func TestChunked(t *testing.T) {
+	tests := []struct {
+		name string
+		kind http1.Kind
+		in   string
+		want []string
+	}{
+		{
+			"request with extension and trailer", http1.Request,
+			"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" +
+				"5;ext=1\r\nhello\r\n6\r\n world\r\n0\r\nX-Sum: 1\r\n\r\n",
+			[]string{
+				"begin off=0",
+				"raw head POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+				"head POST / HTTP/1.1",
+				"raw body 5;ext=1\r\nhello\r\n6\r\n world\r\n0\r\n",
+				"body hello world",
+				"raw trailer X-Sum: 1\r\n\r\n",
+				"end true",
+			},
+		},
+		{
+			"response hex size empty trailer lf", http1.Response,
+			"HTTP/1.1 200 OK\nTransfer-Encoding: chunked\n\na\n0123456789\n0\n\n",
+			[]string{
+				"begin off=0",
+				"raw head HTTP/1.1 200 OK\nTransfer-Encoding: chunked\n\n",
+				"head 200 HTTP/1.1",
+				"raw body a\n0123456789\n0\n",
+				"body 0123456789",
+				"raw trailer \n",
+				"end true",
+			},
+		},
+		{
+			"uppercase hex and leading zeros", http1.Response,
+			"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n00B\r\nhello world\r\n000\r\n\r\n",
+			[]string{
+				"begin off=0",
+				"raw head HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+				"head 200 HTTP/1.1",
+				"raw body 00B\r\nhello world\r\n000\r\n",
+				"body hello world",
+				"raw trailer \r\n",
+				"end true",
+			},
+		},
+		{
+			"chunked wins over content-length", http1.Request,
+			"POST / HTTP/1.1\r\nContent-Length: 100\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n",
+			[]string{
+				"begin off=0",
+				"raw head POST / HTTP/1.1\r\nContent-Length: 100\r\nTransfer-Encoding: chunked\r\n\r\n",
+				"head POST / HTTP/1.1",
+				"raw body 2\r\nhi\r\n0\r\n",
+				"body hi",
+				"raw trailer \r\n",
+				"end true",
+			},
+		},
+		{
+			"coding list ending in chunked", http1.Request,
+			"POST / HTTP/1.1\r\ntransfer-encoding: gzip, Chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n",
+			[]string{
+				"begin off=0",
+				"raw head POST / HTTP/1.1\r\ntransfer-encoding: gzip, Chunked\r\n\r\n",
+				"head POST / HTTP/1.1",
+				"raw body 1\r\nx\r\n0\r\n",
+				"body x",
+				"raw trailer \r\n",
+				"end true",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checkAllChunkings(t, tt.kind, http1.Options{}, tt.want, data(tt.in))
+		})
+	}
+}
