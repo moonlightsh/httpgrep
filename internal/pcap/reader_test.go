@@ -35,12 +35,15 @@ func recBlock(bo binary.ByteOrder, sec, frac uint32, data []byte, origlen uint32
 	return b
 }
 
-func TestNewReaderRejectsBadInput(t *testing.T) {
-	tests := []struct {
-		name string
-		in   []byte
-		want error
-	}{
+type badInputCase struct {
+	name string
+	in   []byte
+	want error
+}
+
+// badInputCases 是 NewReader 应当拒绝的输入。
+func badInputCases() []badInputCase {
+	return []badInputCase{
 		{"empty", nil, pcap.ErrEmpty},
 		{"one byte", []byte{0xa1}, pcap.ErrNotPcap},
 		{"23 bytes", bytes.Repeat([]byte{0}, 23), pcap.ErrNotPcap},
@@ -48,9 +51,17 @@ func TestNewReaderRejectsBadInput(t *testing.T) {
 		{"pcapng magic", append([]byte{0x0a, 0x0d, 0x0d, 0x0a}, bytes.Repeat([]byte{0x1a}, 20)...), pcap.ErrPcapNG},
 		{"pcapng only 4 bytes", []byte{0x0a, 0x0d, 0x0d, 0x0a}, pcap.ErrPcapNG},
 	}
-	for _, tt := range tests {
+}
+
+func TestNewReaderRejectsBadInput(t *testing.T) {
+	checkBadInput(t, func(r io.Reader) io.Reader { return r })
+}
+
+// checkBadInput 用 wrap 包装输入后跑一遍 badInputCases。
+func checkBadInput(t *testing.T, wrap func(io.Reader) io.Reader) {
+	for _, tt := range badInputCases() {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := pcap.NewReader(bytes.NewReader(tt.in))
+			_, err := pcap.NewReader(wrap(bytes.NewReader(tt.in)))
 			if err == nil {
 				t.Fatalf("NewReader(%q) = nil error, want %v", tt.name, tt.want)
 			}
@@ -61,8 +72,15 @@ func TestNewReaderRejectsBadInput(t *testing.T) {
 	}
 }
 
-// 手算：3 秒 + 123456 微秒 = 3000123456 纳秒时刻。
-func TestNextReadsRecords(t *testing.T) {
+type recordCase struct {
+	name  string
+	in    []byte
+	link  pcap.LinkType
+	wants []pcap.Packet
+}
+
+// recordCases 覆盖 4 种 magic。手算：3 秒 + 123456 微秒 = 3.123456000 秒。
+func recordCases() []recordCase {
 	le := binary.LittleEndian
 	be := binary.BigEndian
 	var usecBE []byte
@@ -82,12 +100,7 @@ func TestNextReadsRecords(t *testing.T) {
 	nsecBE = append(nsecBE, fileHeader(be, 0xa1b23c4d, 0)...)
 	nsecBE = append(nsecBE, recBlock(be, 7, 42, []byte("q"), 1)...)
 
-	tests := []struct {
-		name  string
-		in    []byte
-		link  pcap.LinkType
-		wants []pcap.Packet
-	}{
+	return []recordCase{
 		{
 			name: "usec big endian",
 			in:   usecBE,
@@ -122,9 +135,17 @@ func TestNextReadsRecords(t *testing.T) {
 			},
 		},
 	}
-	for _, tt := range tests {
+}
+
+func TestNextReadsRecords(t *testing.T) {
+	checkRecords(t, func(r io.Reader) io.Reader { return r })
+}
+
+// checkRecords 用 wrap 包装输入后跑一遍 recordCases。
+func checkRecords(t *testing.T, wrap func(io.Reader) io.Reader) {
+	for _, tt := range recordCases() {
 		t.Run(tt.name, func(t *testing.T) {
-			r, err := pcap.NewReader(bytes.NewReader(tt.in))
+			r, err := pcap.NewReader(wrap(bytes.NewReader(tt.in)))
 			if err != nil {
 				t.Fatalf("NewReader: %v", err)
 			}
@@ -153,29 +174,9 @@ func TestNextReadsRecords(t *testing.T) {
 	}
 }
 
-// 同样的输入换成一次只给 1 字节的 reader，结果不变。
+// 底层 reader 每次只给 1 个字节时，所有用例的结果不变。
 func TestNextWithOneByteReader(t *testing.T) {
-	le := binary.LittleEndian
-	in := fileHeader(le, 0xa1b2c3d4, 1)
-	in = append(in, recBlock(le, 100, 200000, []byte("hello world"), 11)...)
-
-	r, err := pcap.NewReader(iotest.OneByteReader(bytes.NewReader(in)))
-	if err != nil {
-		t.Fatalf("NewReader: %v", err)
-	}
-	got, err := r.Next()
-	if err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-	want := pcap.Packet{
-		Timestamp: time.Unix(100, 200000000),
-		Data:      []byte("hello world"),
-		OrigLen:   11,
-	}
-	if !got.Timestamp.Equal(want.Timestamp) || !bytes.Equal(got.Data, want.Data) || got.OrigLen != want.OrigLen {
-		t.Fatalf("got %+v, want %+v", got, want)
-	}
-	if _, err := r.Next(); err != io.EOF {
-		t.Errorf("结束后 Next() = %v, want io.EOF", err)
-	}
+	t.Run("bad input", func(t *testing.T) { checkBadInput(t, iotest.OneByteReader) })
+	t.Run("records", func(t *testing.T) { checkRecords(t, iotest.OneByteReader) })
+	t.Run("truncated tail", func(t *testing.T) { checkTruncatedTail(t, iotest.OneByteReader) })
 }
