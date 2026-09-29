@@ -36,3 +36,31 @@ func BenchmarkScanFast4K(b *testing.B) {
 		}
 	}
 }
+
+// 正则模式 4 KiB 分块，行缓存路径。
+func BenchmarkScanRegex4K(b *testing.B) {
+	m, err := match.Compile([]string{`"sn":"\d+"`, `(?i)error`}, true)
+	if err != nil {
+		b.Fatal(err)
+	}
+	chunk := genJSON(4096)
+	b.SetBytes(int64(len(chunk)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	s := m.NewScanner()
+	for i := 0; i < b.N; i++ {
+		s.Write(chunk)
+	}
+}
+
+// Highlight 基准。
+func BenchmarkHighlight(b *testing.B) {
+	m, _ := match.Compile([]string{"device", "true"}, false)
+	line := []byte(`{"id":123,"name":"device-45","ok":true,"ts":"2026-09-28T15:30:12.345Z"}`)
+	b.SetBytes(int64(len(line)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.Highlight(line)
+	}
+}
