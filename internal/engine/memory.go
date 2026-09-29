@@ -1,9 +1,6 @@
 package engine
 
-import (
-	"strconv"
-	"time"
-)
+import "time"
 
 // 计入内存上限的固定开销，按 64 位下实测的堆占用标定（留了余量）。
 const (
@@ -73,30 +70,11 @@ func (e *Engine) recycle(x *exchange) {
 // enforce 在超过内存上限时丢弃在途交互，从最早开始的起（见 track），直到不超限；
 // 在途交互都丢完了仍然超限，就释放最久没有收到包的连接。
 // 在 Assembler 的回调之外调用（回调里不能调用 Release），所以计量最多超出上限一个包的量。
-// 之后如果有没报告过的丢弃，并且距上一次告警已满 10 秒（抓包时钟），调用 Warn。
-// 只释放连接、没有丢弃交互时不告警：告警说的是丢了多少交互。
 func (e *Engine) enforce(now time.Time) {
 	limit := e.cfg.MaxMemory
 	if limit > 0 && e.Memory() > limit {
 		e.shrink(limit, now)
 	}
-	if e.dropped > 0 && (!e.warned || !now.Before(e.warnedAt.Add(warnInterval))) {
-		e.warn(now)
-	}
-}
-
-// warnInterval 是内存告警的最小间隔，按抓包时钟。
-const warnInterval = 10 * time.Second
-
-// warn 报告距上一次告警以来丢弃的交互数，然后清零。
-func (e *Engine) warn(now time.Time) {
-	if e.cfg.Warn != nil {
-		msg := "dropped " + strconv.FormatInt(e.dropped, 10) + " in-flight exchanges (" +
-			strconv.FormatInt(e.droppedMatched, 10) + " matched) to stay under --max-memory"
-		e.cfg.Warn(msg)
-	}
-	e.dropped, e.droppedMatched = 0, 0
-	e.warnedAt, e.warned = now, true
 }
 
 // shrink 把计量降到 limit 以内，见 enforce。
@@ -157,10 +135,8 @@ func (c *conn) evict(x *exchange, now time.Time) {
 	e.timers.remove(x)
 	e.untrack(x)
 	e.stats.Evicted++
-	e.dropped++
 	if x.matched() {
 		e.stats.EvictedMatched++
-		e.droppedMatched++
 	}
 	e.inFlight--
 	e.buffered -= int64(len(x.buf))

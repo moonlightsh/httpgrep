@@ -36,8 +36,7 @@ type sink struct {
 	err     error         // 第一次写出失败的错误，之后不再写
 	fail    chan struct{} // 写出失败时关闭，通知主循环停下
 
-	// 内存告警由 sink 统一限频，不用引擎自己的 Warn（它按引擎各自限频、各自计数，
-	// --cpus N 时会有 N 路告警）。dropped、droppedMatched 是距上一次告警以来各分片丢弃的
+	// 内存告警由 sink 统一限频：引擎只在统计里计数，--cpus N 时也只有一路告警。dropped、droppedMatched 是距上一次告警以来各分片丢弃的
 	// 交互数之和和其中已命中的；warnedAt 是上一次告警的抓包时间，warned 表示告警过。
 	dropped, droppedMatched int64
 	warnedAt                time.Time
@@ -174,7 +173,7 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 		MaxMemory:  o.MaxMemory,
 		MaxMessage: o.MaxMessage,
 		Emit:       out.emit,
-		// 不设 Warn：内存告警由 sink 按各引擎统计里 Evicted 的增量统一限频（见 sink.drop）。
+		// 内存告警由 sink 按各引擎统计里 Evicted 的增量统一限频（见 sink.drop）。
 	}
 	var d dispatcher
 	if n > 1 {

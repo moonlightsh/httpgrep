@@ -170,7 +170,6 @@ func FuzzEngine(f *testing.F) {
 					t.Fatal(err)
 				}
 			},
-			Warn: func(string) {},
 		})
 		r, err := pcap.NewReader(&capture)
 		if err != nil {

@@ -20,7 +20,8 @@ type Config struct {
 	MaxMemory  int64
 	MaxMessage int64
 	Emit       func(b *output.Block) // 命中的交互结束时调用；b 只在回调期间有效
-	Warn       func(msg string)      // 内存上限告警，引擎自己限频
+	// 因内存上限丢弃的交互只计入 Stats（Evicted、EvictedMatched），告警由调用方
+	// 按统计的增量统一限频（run.sink），--cpus N 时也只有一路告警。
 }
 
 // Engine 处理一个分片的全部连接。不是并发安全的。
@@ -43,12 +44,6 @@ type Engine struct {
 
 	// oldest、newest 是按开始先后排列的在途交互链表的两端（见 track），超过内存上限时从 oldest 丢起。
 	oldest, newest *exchange
-
-	// 内存告警：dropped、droppedMatched 是距上一次告警以来丢弃的交互数和其中已命中的；
-	// warnedAt 是上一次告警的抓包时间，warned 表示告警过。
-	dropped, droppedMatched int64
-	warnedAt                time.Time
-	warned                  bool
 
 	// 输出块和它引用的切片，每次输出复用。
 	block  output.Block
@@ -140,9 +135,6 @@ func (e *Engine) arm(x *exchange, at time.Time) {
 func (e *Engine) Finish(now time.Time) {
 	e.now = now
 	e.asm.Flush(now)
-	if e.dropped > 0 {
-		e.warn(now)
-	}
 }
 
 // newExchange 为连接 c 取一个空的交互。
