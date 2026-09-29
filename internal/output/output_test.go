@@ -514,3 +514,16 @@ func TestTTYBinaryPlaceholder(t *testing.T) {
 		t.Errorf("TTY 二进制占位不正确\n得到: %q\n期望: %q", got, want)
 	}
 }
+
+func TestNonTTYNoEscapeByteForByte(t *testing.T) {
+	// 清单第 8 条：非 TTY 模式下除第 5-7 条规定的变动外，输出和输入逐字节相同。
+	// 内容含 ESC、NUL、DEL、合法 C1、孤立 0x80-0x9F，但 Binary=false，必须原样输出。
+	in := "a\x1b[31m\x00\x7f\xc2\x85\x80b"
+	b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+		Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte(in)}}}}}
+	got := string(render(t, output.Options{Location: tz}, b))
+	want := "1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\n" + in + "\n"
+	if got != want {
+		t.Errorf("非 TTY 模式逐字节不变被破坏\n得到: %q\n期望: %q", got, want)
+	}
+}
