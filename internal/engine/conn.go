@@ -325,6 +325,10 @@ func (c *conn) Closed(reason tcp.CloseReason, ts time.Time) {
 		why = noRespEOF
 	case tcp.CloseIdle:
 		why = noRespTimeout
+	case tcp.CloseEvicted:
+		// 因内存上限释放：在途交互已经都丢弃了，请求解析器缓存的 Upgrade 请求之后的字节
+		// 也随连接一起丢弃（请求解析器在缓存状态下关闭时直接丢掉缓存），不回放成新的交互。
+		c.held, c.cliFin = false, false
 	}
 	c.close(why, ts)
 }

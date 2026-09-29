@@ -444,3 +444,22 @@ func TestPlaceholderReleasesBuffer(t *testing.T) {
 		t.Fatalf("engine retains %d bytes with %d placeholders", retained, n)
 	}
 }
+
+// 因内存上限释放连接时，请求解析器缓存的 Upgrade 请求之后的字节随连接一起丢弃，
+// 不回放成新的交互再输出：它们和被丢弃的在途交互一样是为了不超限而放弃的数据。
+// 上限 2600。C1 的 Upgrade 请求 U 后面跟着管道化的 GET /TOKEN（缓存着等决定）；
+// C2 握手后计量 2048 + 512 + 44 超限，丢弃 U；C3 握手后 3072 超限，释放最久没有包的 C1。
+func TestEvictedConnectionDropsHeld(t *testing.T) {
+	cli3 := netip.MustParseAddrPort("10.0.0.1:52816")
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 2600}, func(w *pcapgen.Writer) {
+		c1 := pcapgen.NewConn(w, cli1, srv)
+		c1.Handshake(ms(0))
+		c1.ClientSend(ms(1), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\nGET /TOKEN HTTP/1.1\r\n\r\n"))
+		pcapgen.NewConn(w, cli2, srv).Handshake(ms(2))
+		pcapgen.NewConn(w, cli3, srv).Handshake(ms(3))
+	})
+	check(t, out, "")
+	if st.Exchanges != 1 || st.Evicted != 1 || st.NoResponseClosed != 0 || st.NoResponseEOF != 0 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
