@@ -212,7 +212,7 @@ func TestMarkerLines(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
-				Messages: []output.Message{{Pieces: tt.pieces}}}
+				Status: output.Status{Incomplete: true}, Messages: []output.Message{{Pieces: tt.pieces}}}
 			got := string(render(t, output.Options{Location: tz}, b))
 			want := "1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 incomplete\n" + tt.want
 			if got != want {
