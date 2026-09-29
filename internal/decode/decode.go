@@ -83,9 +83,9 @@ const (
 	ipv6HeaderLn = 40 // IPv6 基本头长度
 )
 
-// stripEthernet 去掉以太网头，跳过 VLAN（802.1Q）和 QinQ 标签。
-const ethHeaderLen = 14
+const ethHeaderLen = 14 // 以太网头长度
 
+// stripEthernet 去掉以太网头，跳过 VLAN（802.1Q）和 QinQ 标签。
 func stripEthernet(data []byte) ([]byte, Result) {
 	if len(data) < ethHeaderLen {
 		return nil, Malformed
