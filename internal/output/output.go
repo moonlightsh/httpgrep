@@ -172,7 +172,8 @@ func (w *Writer) appendHighlighted(data []byte) {
 func (w *Writer) flushLine(newline bool) {
 	line := w.line
 	tail := ""
-	if newline && len(line) > 0 && line[len(line)-1] == '\r' {
+	// 行尾的 \r 原样输出，但不传给 Highlight（newline 为假时表示消息末尾，规则一致）
+	if len(line) > 0 && line[len(line)-1] == '\r' {
 		tail = "\r"
 		line = line[:len(line)-1]
 	}

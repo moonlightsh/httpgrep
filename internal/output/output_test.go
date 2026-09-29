@@ -628,3 +628,47 @@ func BenchmarkWriteTTYManyHits(b *testing.B) {
 		}
 	}
 }
+
+func TestTTYFinalCRNotHighlighted(t *testing.T) {
+	// 消息以 "abc\r" 结尾、没有换行时：\r 原样输出（在补的 \n 前），
+	// 但传给 Highlight 的行不带 \r。
+	var gotLine string
+	hl := func(line []byte) [][2]int {
+		gotLine = string(line)
+		return nil
+	}
+	b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+		Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte("abc\r")}}}}}
+	got := string(render(t, output.Options{Location: tz, TTY: true, Highlight: hl}, b))
+	want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\nabc\r\n"
+	if got != want {
+		t.Errorf("末尾 CR 输出不正确\n得到: %q\n期望: %q", got, want)
+	}
+	if gotLine != "abc" {
+		t.Errorf("Highlight 收到的行应为 %q，得到 %q", "abc", gotLine)
+	}
+}
+
+func TestLocationNilFallsBackToLocal(t *testing.T) {
+	// Location 为 nil 时用 time.Local。
+	ts := time.Unix(1790580612, 345000000).In(time.Local)
+	want := string(ts.AppendFormat(nil, "2006-01-02 15:04:05.000 ")) + "1.1.1.1:1 -> 2.2.2.2:2 complete\n"
+	b := &output.Block{Time: time.Unix(1790580612, 345000000), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2")}
+	if got := render(t, output.Options{}, b); string(got) != string(want) {
+		t.Errorf("Location nil 回退不正确\n得到: %q\n期望: %q", got, want)
+	}
+}
+
+func TestEmptyMessageAndEmptyBlock(t *testing.T) {
+	// 没有任何 Message 的块只有定位行；空 Piece 的 Message 只补换行。
+	b1 := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2")}
+	b2 := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+		Messages: []output.Message{{}, {Pieces: []output.Piece{}}}}
+	got := string(render(t, output.Options{Location: tz}, b1, b2))
+	want := "1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\n" +
+		"--\n" +
+		"1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\n"
+	if got != want {
+		t.Errorf("空 Message 处理不正确\n得到: %q\n期望: %q", got, want)
+	}
+}
