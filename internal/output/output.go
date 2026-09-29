@@ -150,12 +150,12 @@ func (w *Writer) appendEscaped(data []byte) {
 		case c >= 0xc2 && c < 0xf0 && i+1 < len(data):
 			// 多字节 UTF-8 序列，原样拷贝
 			n := utf8SeqLen(c)
-		if i+n <= len(data) && validSeq(data[i:i+n]) {
-			w.buf = append(w.buf, data[i:i+n]...)
-			i += n
-		} else {
-			w.buf = append(w.buf, c)
-			i++
+			if i+n <= len(data) && validSeq(data[i:i+n]) {
+				w.buf = append(w.buf, data[i:i+n]...)
+				i += n
+			} else {
+				w.buf = append(w.buf, c)
+				i++
 			}
 		default:
 			w.buf = append(w.buf, c)
