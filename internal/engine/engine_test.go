@@ -256,3 +256,22 @@ func TestBinaryBodyPlaceholder(t *testing.T) {
 		})
 	}
 }
+
+// 读到关闭为止的响应：服务端 FIN 之后是 complete，耗时算到 FIN 那个包。
+func TestReadUntilCloseResponse(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /a HTTP/1.0\r\n\r\n"))
+		c.ServerSend(ms(2), []byte("HTTP/1.0 200 OK\r\n\r\nTOKEN"))
+		c.ServerSend(ms(3), []byte("-42\n"))
+		c.ServerFin(ms(5))
+		c.ClientFin(ms(6))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 5.0ms\n"+
+		"GET /a HTTP/1.0\r\n\r\n"+
+		"HTTP/1.0 200 OK\r\n\r\nTOKEN-42\n")
+	if st.Complete != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}

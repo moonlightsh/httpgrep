@@ -93,8 +93,19 @@ func (c *conn) Gap(side tcp.Side, off, n int64, ts time.Time) {
 	}
 }
 
-// Fin 实现 tcp.Handler。
-func (c *conn) Fin(side tcp.Side, ts time.Time) {}
+// Fin 实现 tcp.Handler：这个方向的流按序结束。
+// 服务端 FIN 时，读到关闭为止的响应算收完。
+func (c *conn) Fin(side tcp.Side, ts time.Time) {
+	if !c.known {
+		return
+	}
+	c.now = ts
+	if side == c.client {
+		c.req.Close(true, ts)
+	} else {
+		c.res.Close(true, ts)
+	}
+}
 
 // Reset 实现 tcp.Handler。
 func (c *conn) Reset(ts time.Time) {}
