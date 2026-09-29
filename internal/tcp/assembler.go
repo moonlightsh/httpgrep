@@ -29,6 +29,13 @@ func NewAssembler(cfg Config, open func(ConnInfo) Handler) *Assembler {
 // Add 处理一个 TCP 段。ts 是抓包时间，单调不减。
 func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 	c := a.conns[Key{seg.Src, seg.Dst}]
+	if c != nil && ts.Sub(c.last) >= a.cfg.IdleTimeout {
+		// 已经空闲超时、只是 Advance 还没扫到（扫描有间隔，调用方也可能没调用）：
+		// 先按空闲释放，这个段按新连接处理，不挂到旧连接上。
+		a.flushHoles(c, ts)
+		a.close(c, CloseIdle, ts)
+		c = nil
+	}
 	if c != nil && seg.Flags&(decode.SYN|decode.ACK) == decode.SYN {
 		if c.synSeen && seg.Src == c.key.A && seg.Seq == c.isn {
 			// SYN 重传。
