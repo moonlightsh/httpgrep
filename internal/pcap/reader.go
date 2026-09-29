@@ -86,6 +86,11 @@ func (r *Reader) LinkType() LinkType {
 }
 
 // Next 返回下一条记录。正常结束，或者最后一条记录不完整时，返回 io.EOF。
+//
+// 返回 ErrCorrupt 或底层 reader 的 I/O 错误以后，流的位置已经不可信，
+// 调用方应停止读取，不要再调用 Next。
+//
+// Timestamp 由 time.Unix 生成，带本地时区；比较时间请用 Time.Equal，不要用 ==。
 func (r *Reader) Next() (Packet, error) {
 	if _, err := io.ReadFull(r.r, r.buf[:]); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
