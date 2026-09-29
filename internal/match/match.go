@@ -3,22 +3,50 @@ package match
 
 import (
 	"bytes"
+	"regexp"
 	"strconv"
+	"strings"
 )
 
 // Matcher 是编译好的关键词集合，可以派生多个 Scanner。
 type Matcher struct {
-	patterns [][]byte // 字面关键词；空串表示匹配所有行
+	patterns [][]byte       // 字面关键词；空串表示匹配所有行
+	re       *regexp.Regexp // 正则模式：合并编译后的行匹配
+	anyEmpty bool           // 某个关键词是空串（匹配所有行）
 }
 
 // Compile 编译关键词。patterns 已经按换行拆好；regex 为真时按 RE2 解释。
+// 多个正则合并成 (?:a)|(?:b) 编译；正则不合法时返回的错误里包含该关键词。
 func Compile(patterns []string, regex bool) (*Matcher, error) {
+	m := &Matcher{}
 	if regex {
-		return nil, &CompileError{Pattern: "", Err: "regex not supported yet"}
+		var parts []string
+		for _, p := range patterns {
+			if p == "" {
+				m.anyEmpty = true
+				continue // 空正则匹配一切，无需合并
+			}
+			if _, err := regexp.Compile(p); err != nil {
+				return nil, &CompileError{Pattern: p, Err: err.Error()}
+			}
+			parts = append(parts, "(?:"+p+")")
+		}
+		if len(parts) > 0 {
+			// 逐行匹配：每行单独传入，^、$ 自然锚定行首行尾。
+			re, err := regexp.Compile(strings.Join(parts, "|"))
+			if err != nil {
+				return nil, &CompileError{Pattern: parts[0], Err: err.Error()}
+			}
+			m.re = re
+		}
+		return m, nil
 	}
-	m := &Matcher{patterns: make([][]byte, len(patterns))}
-	for i, p := range patterns {
-		m.patterns[i] = []byte(p)
+	for _, p := range patterns {
+		if p == "" {
+			m.anyEmpty = true
+			continue
+		}
+		m.patterns = append(m.patterns, []byte(p))
 	}
 	return m, nil
 }
@@ -84,6 +112,16 @@ func (s *Scanner) Reset() {
 func (s *Scanner) processLine(line []byte) {
 	if n := len(line); n > 0 && line[n-1] == '\r' {
 		line = line[:n-1]
+	}
+	if s.m.anyEmpty {
+		s.matched = true
+		return
+	}
+	if s.m.re != nil {
+		if s.m.re.Match(line) {
+			s.matched = true
+		}
+		return
 	}
 	for _, p := range s.m.patterns {
 		if len(p) == 0 {

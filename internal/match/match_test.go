@@ -1,6 +1,7 @@
 package match_test
 
 import (
+	"strings"
 	"testing"
 
 	"httpgrep/internal/match"
@@ -140,5 +141,46 @@ func TestEarlyReturnAfterMatch(t *testing.T) {
 	s.Write([]byte("tail"))
 	if !s.Matched() {
 		t.Fatal("Matched must stay true")
+	}
+}
+
+// 正则按行匹配，^、$ 锚定行首行尾，支持 (?i)，多个正则合并编译。
+func TestRegexLineMatching(t *testing.T) {
+	m, err := match.Compile([]string{`^POST\s`, `(?i)content-type:\s*application/json`}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := m.NewScanner()
+	s.Write([]byte("post /x HTTP/1.1\r\n"))
+	if s.Matched() {
+		t.Fatal("lowercase post should not match ^POST\\s")
+	}
+	s.Write([]byte("Content-Type: application/json\r\n"))
+	if !s.Matched() {
+		t.Fatal("(?i) pattern should match case-insensitively")
+	}
+
+	// $ 锚定行尾。
+	m2, _ := match.Compile([]string{`json$`}, true)
+	s2 := m2.NewScanner()
+	s2.Write([]byte("Content-Type: application/json\r\n"))
+	if !s2.Matched() {
+		t.Fatal("$ should anchor at end of line with CR stripped")
+	}
+	s2r := m2.NewScanner()
+	s2r.Write([]byte("jsonx\n"))
+	if s2r.Matched() {
+		t.Fatal("jsonx should not match json$")
+	}
+}
+
+// 正则不合法时，Compile 的错误里包含这个关键词。
+func TestRegexCompileErrorContainsPattern(t *testing.T) {
+	_, err := match.Compile([]string{`ok`, `(unclosed`}, true)
+	if err == nil {
+		t.Fatal("expected compile error")
+	}
+	if !strings.Contains(err.Error(), "(unclosed") {
+		t.Fatalf("error should mention the bad pattern, got: %v", err)
 	}
 }
