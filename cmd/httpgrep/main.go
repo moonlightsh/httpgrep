@@ -57,6 +57,7 @@ func httpgrep(args []string, stdin, stdout *os.File, stderr io.Writer) int {
 	// 默认只用 1 个核，--cpus N 时用 N 个（run 按连接分给 N 个分片）。
 	runtime.GOMAXPROCS(opts.CPUs)
 	// Go 运行时的软内存上限是 --max-memory 的 1.5 倍（设计文档第 8 节）。
+	// --max-memory 大到乘积溢出时结果为负，SetMemoryLimit 对负数不做调整，等于不设上限。
 	debug.SetMemoryLimit(opts.MaxMemory / 2 * 3)
 	stop := watchSignals()
 	start := time.Now()

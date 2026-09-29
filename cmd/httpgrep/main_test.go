@@ -761,3 +761,9 @@ func TestRuntimeLimits(t *testing.T) {
 		})
 	}
 }
+
+// -E 的关键词编译失败：写出错信息，退出码 2（没有提示行，出错的是关键词内容而不是参数格式）。
+func TestInvalidRegexExits2(t *testing.T) {
+	want(t, runBin(t, bytes.NewReader(twoExchanges(t)), "-E", "("), "",
+		"httpgrep: match: invalid pattern \"(\": error parsing regexp: missing closing ): `(`\n", 2)
+}
