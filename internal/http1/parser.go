@@ -29,6 +29,7 @@ const (
 	maxScanLine  = 8 << 10  // 扫描时起始行候选的上限
 	probeLen     = 24       // 扫描时先看行首这么多字节，明显不是起始行就不缓存
 	maxHold      = 64 << 10 // Upgrade 请求之后最多缓存这么多字节
+	keepLine     = 4 << 10  // 行缓存超过这个容量时，用完就释放
 )
 
 // 调用方对 Upgrade 请求的决定，可能在请求结束之前就到达。
@@ -114,9 +115,7 @@ func (p *Parser) step(off int64, b []byte, ack int64, ts time.Time) int {
 		if line == nil {
 			// 行还没收完：开头已经不可能是起始行时立即失步，不再缓存。
 			if over || !startPrefix(p.kind, p.lb, true) {
-				p.desync(p.lnOff)
-				p.unparsedLine()
-				p.bol = false
+				p.overflow()
 			}
 			return n
 		}
@@ -129,23 +128,21 @@ func (p *Parser) step(off int64, b []byte, ack int64, ts time.Time) int {
 			p.unparsed(line, p.lnOff, p.lnTS, p.lnAck)
 			p.bol = true
 		}
-		p.lb = p.lb[:0]
+		p.resetLine()
 		return n
 
 	case stHead:
 		line, n, over := p.line(off, b, ack, ts, maxHead-p.headLen)
 		if line == nil {
 			if over {
-				p.desync(p.lnOff)
-				p.unparsedLine()
-				p.bol = false
+				p.overflow()
 			}
 			return n
 		}
 		if !p.headLine(line, ts) {
 			p.desyncAtLine(line)
 		}
-		p.lb = p.lb[:0]
+		p.resetLine()
 		return n
 
 	case stBodyCL, stChunkData:
@@ -171,9 +168,7 @@ func (p *Parser) step(off int64, b []byte, ack int64, ts time.Time) int {
 		line, n, over := p.line(off, b, ack, ts, maxChunkLine)
 		if line == nil {
 			if over {
-				p.desync(p.lnOff)
-				p.unparsedLine()
-				p.bol = false
+				p.overflow()
 			}
 			return n
 		}
@@ -190,7 +185,7 @@ func (p *Parser) step(off int64, b []byte, ack int64, ts time.Time) int {
 			p.rem = size
 			p.st = stChunkData
 		}
-		p.lb = p.lb[:0]
+		p.resetLine()
 		return n
 
 	case stChunkEnd:
@@ -198,9 +193,7 @@ func (p *Parser) step(off int64, b []byte, ack int64, ts time.Time) int {
 		line, n, over := p.line(off, b, ack, ts, 2)
 		if line == nil {
 			if over {
-				p.desync(p.lnOff)
-				p.unparsedLine()
-				p.bol = false
+				p.overflow()
 			}
 			return n
 		}
@@ -210,16 +203,14 @@ func (p *Parser) step(off int64, b []byte, ack int64, ts time.Time) int {
 			p.sink.Raw(SecBody, line)
 			p.st = stChunkSize
 		}
-		p.lb = p.lb[:0]
+		p.resetLine()
 		return n
 
 	case stTrailer:
 		line, n, over := p.line(off, b, ack, ts, maxTrailer-p.trlLen)
 		if line == nil {
 			if over {
-				p.desync(p.lnOff)
-				p.unparsedLine()
-				p.bol = false
+				p.overflow()
 			}
 			return n
 		}
@@ -234,7 +225,7 @@ func (p *Parser) step(off int64, b []byte, ack int64, ts time.Time) int {
 			p.trlLen += len(line)
 			p.sink.Raw(SecTrailer, line)
 		}
-		p.lb = p.lb[:0]
+		p.resetLine()
 		return n
 
 	case stScan:
@@ -295,7 +286,7 @@ func (p *Parser) scan(off int64, b []byte, ack int64, ts time.Time) int {
 	} else {
 		p.unparsed(line, p.lnOff, p.lnTS, p.lnAck)
 	}
-	p.lb = p.lb[:0]
+	p.resetLine()
 	return n
 }
 
@@ -303,6 +294,14 @@ func (p *Parser) scan(off int64, b []byte, ack int64, ts time.Time) int {
 func (p *Parser) desync(off int64) {
 	p.sink.Desync(off)
 	p.st = stScan
+}
+
+// overflow 在一行还没收完就不合法（超长或开头就不对）时失步：
+// 已收到的半行作为 SecUnparsed 交付，扫描跳到下一个换行。
+func (p *Parser) overflow() {
+	p.desync(p.lnOff)
+	p.unparsedLine()
+	p.bol = false
 }
 
 // desyncAtLine 在一个完整但不合法的行处失步：这一行作为 SecUnparsed 交付，
@@ -325,6 +324,15 @@ func (p *Parser) unparsed(b []byte, off int64, ts time.Time, ack int64) {
 // unparsedLine 把缓存的半行作为 SecUnparsed 交付并清空。
 func (p *Parser) unparsedLine() {
 	p.unparsed(p.lb, p.lnOff, p.lnTS, p.lnAck)
+	p.resetLine()
+}
+
+// resetLine 清空行缓存。偶尔出现的长行把缓存撑大后就释放掉，免得每条连接都一直占着。
+func (p *Parser) resetLine() {
+	if cap(p.lb) > keepLine {
+		p.lb = nil
+		return
+	}
 	p.lb = p.lb[:0]
 }
 
@@ -370,7 +378,11 @@ func (p *Parser) Gap(off, n int64, ts time.Time) {
 		return
 	case stHold:
 		if p.dropOff < 0 {
-			p.segs = append(p.segs, held{off: off, n: n, ts: ts, gap: true})
+			if k := len(p.segs) - 1; k >= 0 && p.segs[k].gap {
+				p.segs[k].n += n // 相邻的缺口合并，segs 的长度不超过缓存的字节数加一
+			} else {
+				p.segs = append(p.segs, held{off: off, n: n, ts: ts, gap: true})
+			}
 		}
 		p.holdEnd, p.holdTS = off+n, ts
 		return
@@ -393,7 +405,7 @@ func (p *Parser) Gap(off, n int64, ts time.Time) {
 		// 两条消息之间的半行没有所属消息，下面归入 Orphan 消息。
 		if p.open && len(p.lb) > 0 {
 			p.sink.Raw(p.lineSection(), p.lb)
-			p.lb = p.lb[:0]
+			p.resetLine()
 		}
 		p.desync(off)
 	}
@@ -424,7 +436,7 @@ func (p *Parser) Close(fin bool, ts time.Time) {
 		p.sink.End(fin && p.st == stBodyClose, ts)
 		p.open = false
 	}
-	p.lb = p.lb[:0]
+	p.resetLine()
 	p.st = stDead
 }
 
@@ -454,8 +466,9 @@ func (p *Parser) holdData(off int64, b []byte, ack int64, ts time.Time) {
 	p.holdEnd, p.holdTS = off+int64(len(b)), ts
 }
 
+// dropHold 丢弃并释放 Upgrade 请求之后的缓存。
 func (p *Parser) dropHold() {
-	p.hold, p.segs = p.hold[:0], p.segs[:0]
+	p.hold, p.segs = nil, nil
 	p.dropOff = -1
 }
 
@@ -474,7 +487,7 @@ func (p *Parser) Resume() {
 	// 回放期间可能又遇到 Upgrade 请求而重新开始缓存，所以先把缓存摘下来。
 	buf, segs := p.hold, p.segs
 	dropOff, end, ts := p.dropOff, p.holdEnd, p.holdTS
-	p.hold, p.segs, p.dropOff = nil, nil, -1
+	p.dropHold()
 	p.st = stStart
 	var pos int64
 	for _, s := range segs {

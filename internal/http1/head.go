@@ -91,9 +91,10 @@ func (p *Parser) bodyState() state {
 			p.h.Tunnel = true
 			return stStart
 		}
-		if st < 200 || st == 204 || st == 304 {
+		if st < 200 {
 			return stStart
 		}
+		// 每个非 1xx 响应都问一次对应请求的方法。
 		m := ""
 		if p.opt.Method != nil {
 			m = p.opt.Method()
@@ -102,7 +103,7 @@ func (p *Parser) bodyState() state {
 			p.h.Tunnel = true
 			return stStart
 		}
-		if m == "HEAD" {
+		if m == "HEAD" || st == 204 || st == 304 {
 			return stStart
 		}
 		if p.hasTE {

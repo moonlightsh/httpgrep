@@ -1054,3 +1054,61 @@ func TestHeadFields(t *testing.T) {
 		t.Errorf("heads = %+v, want %+v", r.heads, wantReq)
 	}
 }
+
+// 各种合法、不合法的片段随机拼接后，按不同方式切分喂入，事件记录都与整段喂入相同。
+func TestChunkingInvariance(t *testing.T) {
+	pieces := []string{
+		"GET / HTTP/1.1\r\n\r\n",
+		"POST /p HTTP/1.1\r\nContent-Length: 4\r\n\r\nbody",
+		"POST /c HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3;x\r\nabc\r\n0\r\nT: 1\r\n\r\n",
+		"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nxyz",
+		"HTTP/1.1 100 Continue\r\n\r\n",
+		"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n",
+		"garbage line\r\n", "\x16\x03\x01\x00", "\n", "\r\n", "GET / HT", "Content-Length: x\r\n",
+		"GET /u HTTP/1.1\r\nUpgrade: ws\r\n\r\n",
+	}
+	x := uint32(1)
+	rnd := func(n int) int {
+		x ^= x << 13
+		x ^= x >> 17
+		x ^= x << 5
+		return int(x % uint32(n))
+	}
+	for i := range 300 {
+		var sb strings.Builder
+		for range 1 + rnd(12) {
+			sb.WriteString(pieces[rnd(len(pieces))])
+		}
+		in := sb.String()
+		kind := http1.Kind(i % 2)
+		opt := http1.Options{Resync: i%3 == 0}
+		want := run(kind, opt, 0, data(in), closeFin())
+		for _, c := range []int{1, 2, 5, 13} {
+			got := run(kind, opt, c, data(in), closeFin())
+			if strings.Join(got.ev, "\n") != strings.Join(want.ev, "\n") {
+				t.Fatalf("input %q kind=%d resync=%v chunk=%d:\n  got:  %q\n  want: %q", in, kind, opt.Resync, c, got.ev, want.ev)
+			}
+		}
+	}
+}
+
+// 每个非 1xx 响应的头部解析完时恰好调用一次 Method，1xx（含 101）不调用。
+func TestMethodCalledOncePerFinalResponse(t *testing.T) {
+	tests := []struct {
+		in    string
+		calls int
+	}{
+		{"HTTP/1.1 204 No Content\r\n\r\n", 1},
+		{"HTTP/1.1 304 Not Modified\r\n\r\n", 1},
+		{"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 1},
+		{"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n", 1},
+		{"HTTP/1.1 101 Switching Protocols\r\n\r\n", 0},
+	}
+	for _, tt := range tests {
+		var calls int
+		run(http1.Response, http1.Options{Method: methodFn("GET", &calls)}, 0, data(tt.in))
+		if calls != tt.calls {
+			t.Errorf("%q: Method called %d times, want %d", tt.in, calls, tt.calls)
+		}
+	}
+}
