@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"httpgrep/internal/decode"
 	"httpgrep/internal/pcap"
 	"httpgrep/internal/pcapgen"
 	"httpgrep/internal/run"
@@ -377,6 +378,37 @@ func TestRunWriteError(t *testing.T) {
 			r := wait(t, ch, 2*time.Second)
 			if r.err != errDisk || r.matched {
 				t.Fatalf("matched %v err %v, want false %v", r.matched, r.err, errDisk)
+			}
+		})
+	}
+}
+
+// 统计：Packets、Bytes（按 caplen）统计所有记录，NotTCP、Fragments、Malformed 按解码结果计数，
+// FirstTS、LastTS 是最早和最晚的时间戳；--cpus 4 时引擎的统计按分片合并。
+func TestRunStats(t *testing.T) {
+	syn := pcapgen.Frame(pcap.LinkEthernet, pcapgen.TCP(cli1, srv, 100, 0, decode.SYN, nil)) // 14+20+20 = 54 字节
+	udp := pcapgen.TCP(cli1, srv, 100, 0, decode.SYN, nil)
+	udp[9] = 17 // 协议号改成 UDP
+	frag := pcapgen.TCP(cli1, srv, 100, 0, decode.SYN, nil)
+	frag[6] = 0x20 // MF 置位
+	short := pcapgen.TCP(cli1, srv, 100, 0, decode.SYN, nil)[:10]
+	data := pcapgen.Frame(pcap.LinkEthernet, pcapgen.TCP(cli2, srv, 1, 1, decode.ACK, bytes.Repeat([]byte("x"), 100))) // 154 字节
+	in := capture(t, func(w *pcapgen.Writer) {
+		w.Record(ms(0), syn, 0)
+		w.Record(ms(5), pcapgen.Frame(pcap.LinkEthernet, udp), 0)
+		w.Record(ms(-2), pcapgen.Frame(pcap.LinkEthernet, frag), 0) // 时间戳比前一个早
+		w.Record(ms(6), pcapgen.Frame(pcap.LinkEthernet, short), 0) // 24 字节
+		w.Record(ms(7), data[:100], len(data))                      // 被 snaplen 截断，caplen 100
+	})
+	for _, cpus := range []string{"1", "4"} {
+		t.Run("cpus="+cpus, func(t *testing.T) {
+			_, st, err := run.Run(run.Config{Input: bytes.NewReader(in), Stdout: io.Discard, Opts: opts(t, "--cpus", cpus, "HIT")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Packets != 5 || st.Bytes != 286 || st.NotTCP != 1 || st.Fragments != 1 || st.Malformed != 1 ||
+				!st.FirstTS.Equal(ms(-2)) || !st.LastTS.Equal(ms(7)) || st.Connections != 2 {
+				t.Fatalf("stats %+v", st)
 			}
 		})
 	}

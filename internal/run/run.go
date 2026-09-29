@@ -144,11 +144,11 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 		case <-grace:
 			done = true
 		case <-out.fail: // 输出已经坏了，不再结束在途交互
-			st = d.abort()
+			st = l.stats(d.abort())
 			return out.matched, st, out.failed()
 		}
 	}
-	st = d.finish(l.clock)
+	st = l.stats(d.finish(l.clock))
 	if err := out.failed(); err != nil {
 		return out.matched, st, err
 	}
@@ -170,10 +170,19 @@ type loop struct {
 	link    pcap.LinkType
 	d       dispatcher
 	seg     decode.Segment
-	clock   time.Time // 抓包时钟：所有包时间戳的最大值，管道输入时还会按真实时间往前推
-	lastTS  time.Time // 所有包时间戳的最大值
-	lastRcv time.Time // 收到最近一批包的真实时间；零值表示还没收到包
-	readErr error     // 读记录时的错误（不含 io.EOF）
+	clock   time.Time    // 抓包时钟：所有包时间戳的最大值，管道输入时还会按真实时间往前推
+	lastTS  time.Time    // 所有包时间戳的最大值
+	lastRcv time.Time    // 收到最近一批包的真实时间；零值表示还没收到包
+	readErr error        // 读记录时的错误（不含 io.EOF）
+	st      engine.Stats // run 层填写的统计：Packets、Bytes、NotTCP、Fragments、Malformed、FirstTS
+}
+
+// stats 把 run 层的统计填进引擎合并后的统计 est。
+func (l *loop) stats(est engine.Stats) engine.Stats {
+	est.Packets, est.Bytes = l.st.Packets, l.st.Bytes
+	est.NotTCP, est.Fragments, est.Malformed = l.st.NotTCP, l.st.Fragments, l.st.Malformed
+	est.FirstTS, est.LastTS = l.st.FirstTS, l.lastTS
+	return est
 }
 
 // batch 处理一批包，返回输入是否已经结束。
@@ -185,9 +194,22 @@ func (l *loop) batch(b *batch) (end bool) {
 		if r.ts.After(l.clock) {
 			l.clock = r.ts
 		}
-		// 引擎要求时间单调不减：时间戳变小的包按当前时钟处理
-		if decode.Decode(l.link, b.buf[r.off:r.off+r.n], r.origLen, &l.seg) == decode.OK {
+		st := &l.st
+		if st.Packets == 0 || r.ts.Before(st.FirstTS) {
+			st.FirstTS = r.ts
+		}
+		st.Packets++
+		st.Bytes += int64(r.n)
+		switch decode.Decode(l.link, b.buf[r.off:r.off+r.n], r.origLen, &l.seg) {
+		case decode.OK:
+			// 引擎要求时间单调不减：时间戳变小的包按当前时钟处理
 			l.d.segment(b, &l.seg, l.clock)
+		case decode.NotTCP:
+			st.NotTCP++
+		case decode.Fragment:
+			st.Fragments++
+		case decode.Malformed:
+			st.Malformed++
 		}
 	}
 	if len(b.recs) > 0 {
