@@ -116,6 +116,10 @@ func (p *Parser) Feed(off int64, b []byte, peerAck int64, ts time.Time) {
 	}
 }
 
+// LastTS 返回最近一次 Feed 或 Gap 所带的时间。在 Sink 回调里调用时，它就是正在交付的
+// 字节所在包的时间；Resume 回放缓存时是对应缓存段的时间。还没有 Feed 或 Gap 时是零值。
+func (p *Parser) LastTS() time.Time { return p.lastTS }
+
 // step 处理 b 开头的一部分字节，返回消耗的字节数。
 // 不消耗字节时必须改变状态，保证 Feed 的循环能推进。
 func (p *Parser) step(off int64, b []byte, ack int64, ts time.Time) int {
