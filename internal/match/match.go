@@ -157,7 +157,7 @@ func (s *Scanner) Write(b []byte) {
 		} else {
 			s.buf = append(s.buf, b[:i]...)
 			if s.m.re != nil && len(s.buf) > regexBufCap {
-					s.buf = s.buf[:regexBufCap]
+				s.buf = s.buf[:regexBufCap]
 			}
 			s.processLine(s.buf)
 			s.buf = s.buf[:0]
