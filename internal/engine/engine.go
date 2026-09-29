@@ -27,7 +27,8 @@ type Engine struct {
 	asm   *tcp.Assembler
 	stats Stats
 
-	free     []*exchange // 回收的交互，连同缓存和扫描器一起复用
+	free     []*exchange // 回收的交互，连同缓存和扫描器一起复用，见 recycle
+	freeBuf  int64       // free 里的交互留着的缓存容量之和
 	timers   timers      // 正在计时的在途交互，按到期时间排序
 	inFlight int
 	buffered int64 // 在途交互缓存的消息字节数
@@ -131,6 +132,7 @@ func (e *Engine) newExchange(c *conn) *exchange {
 		x = e.free[n-1]
 		e.free[n-1] = nil
 		e.free = e.free[:n-1]
+		e.freeBuf -= int64(cap(x.buf))
 	} else {
 		x = &exchange{}
 		for i := range x.dirs {
@@ -151,7 +153,7 @@ func (e *Engine) newExchange(c *conn) *exchange {
 // finish 结束交互：计入统计，命中的输出，然后回收。
 func (e *Engine) finish(c *conn, x *exchange) {
 	e.end(c, x)
-	e.free = append(e.free, x)
+	e.recycle(x)
 }
 
 // end 结束交互但不回收：停止计时，计入统计，命中的输出，缓存不再计入。

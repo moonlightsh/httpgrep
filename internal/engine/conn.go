@@ -444,7 +444,7 @@ func (c *conn) finish(x *exchange) {
 // drop 回收不再需要的占位 x。
 func (c *conn) drop(x *exchange) {
 	c.unlink(x)
-	c.e.free = append(c.e.free, x)
+	c.e.recycle(x)
 	c.rearm(c.now)
 }
 

@@ -138,9 +138,10 @@ func (x *exchange) touch(ts time.Time) {
 }
 
 // bury 把已经结束的交互变成占位：丢掉缓存（已经不计入缓存计量），只留配对要用的状态。
+// 缓存交给 GC：占位可能要等很久（等迟到的响应或连接关闭），不能一直留着不计量的内存。
 func (x *exchange) bury() {
 	x.ghost = true
-	x.buf, x.pieces, x.msgs = x.buf[:0], x.pieces[:0], x.msgs[:0]
+	x.buf, x.pieces, x.msgs = nil, x.pieces[:0], x.msgs[:0]
 }
 
 // status 返回交互结束时的状态。

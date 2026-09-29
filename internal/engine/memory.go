@@ -18,6 +18,29 @@ func (e *Engine) Memory() int64 {
 		int64(e.asm.Len())*connOverhead + int64(e.inFlight)*exchangeOverhead
 }
 
+// 回收的交互不计入内存计量，所以限量：最多留 maxFree 个；它们留着的缓存容量之和
+// 不超过 MaxMemory 的 1/freeBufShare，放不下的交互只留对象和扫描器，缓存交给 GC。
+// 峰值过后，多出来的交互和缓存不会一直留着。
+const (
+	maxFree      = 256
+	freeBufShare = 16
+)
+
+// recycle 回收已经结束、不再被连接引用的交互 x。
+func (e *Engine) recycle(x *exchange) {
+	if len(e.free) >= maxFree {
+		return
+	}
+	if n := int64(cap(x.buf)); n > 0 {
+		if e.freeBuf+n > e.cfg.MaxMemory/freeBufShare {
+			x.buf = nil
+		} else {
+			e.freeBuf += n
+		}
+	}
+	e.free = append(e.free, x)
+}
+
 // enforce 在超过内存上限时丢弃在途交互，从开始时间最早的起，直到不超限；
 // 在途交互都丢完了仍然超限，就释放最久没有收到包的连接。
 // 在 Assembler 的回调之外调用（回调里不能调用 Release），所以计量最多超出上限一个包的量。

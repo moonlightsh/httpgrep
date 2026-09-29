@@ -2,12 +2,14 @@ package engine_test
 
 import (
 	"net/netip"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"httpgrep/internal/engine"
+	"httpgrep/internal/output"
 	"httpgrep/internal/pcapgen"
 )
 
@@ -350,5 +352,95 @@ func TestMemoryLimitUnderLoad(t *testing.T) {
 	}
 	if st.PeakBuffered != 64240 || st.Evicted < 1 || st.Exchanges != 101 {
 		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 回收的交互留着缓存和扫描器以便复用，但不计入内存计量，所以要有上限：
+// 1000 个交互同时在途、各缓存 30 KB，全部结束之后，引擎留着的内存不超过 6 MB
+// （上限 64 MB 时回收缓存的总量不超过它的 1/16，即 4 MB，另加不超过 256 个交互对象和扫描器）。
+// 不设上限时会留着全部 30 MB。
+func TestFreeListBounded(t *testing.T) {
+	const n = 1000
+	body := strings.Repeat("z", 30000)
+	pkts, _ := decodeAll(t, func(w *pcapgen.Writer) {
+		conns := make([]*pcapgen.Conn, n)
+		for i := range conns {
+			conns[i] = pcapgen.NewConn(w, netip.AddrPortFrom(netip.MustParseAddr("10.2.0.1"), uint16(10000+i)), srv)
+			conns[i].Handshake(ms(0))
+			conns[i].ClientSend(ms(1), []byte("GET / HTTP/1.1\r\n\r\n"))
+			conns[i].ServerSend(ms(2), []byte("HTTP/1.1 200 OK\r\nContent-Length: 30000\r\n\r\n"+body[:29000]))
+		}
+		for _, c := range conns {
+			c.ServerSend(ms(3), []byte(body[29000:]))
+		}
+	})
+	e := engine.New(engine.Config{
+		Matcher: matcher(t, "NEEDLE"), Timeout: 30 * time.Second,
+		MaxMemory: 64 << 20, MaxMessage: 8 << 20,
+		Emit: func(*output.Block) {},
+	})
+	for i := range pkts {
+		e.Segment(&pkts[i].seg, pkts[i].ts)
+		e.Advance(pkts[i].ts)
+	}
+	e.Finish(pkts[len(pkts)-1].ts)
+	if st := e.Stats(); st.Complete != n || st.PeakInFlight != n {
+		t.Fatalf("stats: %+v", st)
+	}
+	// 引擎留着的内存：引擎还活着时的堆，减去引擎被回收之后的堆。
+	pkts = nil
+	var alive, gone runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&alive)
+	runtime.KeepAlive(e)
+	e = nil
+	runtime.GC()
+	runtime.ReadMemStats(&gone)
+	retained := int64(alive.HeapAlloc) - int64(gone.HeapAlloc)
+	t.Logf("retained %d bytes", retained)
+	if retained > 6<<20 {
+		t.Fatalf("engine retains %d bytes after all exchanges ended", retained)
+	}
+}
+
+// 超时或被丢弃的交互留在队列里当占位，它的缓存已经不计入内存计量，也要真的释放：
+// 1000 个交互各缓存了约 30 KB 的响应后超时，连接都还在，占位等着迟到的响应。
+// 此时引擎留着的内存不超过 10 MB；占位留着缓存的话要多 30 MB。
+func TestPlaceholderReleasesBuffer(t *testing.T) {
+	const n = 1000
+	body := strings.Repeat("z", 29000)
+	pkts, _ := decodeAll(t, func(w *pcapgen.Writer) {
+		for i := range n {
+			c := pcapgen.NewConn(w, netip.AddrPortFrom(netip.MustParseAddr("10.2.0.1"), uint16(10000+i)), srv)
+			c.Handshake(ms(0))
+			c.ClientSend(ms(1), []byte("GET / HTTP/1.1\r\n\r\n"))
+			c.ServerSend(ms(2), []byte("HTTP/1.1 200 OK\r\nContent-Length: 30000\r\n\r\n"+body))
+		}
+	})
+	e := engine.New(engine.Config{
+		Matcher: matcher(t, "NEEDLE"), Timeout: 30 * time.Second,
+		MaxMemory: 64 << 20, MaxMessage: 8 << 20,
+		Emit: func(*output.Block) {},
+	})
+	for i := range pkts {
+		e.Segment(&pkts[i].seg, pkts[i].ts)
+		e.Advance(pkts[i].ts)
+	}
+	e.Advance(ms(40000))
+	if st := e.Stats(); st.Incomplete != n || st.PeakInFlight != n || e.Memory() != n*1024 {
+		t.Fatalf("stats: %+v, Memory %d", st, e.Memory())
+	}
+	pkts = nil
+	var alive, gone runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&alive)
+	runtime.KeepAlive(e)
+	e = nil
+	runtime.GC()
+	runtime.ReadMemStats(&gone)
+	retained := int64(alive.HeapAlloc) - int64(gone.HeapAlloc)
+	t.Logf("retained %d bytes", retained)
+	if retained > 10<<20 {
+		t.Fatalf("engine retains %d bytes with %d placeholders", retained, n)
 	}
 }
