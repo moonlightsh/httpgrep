@@ -614,3 +614,24 @@ func TestTCPPayloadTooLong(t *testing.T) {
 		})
 	}
 }
+
+// Raw 按 fromClient 决定方向，序号、确认号、标志位和载荷原样写出。
+func TestConnRaw(t *testing.T) {
+	client := netip.MustParseAddrPort("10.0.0.1:50006")
+	server := netip.MustParseAddrPort("10.0.0.2:80")
+	ts := time.Unix(1700000000, 0)
+	path := writePcap(t, "raw.pcap", pcap.LinkEthernet, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, client, server)
+		c.Raw(ts, true, 5000, 6000, decode.ACK|decode.PSH, []byte("x"))
+		c.Raw(ts, false, 7000, 8000, decode.ACK, nil)
+	})
+	rows := tsharkFields(t, path, nil,
+		"tcp.srcport", "tcp.dstport", "tcp.seq_raw", "tcp.ack_raw", "tcp.flags", "tcp.len")
+	want := [][]string{
+		{"50006", "80", "5000", "6000", "0x0018", "1"},
+		{"80", "50006", "7000", "8000", "0x0010", "0"},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Errorf("srcport/dstport/seq/ack/flags/len = %v，想要 %v", rows, want)
+	}
+}
