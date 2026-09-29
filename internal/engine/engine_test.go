@@ -757,18 +757,49 @@ func TestUpgradeHeldBytesOnServerFin(t *testing.T) {
 }
 
 // Upgrade 被拒后回放出一个没发完的请求，它的响应提前到达，然后 RST：
-// 请求最后一个包的时间是它缓存时的时间（ms1），不是回放发生时的时间（ms2）。
+// 请求最后一个包的时间是它最后一个缓存段的时间，不是回放发生时的时间，也不是第一个缓存段的时间。
 func TestUpgradeReplayedRequestTiming(t *testing.T) {
-	out, _ := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
-		c := pcapgen.NewConn(w, cli1, srv)
-		c.Handshake(ms(-1))
-		c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
-		c.ClientSend(ms(1), []byte("POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc"))
-		c.ServerSend(ms(2), []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"))
-		c.ServerSend(ms(5), []byte("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"))
-		c.ClientRst(ms(6))
-	})
-	check(t, out, "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 4.0ms\n"+
-		"POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc\n"+
-		"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n")
+	cases := []struct {
+		name  string
+		build func(c *pcapgen.Conn)
+		want  string
+	}{
+		{
+			name: "one held segment",
+			build: func(c *pcapgen.Conn) {
+				c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+				c.ClientSend(ms(1), []byte("POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc"))
+				c.ServerSend(ms(2), []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"))
+				c.ServerSend(ms(5), []byte("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"))
+				c.ClientRst(ms(6))
+			},
+			want: "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 4.0ms\n" +
+				"POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc\n" +
+				"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n",
+		},
+		{
+			name: "two held segments",
+			build: func(c *pcapgen.Conn) {
+				c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+				c.ClientSend(ms(1), []byte("POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc"))
+				c.ClientSend(ms(2), []byte("de"))
+				c.ServerSend(ms(3), []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"))
+				c.ServerSend(ms(6), []byte("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"))
+				c.ClientRst(ms(7))
+			},
+			want: "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 4.0ms\n" +
+				"POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabcde\n" +
+				"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _ := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				tc.build(c)
+			})
+			check(t, out, tc.want)
+		})
+	}
 }

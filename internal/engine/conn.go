@@ -35,8 +35,7 @@ type conn struct {
 	cliFin   bool
 	cliFinTS time.Time
 
-	now       time.Time // 当前回调所属包的时间
-	replaying bool      // 请求解析器正在回放 Upgrade 请求之后缓存的字节，now 不是这些字节的时间
+	now time.Time // 当前回调所属包的时间。请求的时间不用它，取 req.LastTS()：回放缓存时 now 不是那些字节的时间
 }
 
 // reqSink 接收请求解析器的事件。cur 为 nil 时丢弃事件。
@@ -180,9 +179,7 @@ func (c *conn) closeQueue(why string, all bool) {
 // 回放出的请求可能又是 Upgrade 请求而重新开始缓存，此时 held 仍为真。
 func (c *conn) resumeHeld() {
 	c.held = false
-	c.replaying = true
 	c.req.Resume()
-	c.replaying = false
 	c.closePendingFin()
 }
 
@@ -238,9 +235,8 @@ func (s *reqSink) Begin(b http1.Begin) {
 
 func (s *reqSink) Raw(sec http1.Section, b []byte) {
 	if x := s.cur; x != nil {
-		if !s.c.replaying {
-			x.reqLast = s.c.now
-		}
+		// 回放 Upgrade 请求之后缓存的字节时，LastTS 是这些字节所在缓存段的时间。
+		x.reqLast = s.c.req.LastTS()
 		x.raw(x.reqMsg, sec, b)
 	}
 }
