@@ -153,8 +153,21 @@ func (s *Scanner) Write(b []byte) {
 			s.holdLine(b)
 			return
 		}
-		s.processLine(append(s.buf, b[:i]...))
-		s.buf = s.buf[:0]
+		if len(s.buf) == 0 {
+			// 不拷贝，直接处理；正则模式下按上限截断。
+			line := b[:i]
+			if s.m.re != nil && len(line) > regexBufCap {
+				line = line[:regexBufCap]
+			}
+			s.processLine(line)
+		} else {
+			s.buf = append(s.buf, b[:i]...)
+			if s.m.re != nil && len(s.buf) > regexBufCap {
+					s.buf = s.buf[:regexBufCap]
+			}
+			s.processLine(s.buf)
+			s.buf = s.buf[:0]
+		}
 		b = b[i+1:]
 	}
 }

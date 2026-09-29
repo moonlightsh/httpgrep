@@ -423,3 +423,24 @@ func TestFastPathLongPatternMultiChunk(t *testing.T) {
 		t.Fatal("long pattern split across many writes")
 	}
 }
+
+// 8 MiB 行缓存上限对以 \n 结束的完整行同样生效（正则模式）。
+func TestRegexLineCapCompleteLine(t *testing.T) {
+	const miB = 1 << 20
+	// 反例 1：分两次 Write，第二次以 \n 结束这一行。
+	m, _ := match.Compile([]string{"past-the-cap"}, true)
+	s := m.NewScanner()
+	s.Write(make([]byte, 8*miB+1024))
+	s.Write([]byte("past-the-cap\n"))
+	if s.Matched() {
+		t.Fatal("keyword past the 8 MiB cap must not match (split writes)")
+	}
+
+	// 反例 2：一次 Write，行在块内以 \n 结束。
+	m2, _ := match.Compile([]string{"past-the-cap"}, true)
+	s2 := m2.NewScanner()
+	s2.Write(append(make([]byte, 9*miB), "past-the-cap\n"...))
+	if s2.Matched() {
+		t.Fatal("keyword past the 8 MiB cap must not match (single write)")
+	}
+}
