@@ -684,6 +684,30 @@ func TestUpgradeHeldBytesOnClose(t *testing.T) {
 				"GET /TOKEN HTTP/1.1\r\n\r\n" +
 				"HTTP/1.1 204 No Content\r\n\r\n",
 		},
+		{
+			// 输入结束时还没有决定：回放缓存的请求，两个都没有响应。
+			name: "finish before decision",
+			build: func(c *pcapgen.Conn) {
+				c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\nX-Id: TOKEN\r\n\r\n"))
+				c.ClientSend(ms(1), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+			},
+			want: "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(eof)\n" +
+				"GET /chat HTTP/1.1\r\nUpgrade: websocket\r\nX-Id: TOKEN\r\n\r\n" +
+				"--\n" +
+				"2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 no-response(eof)\n" +
+				"GET /TOKEN HTTP/1.1\r\n\r\n",
+		},
+		{
+			// RST 时还没有决定：同样先回放，再以 no-response(closed) 结束。
+			name: "RST before decision",
+			build: func(c *pcapgen.Conn) {
+				c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+				c.ClientSend(ms(1), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+				c.ClientRst(ms(2))
+			},
+			want: "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 no-response(closed)\n" +
+				"GET /TOKEN HTTP/1.1\r\n\r\n",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -694,5 +718,34 @@ func TestUpgradeHeldBytesOnClose(t *testing.T) {
 			})
 			check(t, out, tc.want)
 		})
+	}
+}
+
+// 服务端 FIN 时 Upgrade 请求还没有决定：立即回放缓存的请求，它们以 no-response(closed) 结束，
+// 不等到输入结束。另一条连接之后才结束的交互排在它们后面输出。
+func TestUpgradeHeldBytesOnServerFin(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		a := pcapgen.NewConn(w, cli1, srv)
+		a.Handshake(ms(-1))
+		a.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+		a.ClientSend(ms(1), []byte("GET /TOKEN-1 HTTP/1.1\r\n\r\nGET /TOKEN-2 HTTP/1.1\r\n"))
+		a.ServerFin(ms(2))
+		a.ClientSend(ms(3), []byte("\r\n"))
+		b := pcapgen.NewConn(w, cli2, srv)
+		b.Handshake(ms(4))
+		b.ClientSend(ms(5), []byte("GET /TOKEN-B HTTP/1.1\r\n\r\n"))
+		b.ServerSend(ms(6), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+	check(t, out, "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 no-response(closed)\n"+
+		"GET /TOKEN-1 HTTP/1.1\r\n\r\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 no-response(closed)\n"+
+		"GET /TOKEN-2 HTTP/1.1\r\n\r\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.350 10.0.0.1:52815 -> 10.0.0.2:80 complete 1.0ms\n"+
+		"GET /TOKEN-B HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 204 No Content\r\n\r\n")
+	if st.NoResponseClosed != 3 || st.Complete != 1 {
+		t.Fatalf("stats: %+v", st)
 	}
 }

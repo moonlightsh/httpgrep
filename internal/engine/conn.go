@@ -122,6 +122,9 @@ func (c *conn) Fin(side tcp.Side, ts time.Time) {
 		return
 	}
 	c.res.Close(true, ts)
+	// 等决定的 Upgrade 请求不会再有响应：缓存的请求现在就回放，先照常排队，
+	// 下面和它一起以无响应结束，不拖到输入结束。
+	c.resumeAllHeld()
 	c.srvClosed = true
 	// 请求已经发完的交互不会再有响应；还在发的，等请求结束时再结束。
 	c.closeQueue(noRespClosed, false)
@@ -148,6 +151,7 @@ func (c *conn) close(why string, ts time.Time) {
 		return
 	}
 	c.now = ts
+	c.resumeAllHeld()
 	c.req.Close(false, ts)
 	c.res.Close(false, ts)
 	c.srvClosed = true
@@ -180,6 +184,14 @@ func (c *conn) resumeHeld() {
 	c.req.Resume()
 	c.replaying = false
 	c.closePendingFin()
+}
+
+// resumeAllHeld 在关闭连接前回放请求解析器缓存的全部字节：
+// Upgrade 请求再也等不到决定，按被拒处理，缓存的请求照常排队。
+func (c *conn) resumeAllHeld() {
+	for c.held {
+		c.resumeHeld()
+	}
 }
 
 // closePendingFin 在请求解析器不再缓存时补调推迟的客户端 FIN。
