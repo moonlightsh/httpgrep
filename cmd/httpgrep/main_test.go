@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -353,5 +354,114 @@ func TestStats(t *testing.T) {
 	}
 	if len(labels) != len(exact)+len(pattern) {
 		t.Errorf("got %d stats lines, want %d:\n%s", len(labels), len(exact)+len(pattern), got.stderr)
+	}
+}
+
+// notifyBuffer 是并发安全的输出缓冲，每次写入后通知 wrote。
+type notifyBuffer struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	wrote chan struct{}
+}
+
+func newNotifyBuffer() *notifyBuffer { return &notifyBuffer{wrote: make(chan struct{}, 1)} }
+
+func (b *notifyBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n, err := b.buf.Write(p)
+	select {
+	case b.wrote <- struct{}{}:
+	default:
+	}
+	return n, err
+}
+
+func (b *notifyBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// waitFor 等 b 的内容满足 ok，最多 d；超时返回假。
+func (b *notifyBuffer) waitFor(d time.Duration, ok func(string) bool) bool {
+	deadline := time.After(d)
+	for !ok(b.String()) {
+		select {
+		case <-b.wrote:
+		case <-deadline:
+			return ok(b.String())
+		}
+	}
+	return true
+}
+
+// piped 是一个从管道读标准输入、还在运行的进程。
+type piped struct {
+	cmd            *exec.Cmd
+	stdin          io.WriteCloser
+	stdout, stderr *notifyBuffer
+	cancel         context.CancelFunc
+}
+
+// startPiped 启动进程，标准输入是一个由测试持有写端的管道。进程最多运行 30 秒。
+func startPiped(t *testing.T, args ...string) *piped {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = append(os.Environ(), "TZ=UTC")
+	p := &piped{cmd: cmd, stdout: newNotifyBuffer(), stderr: newNotifyBuffer(), cancel: cancel}
+	cmd.Stdout, cmd.Stderr = p.stdout, p.stderr
+	var err error
+	if p.stdin, err = cmd.StdinPipe(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		p.stdin.Close()
+		cmd.Wait()
+	})
+	return p
+}
+
+// wait 关闭标准输入之前不调用；返回退出码。
+func (p *piped) wait(t *testing.T) int {
+	t.Helper()
+	return exitCode(t, p.cmd.Wait())
+}
+
+// slowRequest 是只有一个请求、没有响应的抓包。
+func slowRequest(t testing.TB) []byte {
+	return capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /slow HTTP/1.1\r\nHost: x\r\n\r\n"))
+	})
+}
+
+const slowReq = "GET /slow HTTP/1.1\r\nHost: x\r\n\r\n"
+
+// 标准输入是管道时，超过 1 秒没有新包，时钟按真实时间往前推：
+// 管道不关，请求也会在 --timeout 之后以 no-response(timeout) 输出。
+func TestPipeRealTimeFallback(t *testing.T) {
+	p := startPiped(t, "--timeout", "1s", "slow")
+	if _, err := p.stdin.Write(slowRequest(t)); err != nil {
+		t.Fatal(err)
+	}
+	const block = "2026-09-28 07:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n" + slowReq
+	start := time.Now()
+	if !p.stdout.waitFor(10*time.Second, func(s string) bool { return s == block }) {
+		t.Fatalf("after %v stdout %q, want %q", time.Since(start), p.stdout.String(), block)
+	}
+	// 兜底要等 1 秒没有新包才开始推时钟，再过 --timeout 才超时；留 100ms 余量给计时误差。
+	if d := time.Since(start); d < 900*time.Millisecond {
+		t.Fatalf("block came after %v, want >= 1s", d)
+	}
+	p.stdin.Close()
+	if code := p.wait(t); code != 0 {
+		t.Fatalf("code %d, stderr %q", code, p.stderr.String())
 	}
 }

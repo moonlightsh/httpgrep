@@ -43,8 +43,14 @@ func httpgrep(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		}
 		defer f.Close()
 	}
+	// 输入不是普通文件（管道、FIFO、终端）时启用真实时间兜底。
+	fi, err := f.Stat()
+	if err != nil {
+		return fail(stderr, err)
+	}
+	pipe := !fi.Mode().IsRegular()
 	start := time.Now()
-	matched, st, err := run.Run(run.Config{Input: f, Stdout: stdout, Stderr: stderr, Opts: opts})
+	matched, st, err := run.Run(run.Config{Input: f, Pipe: pipe, Stdout: stdout, Stderr: stderr, Opts: opts})
 	if opts.Stats {
 		printStats(stderr, st, time.Since(start))
 	}
