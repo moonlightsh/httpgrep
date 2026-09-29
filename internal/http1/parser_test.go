@@ -444,3 +444,63 @@ func TestNilMethodIsGET(t *testing.T) {
 	want := []string{"begin off=0", "raw head HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n", "head 200 HTTP/1.1", "raw body x", "body x", "end true"}
 	checkAllChunkings(t, http1.Response, http1.Options{}, want, data("HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx"))
 }
+
+func TestInformationalResponses(t *testing.T) {
+	in := "HTTP/1.1 100 Continue\r\n\r\n" +
+		"HTTP/1.1 103 Early Hints\r\nLink: </a.css>\r\n\r\n" +
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+	want := []string{
+		"begin off=0", "raw head HTTP/1.1 100 Continue\r\n\r\n", "head 100 HTTP/1.1", "end true",
+		"begin off=25", "raw head HTTP/1.1 103 Early Hints\r\nLink: </a.css>\r\n\r\n", "head 103 HTTP/1.1", "end true",
+		"begin off=69", "raw head HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n", "head 200 HTTP/1.1", "raw body ok", "body ok", "end true",
+	}
+	var calls int
+	checkAllChunkings(t, http1.Response, http1.Options{Method: methodFn("POST", &calls)}, want, data(in))
+	// 5 种切分各喂一遍，每遍只有 200 响应会问方法。
+	if calls != 5 {
+		t.Errorf("Method called %d times, want 5 (once per run, only for the final response)", calls)
+	}
+}
+
+func TestTunnelResponse(t *testing.T) {
+	after := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n\x81\x05hello"
+	tests := []struct {
+		name, method, in string
+		want             []string
+	}{
+		{
+			"101 switching protocols", "GET",
+			"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n",
+			[]string{"begin off=0", "raw head HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n", "head 101 HTTP/1.1 tunnel", "end true"},
+		},
+		{
+			"connect 200", "CONNECT",
+			"HTTP/1.1 200 Connection Established\r\n\r\n",
+			[]string{"begin off=0", "raw head HTTP/1.1 200 Connection Established\r\n\r\n", "head 200 HTTP/1.1 tunnel", "end true"},
+		},
+		{
+			"connect 200 ignores content-length", "CONNECT",
+			"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n",
+			[]string{"begin off=0", "raw head HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", "head 200 HTTP/1.1 tunnel", "end true"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			opt := http1.Options{Method: methodFn(tt.method, &calls)}
+			checkAllChunkings(t, http1.Response, opt, tt.want, data(tt.in), data(after), gap(10), data(after), closeRst())
+		})
+	}
+}
+
+// CONNECT 的非 2xx 响应不是隧道，后面照常解析。
+func TestConnectRejected(t *testing.T) {
+	in := "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 2\r\n\r\nnoHTTP/1.1 200 OK\r\n\r\n"
+	want := []string{
+		"begin off=0", "raw head HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 2\r\n\r\n", "head 407 HTTP/1.1",
+		"raw body no", "body no", "end true",
+		"begin off=67", "raw head HTTP/1.1 200 OK\r\n\r\n", "head 200 HTTP/1.1 tunnel", "end true",
+	}
+	var calls int
+	checkAllChunkings(t, http1.Response, http1.Options{Method: methodFn("CONNECT", &calls)}, want, data(in))
+}

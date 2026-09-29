@@ -49,6 +49,9 @@ func (p *Parser) finishHead(ts time.Time) {
 	p.sink.Head(&p.h)
 	if next == stStart {
 		p.end(true, ts)
+		if p.h.Tunnel {
+			p.st = stDead
+		}
 		return
 	}
 	p.st = next
@@ -58,12 +61,20 @@ func (p *Parser) finishHead(ts time.Time) {
 func (p *Parser) bodyState() state {
 	if p.kind == Response {
 		st := p.h.Status
+		if st == 101 {
+			p.h.Tunnel = true
+			return stStart
+		}
 		if st < 200 || st == 204 || st == 304 {
 			return stStart
 		}
 		m := ""
 		if p.opt.Method != nil {
 			m = p.opt.Method()
+		}
+		if m == "CONNECT" && st < 300 {
+			p.h.Tunnel = true
+			return stStart
 		}
 		if m == "HEAD" {
 			return stStart

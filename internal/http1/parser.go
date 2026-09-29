@@ -17,6 +17,7 @@ const (
 	stChunkEnd               // 读 chunk 数据后面的 CRLF
 	stTrailer                // 读 trailer
 	stBodyClose              // 读到关闭为止的 body
+	stDead                   // 隧道或已关闭：不再产生任何事件
 )
 
 const (
@@ -60,7 +61,7 @@ func NewParser(kind Kind, sink Sink, opt Options) *Parser {
 
 // Feed 按序喂入从流偏移 off 开始的字节 b。b 只在调用期间使用，不保留。
 func (p *Parser) Feed(off int64, b []byte, peerAck int64, ts time.Time) {
-	for len(b) > 0 {
+	for len(b) > 0 && p.st != stDead {
 		n := p.step(off, b, peerAck, ts)
 		off += int64(n)
 		b = b[n:]
@@ -182,10 +183,19 @@ func (p *Parser) line(off int64, b []byte, ack int64, ts time.Time, limit int) (
 }
 
 // Gap 表示 [off, off+n) 这段没抓到。
-func (p *Parser) Gap(off, n int64, ts time.Time) {}
+func (p *Parser) Gap(off, n int64, ts time.Time) {
+	if p.st == stDead {
+		return
+	}
+}
 
 // Close 在流结束时调用。fin 为真表示正常 FIN，为假表示 RST 或输入结束。
-func (p *Parser) Close(fin bool, ts time.Time) {}
+func (p *Parser) Close(fin bool, ts time.Time) {
+	if p.st == stDead {
+		return
+	}
+	p.st = stDead
+}
 
 // Resume 把 Upgrade 请求之后缓存的字节按 HTTP 解析。只对请求解析器有效。
 func (p *Parser) Resume() {}
