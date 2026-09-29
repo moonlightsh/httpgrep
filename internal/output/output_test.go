@@ -2,6 +2,7 @@ package output_test
 
 import (
 	"bytes"
+	"io"
 	"net/netip"
 	"testing"
 	"time"
@@ -443,4 +444,51 @@ func TestTTYColors(t *testing.T) {
 			t.Errorf("末行高亮不正确\n得到: %q\n期望: %q", got, want)
 		}
 	})
+}
+
+// benchBlock 构造一个 64 KiB 的块：请求 + 响应各 32 KiB JSON 文本。
+func benchBlock() *output.Block {
+	body := bytes.Repeat([]byte(`{"sn":"490419C6117A0087747906","ch":1,"data":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},`), 1024)
+	return &output.Block{
+		Time:        time.Unix(1790580612, 345000000),
+		Client:      mustAddr("127.0.0.1:52814"),
+		Server:      mustAddr("127.0.0.1:7010"),
+		Duration:    12000000,
+		HasDuration: true,
+		Messages: []output.Message{
+			{Pieces: []output.Piece{
+				{Kind: output.PieceHead, Data: []byte("POST /api/device/bind HTTP/1.1\r\nHost: h\r\n\r\n")},
+				{Kind: output.PieceBody, Data: body},
+			}},
+			{Pieces: []output.Piece{
+				{Kind: output.PieceHead, Data: []byte("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")},
+				{Kind: output.PieceBody, Data: body},
+			}},
+		},
+	}
+}
+
+func BenchmarkWriteNonTTY(b *testing.B) {
+	w := output.NewWriter(io.Discard, output.Options{Location: time.UTC})
+	blk := benchBlock()
+	b.SetBytes(int64(len(blk.Messages[0].Pieces[1].Data) * 2))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := w.Write(blk); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkWriteTTY(b *testing.B) {
+	hl := func(line []byte) [][2]int { return nil }
+	w := output.NewWriter(io.Discard, output.Options{Location: time.UTC, TTY: true, Highlight: hl})
+	blk := benchBlock()
+	b.SetBytes(int64(len(blk.Messages[0].Pieces[1].Data) * 2))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := w.Write(blk); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
