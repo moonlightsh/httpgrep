@@ -20,9 +20,22 @@ Options:
   -e PATTERN        Pattern to search for; may be given multiple times,
                     an exchange matches if any pattern matches
   -E                Interpret all patterns as regular expressions
-  --timeout DUR     Exchange timeout (default 30s)
-  --max-memory SIZE Total limit for buffered data (default 256M)
-  --max-message SIZE Limit for a single request or response (default 8M)
+  --timeout DUR     Exchange timeout: end an unfinished exchange after
+                    DUR without new data (default 30s)
+  --max-memory SIZE Approximate limit for buffered data (default 256M):
+                    request and response data, out-of-order segments
+                    and per-connection/per-exchange overhead. When it
+                    is exceeded, the oldest unfinished exchanges are
+                    dropped. Not counted, each with its own cap:
+                    -E line buffers (up to 8M per scanner, only for
+                    very long lines), bytes after an Upgrade request
+                    (up to 64K per connection) and resync line buffers
+                    (up to 8K per direction). The process uses more
+                    memory than this; the Go runtime soft limit is set
+                    to 1.5 times this value
+  --max-message SIZE
+                    Limit for a single request or response; bytes over
+                    it are not buffered (default 8M)
   --cpus N          Number of CPUs to use (default 1)
   --stats           Print statistics to stderr before exiting
   --help            Show this help and exit
@@ -31,6 +44,8 @@ Options:
 SIZE accepts K, M, G suffixes (powers of 1024). DUR is a Go duration
 such as 30s or 2m. Options may appear before or after PATTERN and FILE;
 arguments after -- are never treated as options.
+
+Exit status is 0 if an exchange matched, 1 if none matched, 2 on error.
 `
 
 // Options 是 Parse 的结果。
