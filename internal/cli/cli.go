@@ -36,7 +36,7 @@ Options:
   --max-message SIZE
                     Limit for a single request or response; bytes over
                     it are not buffered (default 8M)
-  --cpus N          Number of CPUs to use (default 1)
+  --cpus N          Number of CPUs to use, 1 to 1024 (default 1)
   --stats           Print statistics to stderr before exiting
   --help            Show this help and exit
   --version         Show version information and exit
@@ -131,7 +131,7 @@ func Parse(args []string) (Options, error) {
 						return opts, err
 					}
 				}
-				opts.CPUs, err = parseInt("--cpus", val)
+				opts.CPUs, err = parseCPUs(val)
 				if err != nil {
 					return opts, err
 				}
@@ -281,6 +281,21 @@ func parseInt(name, s string) (int, error) {
 		return 0, &errBadArg{"invalid value for " + name + ": " + s}
 	}
 	return n, nil
+}
+
+// maxCPUs 是 --cpus 的上限。太大时 Go 运行时起不了那么多线程（--cpus 100000 直接
+// thread exhaustion），--max-memory 平均分给各分片后每个分片的上限也几乎为 0。
+const maxCPUs = 1024
+
+// parseCPUs 解析 --cpus：1 到 maxCPUs 的纯数字整数。
+func parseCPUs(s string) (int, error) {
+	if !isDigits(s) || strings.Trim(s, "0") == "" { // 不是正整数
+		return parseInt("--cpus", s)
+	}
+	if n, err := strconv.Atoi(s); err == nil && n <= maxCPUs {
+		return n, nil
+	}
+	return 0, &errBadArg{"invalid value for --cpus: " + s + " (at most " + strconv.Itoa(maxCPUs) + ")"}
 }
 
 // parseDuration 解析必须大于 0 的时长。

@@ -183,6 +183,7 @@ func TestBadArgumentsExit2(t *testing.T) {
 		{nil, "httpgrep: no pattern given\n" + try},
 		{[]string{"--bogus", "x"}, "httpgrep: unknown option: --bogus\n" + try},
 		{[]string{"x", "a.pcap", "b.pcap"}, "httpgrep: only one input file is supported\n" + try},
+		{[]string{"--cpus", "100000", "x"}, "httpgrep: invalid value for --cpus: 100000 (at most 1024)\n" + try},
 	} {
 		t.Run(fmt.Sprint(tc.args), func(t *testing.T) {
 			want(t, runBin(t, bytes.NewReader(twoExchanges(t)), tc.args...), "", tc.stderr, 2)
@@ -256,7 +257,7 @@ func TestHelp(t *testing.T) {
 		"-e PATTERN", "-E ", "--timeout DUR", "(default 30s)",
 		"--max-memory SIZE", "Approximate limit for buffered data (default 256M)",
 		"-E line buffers", "Upgrade", "resync",
-		"--max-message SIZE", "(default 8M)", "--cpus N", "(default 1)",
+		"--max-message SIZE", "(default 8M)", "--cpus N", "1 to 1024 (default 1)",
 		"--stats", "--help", "--version",
 		"K, M, G", "Exit status is 0 if an exchange matched, 1 if none matched, 2 on error.",
 	} {

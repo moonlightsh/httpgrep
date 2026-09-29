@@ -312,6 +312,16 @@ func TestParseDurationAndCPUs(t *testing.T) {
 			t.Errorf("--cpus %q 应报错", bad)
 		}
 	}
+	// --cpus 最多 1024：太大时起不了那么多线程，每个分片的内存上限也会被压到几乎为 0。
+	if opts, err := cli.Parse([]string{"--cpus", "1024", "kw"}); err != nil || opts.CPUs != 1024 {
+		t.Errorf("--cpus 1024: CPUs %d, err %v", opts.CPUs, err)
+	}
+	for _, bad := range []string{"1025", "100000", "99999999999999999999"} {
+		_, err := cli.Parse([]string{"--cpus", bad, "kw"})
+		if want := "invalid value for --cpus: " + bad + " (at most 1024)"; err == nil || err.Error() != want {
+			t.Errorf("--cpus %s: err %v, want %q", bad, err, want)
+		}
+	}
 }
 
 // 第 7 条：关键词里的换行拆成多个。
