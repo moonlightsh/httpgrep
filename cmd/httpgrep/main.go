@@ -133,7 +133,8 @@ func printStats(w io.Writer, st engine.Stats, elapsed time.Duration) {
 	fmt.Fprintf(w, "peak connections: %d\n", st.PeakConns)
 }
 
-// watchSignals 在第一次收到 SIGINT 或 SIGTERM 时关闭返回的通道。
+// watchSignals 在第一次收到 SIGINT 或 SIGTERM 时关闭返回的通道；之后再收到 SIGINT
+// 立即以退出码 130 退出，再收到 SIGTERM 不处理（已经在收尾）。
 // SIGPIPE 不注册，保持 Go 的默认行为：写标准输出遇到 EPIPE 时进程被 SIGPIPE 终止。
 func watchSignals() <-chan struct{} {
 	sigs := make(chan os.Signal, 2)
@@ -142,6 +143,11 @@ func watchSignals() <-chan struct{} {
 	go func() {
 		<-sigs
 		close(stop)
+		for sig := range sigs {
+			if sig == syscall.SIGINT {
+				os.Exit(130)
+			}
+		}
 	}()
 	return stop
 }

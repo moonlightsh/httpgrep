@@ -530,3 +530,17 @@ func TestSignalEndsInFlight(t *testing.T) {
 		})
 	}
 }
+
+// 第二次 SIGINT 立即退出，退出码 130，不再输出在途交互。
+func TestSecondSIGINTExits130(t *testing.T) {
+	p := startSlow(t)
+	for range 2 {
+		if err := p.cmd.Process.Signal(syscall.SIGINT); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if code := p.waitExit(t, 5*time.Second); code != 130 || p.stdout.String() != "" {
+		t.Fatalf("code %d, stdout %q; want 130 and no output", code, p.stdout.String())
+	}
+}
