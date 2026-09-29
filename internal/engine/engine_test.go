@@ -375,3 +375,21 @@ func TestConnectionClosed(t *testing.T) {
 		})
 	}
 }
+
+// 只有客户端发了 FIN，之后服务端才回响应：complete。
+func TestClientFinThenResponse(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+		c.ClientFin(ms(1))
+		c.ServerSend(ms(4), []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+		c.ServerFin(ms(5))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 4.0ms\n"+
+		"GET /TOKEN HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok\n")
+	if st.Complete != 1 || st.NoResponseClosed != 0 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
