@@ -283,3 +283,99 @@ func ipv6Packet(upper []byte) []byte {
 	copy(b[40:], upper)
 	return b
 }
+
+// ---- 行为 6：RAW IP ----
+
+func TestRawIP(t *testing.T) {
+	tcp := tcpSegment(1, 2, 3, 4, 0x10, nil, []byte("raw"))
+	ip4 := ipv4Packet(addr4(9, 9, 9, 9), addr4(8, 8, 8, 8), 0, nil, tcp)
+	ip6 := ipv6Packet(tcpSegment(3, 4, 5, 6, 0x10, nil, []byte("v6")))
+
+	for _, lt := range []pcap.LinkType{101, 12, 14} {
+		var seg decode.Segment
+		if got := decode.Decode(lt, ip4, len(ip4), &seg); got != decode.OK {
+			t.Errorf("RAW(%d) v4 Decode = %v, want OK", lt, got)
+			continue
+		}
+		if string(seg.Payload) != "raw" {
+			t.Errorf("RAW(%d) payload = %q", lt, seg.Payload)
+		}
+	}
+	var seg decode.Segment
+	if got := decode.Decode(pcap.LinkRaw, ip6, len(ip6), &seg); got != decode.OK {
+		t.Fatalf("RAW v6 Decode = %v, want OK", got)
+	}
+	if string(seg.Payload) != "v6" {
+		t.Errorf("RAW v6 payload = %q", seg.Payload)
+	}
+}
+
+// ---- 行为 7：IP 选项与 TCP 选项 ----
+
+func TestOptions(t *testing.T) {
+	// IP 选项 4 字节（IHL=6），TCP 选项 4 字节（数据偏移=6）
+	ipOpts := []byte{0x01, 0x01, 0x01, 0x01} // NOP
+	tcpOpts := []byte{0x01, 0x01, 0x01, 0x01}
+	tcp := tcpSegment(1000, 2000, 9, 10, 0x18, tcpOpts, []byte("data!"))
+	ip := ipv4Packet(addr4(1, 2, 3, 4), addr4(5, 6, 7, 8), 0, ipOpts, tcp)
+	frame := ethernet(0x0800, ip)
+
+	var seg decode.Segment
+	if got := decode.Decode(pcap.LinkEthernet, frame, len(frame), &seg); got != decode.OK {
+		t.Fatalf("Decode = %v, want OK", got)
+	}
+	if seg.Src.Port() != 1000 || seg.Dst.Port() != 2000 {
+		t.Errorf("ports = %d -> %d, want 1000 -> 2000", seg.Src.Port(), seg.Dst.Port())
+	}
+	if string(seg.Payload) != "data!" {
+		t.Errorf("Payload = %q, want %q", seg.Payload, "data!")
+	}
+}
+
+// ---- 行为 8：IPv6 扩展头 ----
+
+// ipv6ExtPacket 拼带一个扩展头的 IPv6 包。hdrlenUnits 是扩展头 Hdr Ext Len
+// 字段的取值（不含前 8 字节的单位数），upper 紧跟在扩展头之后。
+func ipv6ExtPacket(next byte, hdrlenUnits int, upper []byte) []byte {
+	extTotal := 8 + hdrlenUnits*8
+	b := make([]byte, 40+extTotal+len(upper))
+	b[0] = 0x60
+	binary.BigEndian.PutUint16(b[4:6], uint16(extTotal+len(upper)))
+	b[6] = next
+	b[40] = 6 // 扩展头的下一个头是 TCP
+	b[41] = byte(hdrlenUnits)
+	copy(b[8:], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1})
+	copy(b[24:], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2})
+	copy(b[40+extTotal:], upper)
+	return b
+}
+
+func TestIPv6ExtHeaders(t *testing.T) {
+	tcp := tcpSegment(1, 2, 3, 4, 0x10, nil, []byte("ext"))
+
+	// 逐跳（0）、路由（43）、目的选项（60）各 16 字节（Hdrlen=1），都能跳过
+	for _, tc := range []struct {
+		name string
+		next byte
+	}{
+		{"hopopt", 0}, {"routing", 43}, {"dstopt", 60},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			frame := ipv6ExtPacket(tc.next, 1, tcp)
+			var seg decode.Segment
+			if got := decode.Decode(pcap.LinkRaw, frame, len(frame), &seg); got != decode.OK {
+				t.Fatalf("Decode = %v, want OK", got)
+			}
+			if string(seg.Payload) != "ext" {
+				t.Errorf("Payload = %q, want %q", seg.Payload, "ext")
+			}
+		})
+	}
+
+	// 分片头（44）返回 Fragment
+	frag := ipv6ExtPacket(44, 1, tcp)
+	var seg decode.Segment
+	if got := decode.Decode(pcap.LinkRaw, frag, len(frag), &seg); got != decode.Fragment {
+		t.Errorf("分片头 Decode = %v, want Fragment", got)
+	}
+}

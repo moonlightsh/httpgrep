@@ -139,7 +139,7 @@ func decodeIPv4(ip []byte, seg *Segment) Result {
 	if total == 0 {
 		return Malformed // TSO 推算稍后实现
 	}
-	return decodeTCP(ip, hl, total, seg)
+	return decodeTCP(ip, true, hl, total, seg)
 }
 
 // decodeIPv6 解码 IPv6 包，跳过逐跳选项、路由、目的选项扩展头。
@@ -154,7 +154,7 @@ func decodeIPv6(ip []byte, origLen int, seg *Segment) Result {
 			return Malformed
 		}
 		next = ip[hl]
-		hl += 8 + int(ip[hl+1])
+		hl += 8 + int(ip[hl+1])*8
 		if len(ip) < hl {
 			return Malformed
 		}
@@ -169,7 +169,7 @@ func decodeIPv6(ip []byte, origLen int, seg *Segment) Result {
 	if plen == 0 {
 		return Malformed // origLen 推算稍后实现
 	}
-	return decodeTCP(ip, hl, hl+plen, seg)
+	return decodeTCP(ip, false, hl, hl+plen, seg)
 }
 
 // addrPortFrom4 用 4 字节 IPv4 地址和端口拼 AddrPort，不分配内存。
@@ -188,7 +188,7 @@ func addrPortFrom16(addr, port []byte) netip.AddrPort {
 
 // decodeTCP 从 ip[hl:] 解码 TCP 头；total 是 IP 报文总长。
 // 返回的 Payload 引用 ip 内部，被 snaplen 截断时 Missing 记缺失字节数。
-func decodeTCP(ip []byte, hl, total int, seg *Segment) Result {
+func decodeTCP(ip []byte, v4 bool, hl, total int, seg *Segment) Result {
 	if total < hl || len(ip) < hl+20 {
 		return Malformed
 	}
@@ -197,8 +197,13 @@ func decodeTCP(ip []byte, hl, total int, seg *Segment) Result {
 	if off < 20 || len(tcp) < off {
 		return Malformed
 	}
-	seg.Src = addrPortFrom4(ip[12:16], tcp[0:2])
-	seg.Dst = addrPortFrom4(ip[16:20], tcp[2:4])
+	if v4 {
+		seg.Src = addrPortFrom4(ip[12:16], tcp[0:2])
+		seg.Dst = addrPortFrom4(ip[16:20], tcp[2:4])
+	} else {
+		seg.Src = addrPortFrom16(ip[8:24], tcp[0:2])
+		seg.Dst = addrPortFrom16(ip[24:40], tcp[2:4])
+	}
 	seg.Seq = binary.BigEndian.Uint32(tcp[4:8])
 	seg.Ack = binary.BigEndian.Uint32(tcp[8:12])
 	seg.Flags = Flags(tcp[13])
