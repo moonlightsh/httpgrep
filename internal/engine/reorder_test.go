@@ -85,6 +85,10 @@ func TestRetransmitAndReorderSameOutput(t *testing.T) {
 			}
 		}
 	}
+	// 颠倒不增减记录，重传共 3 次：messy 要比 clean 多 3 条记录，否则上面的下标已经对不上样本。
+	if n := len(records(t, messy)); n != len(clean)+3 {
+		t.Fatalf("messy has %d records, want %d", n, len(clean)+3)
+	}
 	cfg := engine.Config{Matcher: matcher(t, "TOKEN")}
 	want, _ := replay(t, cfg, build)
 	check(t, want, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 4.0ms\n"+

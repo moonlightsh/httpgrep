@@ -27,6 +27,8 @@ type conn struct {
 	// orphanOff 是角色未知时每个解析器最近一条 Orphan 消息的起始偏移，下标同 probes，-1 表示没有。
 	// 同一方向的两个解析器都在同一偏移开始 Orphan 消息，这些字节才确实不属于任何消息，只计一次；
 	// 只有一个解析器认为是 Orphan 的（比如请求解析器看到状态行）不计。
+	// 已知的少计：定角色之前某方向只有一个解析器开了 Orphan，或者两个解析器的 Orphan 起始偏移
+	// 错开时，这些字节不计入 Orphans。只影响统计，不影响输出。
 	orphanOff [2][2]int64
 	// finSide 记下角色未知时已经按序结束的方向，定角色时据此设置 srvClosed。
 	finSide [2]bool
@@ -259,6 +261,7 @@ func (c *conn) probeFeed(side tcp.Side, off int64, b []byte, peerAck int64, ts t
 }
 
 // Gap 实现 tcp.Handler。
+// Gaps 和 GapBytes 按 TCP 层认定的缺口计数，非 HTTP 连接和隧道里的缺口也算在内。
 func (c *conn) Gap(side tcp.Side, off, n int64, ts time.Time) {
 	c.e.stats.Gaps++
 	c.e.stats.GapBytes += n
@@ -279,6 +282,7 @@ func (c *conn) Gap(side tcp.Side, off, n int64, ts time.Time) {
 // Fin 实现 tcp.Handler：这个方向的流按序结束。
 // 服务端 FIN 时，读到关闭为止的响应算收完。
 func (c *conn) Fin(side tcp.Side, ts time.Time) {
+	c.now = ts
 	if !c.known {
 		// 定角色之前，这个方向的两个解析器都只有 Orphan 消息，结束它们不产生交互。
 		c.finSide[side] = true
@@ -286,7 +290,6 @@ func (c *conn) Fin(side tcp.Side, ts time.Time) {
 		c.probes[side][http1.Response].p.Close(true, ts)
 		return
 	}
-	c.now = ts
 	if side == c.client {
 		// 只有客户端 FIN 时照常等服务端，它还可能回响应。
 		if c.held {

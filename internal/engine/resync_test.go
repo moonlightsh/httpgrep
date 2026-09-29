@@ -317,7 +317,7 @@ func TestEncodedBodyGapIsBinary(t *testing.T) {
 		"GET /TOKEN HTTP/1.1\r\n\r\n"+
 		"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 10\r\n\r\n"+
 		"[binary body omitted: gzip, 0 B]\n")
-	if st.Incomplete != 1 || st.GapBytes != 10 {
+	if st.Incomplete != 1 || st.Gaps != 1 || st.GapBytes != 10 || st.Matched != 1 {
 		t.Fatalf("stats: %+v", st)
 	}
 }
@@ -346,5 +346,22 @@ func TestGapAfterDroppedOrphan(t *testing.T) {
 		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nr2\n")
 	if st.Exchanges != 2 || st.Incomplete != 1 || st.Complete != 1 || st.Orphans != 1 || st.Gaps != 1 || st.GapBytes != 40 {
 		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 交互结束时它缓存的字节从计量里减掉：同一连接上顺序进行的 3 个 keep-alive 交互，
+// 峰值是单个交互缓存的字节数，不是 3 倍。每个交互缓存请求 19 字节
+// （"GET /1 HTTP/1.1\r\n\r\n"）加响应 41 字节（17+19+2 字节的头部和 3 字节 body），共 60 字节。
+func TestBufferedReleasedOnFinish(t *testing.T) {
+	_, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		for i, body := range []string{"one", "two", "six"} {
+			c.ClientSend(ms(float64(10*i)), []byte("GET /"+string(rune('1'+i))+" HTTP/1.1\r\n\r\n"))
+			c.ServerSend(ms(float64(10*i+1)), []byte("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n"+body))
+		}
+	})
+	if st.Complete != 3 || st.PeakBuffered != 60 {
+		t.Fatalf("Complete %d PeakBuffered %d, want 3 60", st.Complete, st.PeakBuffered)
 	}
 }
