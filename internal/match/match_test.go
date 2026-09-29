@@ -213,6 +213,29 @@ func TestHighlightRegex(t *testing.T) {
 
 }
 
+// 正则 Highlight 按 leftmost-longest 取区间（与 grep --color 一致）：
+// 前面的分支能匹配空串或较短的串时，不能遮住后面分支的真实命中。
+func TestHighlightRegexLeftmostLongest(t *testing.T) {
+	tests := []struct {
+		patterns []string
+		line     string
+		want     [][2]int
+	}{
+		{[]string{`x*`, `\d+`}, "a12b", [][2]int{{1, 3}}},
+		{[]string{`a`, `ab`}, "ab", [][2]int{{0, 2}}},
+		{[]string{`a|ab`}, "xab", [][2]int{{1, 3}}},
+	}
+	for _, tt := range tests {
+		m, err := match.Compile(tt.patterns, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := m.Highlight([]byte(tt.line)); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q on %q: got %v want %v", tt.patterns, tt.line, got, tt.want)
+		}
+	}
+}
+
 // 正则 c$ 命中 abc\r\n（\r 去掉后 c 在行尾）。
 func TestTrailingCRRegex(t *testing.T) {
 	m, _ := match.Compile([]string{`c$`}, true)
@@ -602,6 +625,38 @@ func TestSlowPathNoUnboundedBuffer(t *testing.T) {
 	// 阈值取 64 MiB 区分两者。
 	if grew := int64(after.TotalAlloc) - int64(before.TotalAlloc); grew > 64*miB {
 		t.Fatalf("\\r-pattern must not buffer past 8 MiB, allocated %d bytes", grew)
+	}
+}
+
+// 行缓存到上限后，超出的字节不应先拷进缓存再截断：
+// 既不能为它们扩容，也不能为超过上限的单块整块分配。
+func TestLineBufferNoCopyPastCap(t *testing.T) {
+	const miB = 1 << 20
+	allocated := func(f func()) int64 {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		f()
+		runtime.ReadMemStats(&after)
+		return int64(after.TotalAlloc) - int64(before.TotalAlloc)
+	}
+	m, _ := match.Compile([]string{"never-here"}, true)
+
+	// 缓存为空时写入 16 MiB 的未完成行：只应分配约 8 MiB 的缓存。
+	big := make([]byte, 16*miB)
+	s := m.NewScanner()
+	if grew := allocated(func() { s.Write(big) }); grew > 10*miB {
+		t.Fatalf("holdLine allocated %d bytes for a 16 MiB chunk, want about 8 MiB", grew)
+	}
+
+	// 缓存已满后，再来以 \n 结束的 4 MiB 块：不应再分配。
+	tail := make([]byte, 4*miB+1)
+	tail[len(tail)-1] = '\n'
+	if grew := allocated(func() { s.Write(tail) }); grew > miB {
+		t.Fatalf("full buffer grew by %d bytes on a line-ending chunk, want none", grew)
+	}
+	if s.Matched() {
+		t.Fatal("unexpected match")
 	}
 }
 

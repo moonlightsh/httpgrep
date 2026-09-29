@@ -17,6 +17,7 @@ const lineBufCap = 8 << 20
 type Matcher struct {
 	patterns [][]byte       // 字面关键词（不含空串）
 	re       *regexp.Regexp // 正则模式：合并编译后的行匹配
+	hl       *regexp.Regexp // 正则模式：re 的 leftmost-longest 版本，只给 Highlight 用
 	anyEmpty bool           // 某个关键词是空串（匹配所有行）
 	fast     bool           // 字面模式且关键词都不含 \r：走快速路径
 	maxLen   int            // 最长关键词的长度（快速路径用）
@@ -24,6 +25,8 @@ type Matcher struct {
 
 // Compile 编译关键词。patterns 已经按换行拆好；regex 为真时按 RE2 解释。
 // 多个正则合并成 (?:a)|(?:b) 编译；正则不合法时返回的错误里包含该关键词。
+// 关键词里有空串时匹配任何一行：Break 等同于写入 \n，所以即使没写入任何数据，
+// 调用 Break 之后 Matched 也为真。
 func Compile(patterns []string, regex bool) (*Matcher, error) {
 	for _, p := range patterns {
 		if strings.ContainsRune(p, '\n') {
@@ -51,6 +54,12 @@ func Compile(patterns []string, regex bool) (*Matcher, error) {
 				return nil, &CompileError{Pattern: joined, Err: err.Error()}
 			}
 			m.re = re
+			// Highlight 用 leftmost-longest，与 grep --color 一致：否则排在前面、
+			// 能匹配空串或较短串的分支会遮住后面分支的命中（如 x*|\d+ 作用于 a12b）。
+			// 命中判断仍用 re：是否命中与匹配语义无关，leftmost-first 更快。
+			hl := regexp.MustCompile(joined) // 刚刚编译成功过，不会 panic
+			hl.Longest()
+			m.hl = hl
 		}
 		return m, nil
 	}
@@ -86,10 +95,11 @@ func (e *CompileError) Error() string {
 
 // Highlight 返回一行里所有命中的 [起, 止) 区间，按起点排序、互不重叠。
 // line 不含 \n；行尾的 \r 由调用方去掉。
+// 正则模式按 leftmost-longest 取区间，丢弃长度为 0 的区间。
 func (m *Matcher) Highlight(line []byte) [][2]int {
-	if m.re != nil {
+	if m.hl != nil {
 		var out [][2]int
-		for _, loc := range m.re.FindAllIndex(line, -1) {
+		for _, loc := range m.hl.FindAllIndex(line, -1) {
 			if loc[1] > loc[0] {
 				out = append(out, [2]int{loc[0], loc[1]})
 			}
@@ -128,6 +138,7 @@ func (m *Matcher) NewScanner() *Scanner {
 }
 
 // Scanner 流式扫描文本，按 \n 分行后逐行匹配。
+// 必须通过 Matcher.NewScanner 创建，零值不可用（调用方法会 panic）。
 type Scanner struct {
 	m        *Matcher
 	matched  bool
@@ -158,7 +169,7 @@ func (s *Scanner) Write(b []byte) {
 	for len(b) > 0 {
 		i := bytes.IndexByte(b, '\n')
 		if i < 0 {
-			s.holdLine(b)
+			s.appendCapped(b)
 			return
 		}
 		if len(s.buf) == 0 {
@@ -169,10 +180,7 @@ func (s *Scanner) Write(b []byte) {
 			}
 			s.processLine(line)
 		} else {
-			s.buf = append(s.buf, b[:i]...)
-			if len(s.buf) > lineBufCap {
-				s.buf = s.buf[:lineBufCap]
-			}
+			s.appendCapped(b[:i])
 			s.processLine(s.buf)
 			s.buf = s.buf[:0]
 		}
@@ -180,15 +188,13 @@ func (s *Scanner) Write(b []byte) {
 	}
 }
 
-// holdLine 缓存没写完的行，上限 lineBufCap，超出后新到的字节不参与匹配。
-func (s *Scanner) holdLine(b []byte) {
-	if len(s.buf) >= lineBufCap {
-		return // 已到上限，超出的部分不参与匹配
+// appendCapped 把 b 追加到没写完的行的缓存，上限 lineBufCap：
+// 只追加上限内的部分，超出的字节不参与匹配，既不拷贝也不为它们扩容。
+func (s *Scanner) appendCapped(b []byte) {
+	if room := lineBufCap - len(s.buf); len(b) > room {
+		b = b[:room]
 	}
 	s.buf = append(s.buf, b...)
-	if len(s.buf) > lineBufCap {
-		s.buf = s.buf[:lineBufCap]
-	}
 }
 
 // fastScan 快速路径：对整块数据直接扫描，不按行切分。

@@ -326,6 +326,17 @@ func TestBinaryBodyOmitted(t *testing.T) {
 			want: "[binary body omitted: 100 B]\njunk\r\n[gap: 9 bytes missing]\ntail\n",
 		},
 		{
+			// 带 Content-Encoding 即二进制：没有任何 body 类 Piece（比如空 body）也写占位行
+			name: "没有 body 类 Piece 仍写占位",
+			msg: output.Message{
+				Binary: true, ContentEncoding: "gzip", BodySize: 0,
+				Pieces: []output.Piece{
+					{Kind: output.PieceHead, Data: []byte("HTTP/1.1 204 No Content\r\nContent-Encoding: gzip\r\n\r\n")},
+				},
+			},
+			want: "HTTP/1.1 204 No Content\r\nContent-Encoding: gzip\r\n\r\n[binary body omitted: gzip, 0 B]\n",
+		},
+		{
 			name: "非二进制不动",
 			msg: output.Message{
 				Binary: false, ContentType: "text/plain", BodySize: 100, BodyMatched: true,
@@ -556,6 +567,8 @@ func TestWriteTTYZeroAlloc(t *testing.T) {
 	w := output.NewWriter(io.Discard, output.Options{Location: time.UTC, TTY: true, Highlight: hl})
 	blk := zeroAllocBlock()
 	blk.Messages[0].Pieces = append([]output.Piece{{Data: []byte("hit \x01\xc2\x85 more hit\r\n")}}, blk.Messages[0].Pieces...)
+	// 占位行里的类型也要转义：超过 32 字节、含多字节 UTF-8 和控制字符，转义路径同样不应分配
+	blk.Messages[1].ContentType = "application/vnd.example.long-type+json; 中文\x1b"
 	if err := w.Write(blk); err != nil { // 预热
 		t.Fatal(err)
 	}
@@ -598,20 +611,42 @@ func BenchmarkWriteTTY(b *testing.B) {
 
 func TestTTYBinaryPlaceholder(t *testing.T) {
 	// TTY 模式：占位行黄色；头部内容先按行写出。
-	b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
-		Messages: []output.Message{{
-			Binary: true, ContentType: "application/json", BodySize: 100,
-			Pieces: []output.Piece{
-				{Kind: output.PieceHead, Data: []byte("HTTP/1.1 200 OK\r\n\r\n")},
-				{Kind: output.PieceBody, Data: []byte("\x00\x01")},
-			},
-		}}}
-	got := string(render(t, output.Options{Location: tz, TTY: true}, b))
-	want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
-		"HTTP/1.1 200 OK\r\n\r\n" +
-		"\x1b[33m[binary body omitted: application/json, 100 B]\x1b[m\n"
-	if got != want {
-		t.Errorf("TTY 二进制占位不正确\n得到: %q\n期望: %q", got, want)
+	// 编码和类型来自线上头部，占位行里要和 Piece 内容一样转义，防止终端控制序列注入。
+	tests := []struct {
+		name     string
+		ctype    string
+		encoding string
+		want     string
+	}{
+		{
+			name:  "普通类型",
+			ctype: "application/json",
+			want:  "\x1b[33m[binary body omitted: application/json, 100 B]\x1b[m\n",
+		},
+		{
+			name:     "类型和编码里的控制字符被转义",
+			ctype:    "x\x1b]0;pwn\x07",
+			encoding: "gz\x1b[2J\xc2\x9b",
+			want:     "\x1b[33m[binary body omitted: gz\\x1b[2J\\xc2\\x9b, x\\x1b]0;pwn\\x07, 100 B]\x1b[m\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+				Messages: []output.Message{{
+					Binary: true, ContentType: tt.ctype, ContentEncoding: tt.encoding, BodySize: 100,
+					Pieces: []output.Piece{
+						{Kind: output.PieceHead, Data: []byte("HTTP/1.1 200 OK\r\n\r\n")},
+						{Kind: output.PieceBody, Data: []byte("\x00\x01")},
+					},
+				}}}
+			got := string(render(t, output.Options{Location: tz, TTY: true}, b))
+			want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
+				"HTTP/1.1 200 OK\r\n\r\n" + tt.want
+			if got != want {
+				t.Errorf("TTY 二进制占位不正确\n得到: %q\n期望: %q", got, want)
+			}
+		})
 	}
 }
 
