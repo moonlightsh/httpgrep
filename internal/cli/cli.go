@@ -155,25 +155,20 @@ func Parse(args []string) (Options, error) {
 			// 短选项串，可合并，取值时剩余部分或下一个参数充当选项值。
 			for j := 1; j < len(arg); j++ {
 				c := arg[j]
-				rest := arg[j+1:]
 				var err error
 				switch c {
 				case 'e':
-					if rest != "" {
-						opts.Patterns = append(opts.Patterns, splitLines(rest)...)
-					} else {
+					rest := arg[j+1:]
+					if rest == "" {
 						i, rest, err = takeArg(args, i, "-e")
 						if err != nil {
 							return opts, err
 						}
-						opts.Patterns = append(opts.Patterns, splitLines(rest)...)
 					}
+					opts.Patterns = append(opts.Patterns, splitLines(rest)...)
 					hasE = true
 					j = len(arg) // 选项值之后的字符不再当选项
 				case 'E':
-					if rest != "" {
-						// 合并串里 e 之后的剩余部分仍当选项处理
-					}
 					opts.Regex = true
 				default:
 					return opts, &Error{"unknown option: -" + string(c)}
