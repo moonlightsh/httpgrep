@@ -46,9 +46,12 @@ type batch struct {
 	dropped, droppedMatched atomic.Int64
 }
 
-// reset 清空批次以便复用，保留已分配的容量。
+// reset 清空批次以便复用，保留已分配的容量；被单条大记录撑大的缓冲区换回 batchSize。
 func (b *batch) reset() {
 	b.buf = b.buf[:0]
+	if cap(b.buf) > batchSize {
+		b.buf = make([]byte, 0, batchSize)
+	}
 	b.recs = b.recs[:0]
 	b.err = nil
 	b.dropped.Store(0)
