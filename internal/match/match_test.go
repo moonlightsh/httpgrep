@@ -516,28 +516,36 @@ func TestSlowPathZeroAllocPerLine(t *testing.T) {
 }
 
 // 快速路径 Write+Break 每轮零分配；正则路径 Write+Break 同样。
+// 数据不含关键词，确保每轮都真的走到 fastTail 更新和 Break，而不是命中后的提前返回。
 func TestZeroAllocPerBreakCycle(t *testing.T) {
-	m, _ := match.Compile([]string{"zz"}, false)
+	m, _ := match.Compile([]string{"keyword"}, false) // maxLen=7，fastTail 候选 6 字节
 	s := m.NewScanner()
-	chunk := []byte("some line without zz\n")
+	chunk := []byte("some line without kw\n")
 	s.Write(chunk) // 预热 fastTail
 	s.Break()
 	allocs := testing.AllocsPerRun(100, func() {
 		s.Write(chunk)
 		s.Break()
 	})
+	if s.Matched() {
+		t.Fatal("test data must not match, otherwise the early return is measured")
+	}
 	if allocs != 0 {
 		t.Fatalf("fast path Write+Break must not allocate, got %v allocs", allocs)
 	}
 
-	mr, _ := match.Compile([]string{"zz"}, true)
+	mr, _ := match.Compile([]string{"keyword"}, true)
 	sr := mr.NewScanner()
-	sr.Write(chunk)
+	partial := []byte("some line without kw") // 不以 \n 结束，Break 处理缓存的行
+	sr.Write(partial)
 	sr.Break()
 	allocsR := testing.AllocsPerRun(100, func() {
-		sr.Write(chunk)
+		sr.Write(partial)
 		sr.Break()
 	})
+	if sr.Matched() {
+		t.Fatal("regex test data must not match")
+	}
 	if allocsR != 0 {
 		t.Fatalf("regex Write+Break must not allocate, got %v allocs", allocsR)
 	}
@@ -545,9 +553,9 @@ func TestZeroAllocPerBreakCycle(t *testing.T) {
 
 // Write+Break 和 Reset 循环零内存增长（含 tiny 分配，用 TotalAlloc 观察）。
 func TestBreakResetNoMemoryGrowth(t *testing.T) {
-	m, _ := match.Compile([]string{"keyword"}, false) // maxLen=7，fastTail 候选 7 字节
+	m, _ := match.Compile([]string{"keyword"}, false) // maxLen=7，fastTail 候选 6 字节
 	s := m.NewScanner()
-	chunk := []byte("some line without keyword\n")
+	chunk := []byte("some line without kw\n")
 	s.Write(chunk)
 	s.Break()
 	runtime.GC()
@@ -560,6 +568,9 @@ func TestBreakResetNoMemoryGrowth(t *testing.T) {
 	}
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
+	if s.Matched() {
+		t.Fatal("test data must not match, otherwise the early return is measured")
+	}
 	if grew := after.TotalAlloc - before.TotalAlloc; grew != 0 {
 		t.Fatalf("Write/Break/Reset cycle must not allocate anything, allocated %d bytes", grew)
 	}
