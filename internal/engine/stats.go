@@ -12,6 +12,8 @@ type Stats struct {
 	Connections, MidStream int64 // MidStream 是没看到 SYN 的连接数
 	Exchanges, Matched     int64
 	// 按交互状态计数。一个交互可能同时计入多项；Complete 只计没有任何异常的。
+	// Evicted 是因内存上限丢弃的交互数，EvictedMatched 是其中已经命中的；它们不计入状态和 Matched。
+	// Truncated 按消息计：一个交互的请求和响应都超过 --max-message 时加 2。
 	Complete, NoRequest, Incomplete                    int64
 	NoResponseTimeout, NoResponseClosed, NoResponseEOF int64
 	Late, Evicted, EvictedMatched, Truncated           int64

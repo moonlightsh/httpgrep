@@ -317,7 +317,9 @@ func (x *exchange) head(mi int, h *http1.Head) {
 // Content-Length: 0 和 chunked 的空 body（只有 "0\r\n\r\n"）原样输出，不加占位行。
 // 这几种都不会调用 body（http1 不交付空的 Body），所以判断放在这里、而不是在收到
 // Raw(SecBody) 时，就足够区分。body 里有缺口时也算二进制，由缺口处理负责标记。
-// 超过 MaxMessage 的部分不喂，也不计入 body 大小和二进制判断。
+// 超过 MaxMessage 的部分不喂，也不计入 body 大小和二进制判断：截断后的消息，二进制占位行里的
+// 大小是缓存下来的那部分 body 解码后的大小（比如 10 KB 的 gzip body 在 MaxMessage 为 4 KiB 时
+// 显示约 4.0 KB），占位行之后另有截断标记写明超出的字节数。
 func (x *exchange) body(mi int, b []byte) {
 	m := &x.msgs[mi]
 	n := min(len(b), m.bodyRoom)
