@@ -156,3 +156,9 @@ func TestMatchFromFileExits0(t *testing.T) {
 	p := writeFile(t, twoExchanges(t))
 	want(t, runBin(t, nil, "TOKEN-42", p), block1, "", 0)
 }
+
+// 没有命中：什么都不输出，退出码 1。
+func TestNoMatchExits1(t *testing.T) {
+	p := writeFile(t, twoExchanges(t))
+	want(t, runBin(t, nil, "NOPE", p), "", "", 1)
+}

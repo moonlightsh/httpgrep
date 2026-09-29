@@ -18,6 +18,9 @@ func httpgrep(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	opts, _ := cli.Parse(args)
 	f, _ := os.Open(opts.File)
 	defer f.Close()
-	run.Run(run.Config{Input: f, Stdout: stdout, Stderr: stderr, Opts: opts})
+	matched, _, _ := run.Run(run.Config{Input: f, Stdout: stdout, Stderr: stderr, Opts: opts})
+	if !matched {
+		return 1
+	}
 	return 0
 }
