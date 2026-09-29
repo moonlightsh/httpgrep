@@ -383,7 +383,7 @@ func (c *conn) timeout(x *exchange, at time.Time) {
 	c.rearm(at)
 }
 
-// markLate 在迟到响应的字节到达占位 x 时计数，每个占位只计一次。
+// markLate 在迟到响应的字节或缺口到达占位 x 时计数，每个占位只计一次。
 func (c *conn) markLate(x *exchange) {
 	if !x.late {
 		x.late = true
@@ -617,8 +617,7 @@ func (s *resSink) target(peerAck int64) *exchange {
 func (s *resSink) open(x *exchange, orphan bool) {
 	s.cur = x
 	if x.ghost {
-		// 迟到响应：只解析长度，其余事件忽略。
-		s.c.markLate(x)
+		// 迟到响应：只解析长度，其余事件忽略，收到字节时计数（见 resSink.Raw）。
 		return
 	}
 	x.hasRes = true
@@ -629,8 +628,12 @@ func (s *resSink) open(x *exchange, orphan bool) {
 	x.resMsg = x.addMessage(dirRes)
 }
 
+// Raw 实现 http1.Sink。占位上的字节是迟到响应（整个响应迟到，或者超时时收到一半的响应
+// 剩下的部分迟到），只计数。
 func (s *resSink) Raw(sec http1.Section, b []byte) {
-	if x := s.cur; x != nil && !x.ghost {
+	if x := s.cur; x != nil && x.ghost {
+		s.c.markLate(x)
+	} else if x != nil {
 		x.resLast = s.c.now
 		x.touch(x.resLast)
 		x.raw(x.resMsg, sec, b)
@@ -688,9 +691,9 @@ func (s *resSink) Body(b []byte) {
 // 紧跟着的缺口也很可能早于 R，但缺口没有 PeerAck，没法校验，照样归给 R：R 标为不完整，
 // R 真正的响应随后变成缺请求。要改进，得由 tcp 层提供缺口之后第一个包的 ACK。
 //
-// 这里假设 cur 为 nil 就说明解析器里开着的是被丢弃的 Orphan 消息。E2 里成立：交互只在
-// 响应已结束或解析器已关闭后才结束。E3 的超时和 E4 的逐出会在响应解析中途结束交互，
-// 届时要用显式标志区分“这条消息的后续事件丢弃”和“被丢弃的 Orphan”，免得旧响应的缺口挂到下一个请求上。
+// 这里假设 cur 为 nil 就说明解析器里开着的是被丢弃的 Orphan 消息。超时在响应解析中途
+// 结束交互时，交互变成占位（ghost）但仍是 cur，这条消息的后续事件（包括缺口）归占位、丢弃，
+// 不会挂到下一个请求上。
 func (s *resSink) Gap(sec http1.Section, n int64) {
 	x := s.cur
 	if x == nil {
@@ -700,6 +703,7 @@ func (s *resSink) Gap(sec http1.Section, n int64) {
 		s.open(x, true)
 	}
 	if x.ghost {
+		s.c.markLate(x)
 		return
 	}
 	x.gap(x.resMsg, sec, n)

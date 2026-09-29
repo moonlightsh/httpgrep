@@ -108,3 +108,31 @@ func TestLateResponse(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 响应收到一半时超时，剩下的部分超时之后才到，中间还有缺口，缺口认定时下一个请求 R2 已经在排队：
+// 这些字节和缺口留给占位，不挂到 R2 上，算一次 Late（响应的一部分迟到也是迟到响应）。
+// R2 在 t=34 排到占位后面，和它自己的响应配对。
+// 缺口在 "ab" 之前，"ab" 进乱序缓存，t=37 乱序超时才认定缺口。
+func TestLateRestOfResponseWithGap(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(1000), []byte("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nTOKEN"))
+		c.ClientSend(ms(34000), []byte("GET /TOKEN-2 HTTP/1.1\r\n\r\n"))
+		c.SkipServer(3)
+		c.ServerSend(ms(35000), []byte("ab"))
+		c.ServerAck(ms(38000))
+		c.ServerSend(ms(40003), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 1000.0ms\n"+
+		"GET /a HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nTOKEN\n"+
+		"--\n"+
+		"2026-09-28 15:30:46.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 6003.0ms\n"+
+		"GET /TOKEN-2 HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 204 No Content\r\n\r\n")
+	if st.Late != 1 || st.Incomplete != 1 || st.Complete != 1 || st.Gaps != 1 || st.GapBytes != 3 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
