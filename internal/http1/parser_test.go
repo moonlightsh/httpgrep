@@ -791,3 +791,44 @@ func TestDesyncLimits(t *testing.T) {
 		})
 	}
 }
+
+func TestScan(t *testing.T) {
+	t.Run("start line only at line start or after gap", func(t *testing.T) {
+		want := []string{
+			"begin off=0", "raw head GET / HTTP/1.1\r\n", "desync 16",
+			"raw unparsed bad\r\nx GET /no HTTP/1.1\r\ngarbage", "gap unparsed 3", "end false",
+			"begin off=51", "raw head GET /2 HTTP/1.1\r\n\r\n", "head GET /2 HTTP/1.1", "end true",
+		}
+		// 已经失步时再遇到缺口，不再报告 Desync。
+		checkAllChunkings(t, http1.Request, http1.Options{}, want,
+			data("GET / HTTP/1.1\r\nbad\r\nx GET /no HTTP/1.1\r\ngarbage"), gap(3), data("GET /2 HTTP/1.1\r\n\r\n"))
+	})
+	t.Run("response side looks for status lines", func(t *testing.T) {
+		const ok = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+		want := []string{
+			"begin off=0", "raw head HTTP/1.1 200 OK\r\n", "desync 17",
+			"raw unparsed nocolon\r\nGET / HTTP/1.1\r\n xHTTP/1.1 200 OK\r\n", "end false",
+			"begin off=61", "raw head " + ok, "head 200 HTTP/1.1", "end true",
+		}
+		checkAllChunkings(t, http1.Response, http1.Options{}, want,
+			data("HTTP/1.1 200 OK\r\nnocolon\r\nGET / HTTP/1.1\r\n xHTTP/1.1 200 OK\r\n"+ok))
+	})
+}
+
+// Orphan 消息的 Begin 取第一个字节（或缺口）的偏移、时间和 peerAck；缺口没有 peerAck，为 -1。
+func TestOrphanBegin(t *testing.T) {
+	const ok = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n" // 38 字节
+	r := run(http1.Response, http1.Options{}, 0, data(ok).acked(5).at(1), data("junk\r\n").acked(77).at(2))
+	want := []http1.Begin{
+		{Off: 0, TS: t0.Add(time.Second), PeerAck: 5},
+		{Off: 38, TS: t0.Add(2 * time.Second), PeerAck: 77, Orphan: true},
+	}
+	if len(r.begins) != 2 || r.begins[0] != want[0] || r.begins[1] != want[1] {
+		t.Errorf("bytes: begins = %+v, want %+v", r.begins, want)
+	}
+	r = run(http1.Response, http1.Options{}, 0, data(ok).acked(5).at(1), gap(10).at(3))
+	want[1] = http1.Begin{Off: 38, TS: t0.Add(3 * time.Second), PeerAck: -1, Orphan: true}
+	if len(r.begins) != 2 || r.begins[0] != want[0] || r.begins[1] != want[1] {
+		t.Errorf("gap: begins = %+v, want %+v", r.begins, want)
+	}
+}
