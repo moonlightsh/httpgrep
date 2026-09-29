@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"httpgrep/internal/decode"
+	"httpgrep/internal/match"
 	"httpgrep/internal/pcap"
 	"httpgrep/internal/pcapgen"
 	"httpgrep/internal/run"
@@ -411,5 +412,31 @@ func TestRunStats(t *testing.T) {
 				t.Fatalf("stats %+v", st)
 			}
 		})
+	}
+}
+
+// 输出到终端时命中的文字标红：TTY 时把关键词的高亮交给 output。
+func TestRunTTYHighlight(t *testing.T) {
+	in := capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /HIT HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(1), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+	var out bytes.Buffer
+	if _, _, err := run.Run(run.Config{Input: bytes.NewReader(in), Stdout: &out, TTY: true, Opts: opts(t, "HIT")}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "GET /\x1b[01;31mHIT\x1b[m HTTP/1.1") {
+		t.Fatalf("no highlight in %q", out.String())
+	}
+}
+
+// 关键词编译失败时返回 match 的错误，不读输入。
+func TestRunBadPattern(t *testing.T) {
+	_, _, err := run.Run(run.Config{Input: strings.NewReader(""), Stdout: io.Discard, Opts: opts(t, "-E", "(")})
+	var ce *match.CompileError
+	if !errors.As(err, &ce) || ce.Pattern != "(" {
+		t.Fatalf("err = %v, want *match.CompileError for %q", err, "(")
 	}
 }
