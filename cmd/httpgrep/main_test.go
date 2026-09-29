@@ -269,7 +269,7 @@ func TestHelp(t *testing.T) {
 }
 
 // --version 输出 "httpgrep <版本>"；版本默认是 dev，可以用 -ldflags -X main.version 注入；
-// 构建信息里有 vcs.revision 时附在后面。
+// 构建信息里有 vcs.revision 时附在后面，构建时工作区有未提交的改动（git status 有输出）时加 -dirty。
 func TestVersion(t *testing.T) {
 	if os.Getenv("HTTPGREP_BIN") != "" {
 		t.Skip("HTTPGREP_BIN 指向外部程序，版本号未知")
@@ -279,8 +279,16 @@ func TestVersion(t *testing.T) {
 		if err != nil {
 			t.Skip("git 不可用：", err)
 		}
+		status, err := exec.Command("git", "status", "--porcelain").Output()
+		if err != nil {
+			t.Skip("git 不可用：", err)
+		}
+		dirty := ""
+		if len(status) > 0 {
+			dirty = "-dirty"
+		}
 		got := runBin(t, nil, "--version")
-		wantOut := "httpgrep dev (revision " + strings.TrimSpace(string(rev)) + ")\n"
+		wantOut := "httpgrep dev (revision " + strings.TrimSpace(string(rev)) + dirty + ")\n"
 		if got.code != 0 || got.stderr != "" || got.stdout != wantOut {
 			t.Fatalf("code %d, stdout %q, stderr %q; want stdout %q", got.code, got.stdout, got.stderr, wantOut)
 		}
