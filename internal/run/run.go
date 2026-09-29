@@ -139,10 +139,16 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 	// Stop 关闭后最多再读 stopGrace，或者读到输入结束为止；读取协程卡在阻塞的 read 上时不等它。
 	stop := cfg.Stop
 	var grace <-chan time.Time
+	var graceTimer *time.Timer
+	defer func() {
+		if graceTimer != nil {
+			graceTimer.Stop()
+		}
+	}()
 	onStop := func() {
 		stop = nil
-		t := time.NewTimer(stopGrace)
-		grace = t.C
+		graceTimer = time.NewTimer(stopGrace)
+		grace = graceTimer.C
 	}
 	var h header
 	for waiting := true; waiting; {
@@ -151,8 +157,8 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 			waiting = false
 		case <-stop:
 			onStop()
-		case <-grace: // 文件头都没等到：当作没有任何包
-			return false, st, nil
+		case <-grace: // 文件头都没等到：和读到空输入一样，按输入为空出错
+			return false, st, pcap.ErrEmpty
 		}
 	}
 	if h.err != nil {

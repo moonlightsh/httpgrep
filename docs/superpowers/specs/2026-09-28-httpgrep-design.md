@@ -141,7 +141,7 @@ Host: 127.0.0.1:7010
 
 ## 10. 信号与退出
 
-- 第一次 Ctrl-C 或 SIGTERM：先把管道里已经写入的数据读完（最多 1 秒；和 tcpdump 一起按 Ctrl-C 时，tcpdump 退出前写出的最后一批包也能处理到），再结束所有在途交互（状态 no-response(eof) 或 incomplete），输出其中命中的，加了 `--stats` 时打印统计，最后按有没有命中返回 0 或 1。
+- 第一次 Ctrl-C 或 SIGTERM：先把管道里已经写入的数据读完（最多 1 秒；和 tcpdump 一起按 Ctrl-C 时，tcpdump 退出前写出的最后一批包也能处理到），再结束所有在途交互（状态 no-response(eof) 或 incomplete），输出其中命中的，加了 `--stats` 时打印统计，最后按有没有命中返回 0 或 1。1 秒内连 pcap 文件头都没读到时按输入为空处理，退出码 2。
 - 第二次 Ctrl-C：立即退出，退出码 130。
 - 标准输出被关闭（比如接了 `| head`）时直接退出，和 grep 一样由 SIGPIPE 终止。
 - 写标准输出出错（EPIPE 以外，比如 stdout 以只读方式打开）时报错，退出码 2。已知差异：启动时标准输出就没有打开（shell 里写 `>&-`）时，Go 运行时会把 fd 1 重新指向 `/dev/null`，httpgrep 照常运行、按有没有命中返回 0 或 1，而 grep 会报写错误。

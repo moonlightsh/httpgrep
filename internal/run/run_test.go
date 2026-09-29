@@ -233,6 +233,21 @@ func TestRunStopGivesUpBlockedRead(t *testing.T) {
 	}
 }
 
+// Stop 关闭后 1 秒内连文件头都没等到（管道一直没有数据）：按输入为空处理，返回 pcap.ErrEmpty
+// （设计文档第 2 节：输入为空按出错处理，退出码 2）。
+func TestRunStopBeforeHeader(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	stop := make(chan struct{})
+	var out bytes.Buffer
+	ch := goRun(run.Config{Input: pr, Pipe: true, Stop: stop, Stdout: &out, Opts: opts(t, "HIT")})
+	close(stop)
+	r := wait(t, ch, 3*time.Second)
+	if r.err != pcap.ErrEmpty || r.matched || out.Len() != 0 {
+		t.Fatalf("matched %v err %v stdout %q, want false %v and no output", r.matched, r.err, out.String(), pcap.ErrEmpty)
+	}
+}
+
 // Stop 关闭后 1 秒内写入的数据照样处理（连文件头都在 Stop 之后才到）；
 // 读到输入结束就收尾，不等满 1 秒。
 func TestRunStopReadsUntilEOF(t *testing.T) {
