@@ -3,6 +3,7 @@ package pcap_test
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"testing"
 	"testing/iotest"
@@ -189,5 +190,60 @@ func TestLinkTypeLow16Bits(t *testing.T) {
 	}
 	if got := r.LinkType(); got != pcap.LinkLinuxSLL {
 		t.Fatalf("LinkType() = %d, want 113", got)
+	}
+}
+
+// errBoom 模拟底层 reader 的 I/O 故障（比如 stdin 读失败）。
+var errBoom = errors.New("boom")
+
+// 读文件头时底层 reader 报的非 EOF 错误要原样透出，不能归成 ErrNotPcap 等格式错误。
+func TestNewReaderPassesThroughIOError(t *testing.T) {
+	le := binary.LittleEndian
+	tests := []struct {
+		name   string
+		prefix []byte
+	}{
+		{"no bytes", nil},
+		{"10 bytes of header", fileHeader(le, 0xa1b2c3d4, 1)[:10]},
+		{"pcapng magic then error", []byte{0x0a, 0x0d, 0x0d, 0x0a}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := io.MultiReader(bytes.NewReader(tt.prefix), iotest.ErrReader(errBoom))
+			_, err := pcap.NewReader(in)
+			if !errors.Is(err, errBoom) {
+				t.Fatalf("NewReader error = %v, want %v", err, errBoom)
+			}
+		})
+	}
+}
+
+// Next 读记录头或记录数据时遇到非 EOF 错误，要原样透出，不能当成正常结束。
+func TestNextPassesThroughIOError(t *testing.T) {
+	le := binary.LittleEndian
+	rec := recBlock(le, 1, 0, []byte("payload"), 7)
+	tests := []struct {
+		name string
+		tail []byte // 文件头之后、错误之前的字节
+	}{
+		{"before record header", nil},
+		{"inside record header", rec[:9]},
+		{"inside record data", rec[:19]},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := io.MultiReader(
+				bytes.NewReader(fileHeader(le, 0xa1b2c3d4, 1)),
+				bytes.NewReader(tt.tail),
+				iotest.ErrReader(errBoom),
+			)
+			r, err := pcap.NewReader(in)
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+			if _, err := r.Next(); !errors.Is(err, errBoom) {
+				t.Fatalf("Next error = %v, want %v", err, errBoom)
+			}
+		})
 	}
 }
