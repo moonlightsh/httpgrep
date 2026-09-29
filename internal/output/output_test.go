@@ -120,3 +120,60 @@ func TestDurationFormatting(t *testing.T) {
 		})
 	}
 }
+
+// block1 是设计文档第 9 节的样例块（内容按编的样例构造）。
+func sampleBlock() *output.Block {
+	req := "POST /api/device/bind HTTP/1.1\r\nHost: 127.0.0.1:7010\r\nContent-Type: application/json\r\nContent-Length: 38\r\n\r\n{\"sn\":\"490419C6117A0087747906\",\"ch\":1}"
+	resp := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"code\":0,\"msg\":\"ok\"}\r\n0\r\n\r\n"
+	return &output.Block{
+		Time:        time.Unix(1790580612, 345000000),
+		Client:      mustAddr("127.0.0.1:52814"),
+		Server:      mustAddr("127.0.0.1:7010"),
+		Duration:    12000000,
+		HasDuration: true,
+		Messages: []output.Message{
+			{Pieces: []output.Piece{{Kind: output.PieceHead, Data: []byte(req[:49])}, {Kind: output.PieceBody, Data: []byte(req[49:])}}},
+			{Pieces: []output.Piece{{Kind: output.PieceHead, Data: []byte(resp[:67])}, {Kind: output.PieceBody, Data: []byte(resp[67:])}}},
+		},
+	}
+}
+
+func TestDesignDocSample(t *testing.T) {
+	got := string(render(t, output.Options{Location: tz}, sampleBlock()))
+	want := "2026-09-28 15:30:12.345 127.0.0.1:52814 -> 127.0.0.1:7010 complete 12.0ms\n" +
+		"POST /api/device/bind HTTP/1.1\n" +
+		"Host: 127.0.0.1:7010\n" +
+		"Content-Type: application/json\n" +
+		"Content-Length: 38\n" +
+		"\n" +
+		"{\"sn\":\"490419C6117A0087747906\",\"ch\":1}\n" +
+		"HTTP/1.1 200 OK\n" +
+		"Content-Type: application/json\n" +
+		"Transfer-Encoding: chunked\r\n\r\n15\n" +
+		"{\"code\":0,\"msg\":\"ok\"}\n" +
+		"0\n" +
+		"\n"
+	if got != want {
+		t.Errorf("设计文档样例输出不正确\n得到:\n%q\n期望:\n%q", got, want)
+	}
+}
+
+func TestSeparatorAndNoTransform(t *testing.T) {
+	// 三块：第二块前面有 --，第三块前面也有，最后没有。
+	base := output.Status{Incomplete: true}
+	b1 := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"), Status: base,
+		Messages: []output.Message{{Pieces: []output.Piece{{Kind: output.PieceUnparsed, Data: []byte("AAA")}}}}}
+	b2 := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"), Status: base,
+		Messages: []output.Message{{Pieces: []output.Piece{{Kind: output.PieceHead, Data: []byte("BBB")}}}}}
+	b3 := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"), Status: base,
+		Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte("CCC\r\n")}, {Data: []byte("D")}, {Data: []byte("")}}}}}
+	got := string(render(t, output.Options{Location: tz}, b1, b2, b3))
+	want := "1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 incomplete\nAAA\n" +
+		"--\n" +
+		"1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 incomplete\nBBB\n" +
+		"--\n" +
+		"1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 incomplete\nCCC\r\nD\n"
+	if got != want {
+		t.Errorf("-- 分隔与补换行不正确\n得到: %q\n期望: %q", got, want)
+	}
+}
