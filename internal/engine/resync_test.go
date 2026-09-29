@@ -300,3 +300,24 @@ func TestWholeRequestLost(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 带 Content-Encoding 的 body 里有缺口：即使抓到的部分为空，也按二进制输出占位行
+// （解码后的大小不可知，缺口标记一并换成占位行），交互 incomplete。
+// 缺口在 ms3 客户端的纯 ACK 越过时认定，响应随之收完，耗时 3-0=3.0ms。
+func TestEncodedBodyGapIsBinary(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(2), []byte("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 10\r\n\r\n"))
+		c.SkipServer(10)
+		c.ClientAck(ms(3))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 3.0ms\n"+
+		"GET /TOKEN HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 10\r\n\r\n"+
+		"[binary body omitted: gzip, 0 B]\n")
+	if st.Incomplete != 1 || st.GapBytes != 10 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
