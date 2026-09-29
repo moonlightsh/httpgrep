@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -196,4 +197,30 @@ func TestTimeoutUpgradeLateRefusalNotForNext(t *testing.T) {
 	if st.Late != 1 || st.Exchanges != 2 || st.Complete != 1 {
 		t.Fatalf("stats: %+v", st)
 	}
+}
+
+// 一次 Advance 里到期的交互按到期时间的先后输出，不按开始时间：
+// A 在 t=0 开始、t=5 还收到请求的后半，t=35 到期；B 在 t=1 开始，t=31 到期；C 在 t=2 开始，t=32 到期。
+func TestTimeoutOrderByDeadline(t *testing.T) {
+	cli3 := netip.MustParseAddrPort("10.0.0.1:52816")
+	snaps, _, _ := replayTicks(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		a := pcapgen.NewConn(w, cli1, srv)
+		a.Handshake(ms(-1))
+		a.ClientSend(ms(0), []byte("GET /TOKEN-A HTTP/1.1\r\n"))
+		b := pcapgen.NewConn(w, cli2, srv)
+		b.Handshake(ms(500))
+		b.ClientSend(ms(1000), []byte("GET /TOKEN-B HTTP/1.1\r\n\r\n"))
+		c := pcapgen.NewConn(w, cli3, srv)
+		c.Handshake(ms(1500))
+		c.ClientSend(ms(2000), []byte("GET /TOKEN-C HTTP/1.1\r\n\r\n"))
+		a.ClientSend(ms(5000), []byte("\r\n"))
+	}, ms(40000))
+	check(t, snaps[0], "2026-09-28 15:30:13.345 10.0.0.1:52815 -> 10.0.0.2:80 no-response(timeout)\n"+
+		"GET /TOKEN-B HTTP/1.1\r\n\r\n"+
+		"--\n"+
+		"2026-09-28 15:30:14.345 10.0.0.1:52816 -> 10.0.0.2:80 no-response(timeout)\n"+
+		"GET /TOKEN-C HTTP/1.1\r\n\r\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n"+
+		"GET /TOKEN-A HTTP/1.1\r\n\r\n")
 }
