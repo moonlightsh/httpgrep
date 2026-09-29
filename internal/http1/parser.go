@@ -3,6 +3,7 @@ package http1
 import (
 	"bytes"
 	"time"
+	"unsafe"
 )
 
 // 解析状态。
@@ -28,7 +29,7 @@ const (
 	maxChunkLine = 4 << 10  // chunk 长度行的上限
 	maxScanLine  = 8 << 10  // 扫描时起始行候选的上限
 	probeLen     = 24       // 扫描时先看行首这么多字节，明显不是起始行就不缓存
-	maxHold      = 64 << 10 // Upgrade 请求之后最多缓存这么多字节
+	maxHold      = 64 << 10 // Upgrade 请求之后的缓存上限：数据加上每段记录的开销
 	keepLine     = 4 << 10  // 行缓存超过这个容量时，用完就释放
 )
 
@@ -48,6 +49,9 @@ type held struct {
 	ts     time.Time
 	gap    bool
 }
+
+// heldSize 是每段缓存记录计入 maxHold 的字节数。
+const heldSize = int(unsafe.Sizeof(held{}))
 
 // Parser 解析一个方向的 HTTP/1.x 字节流。
 type Parser struct {
@@ -378,10 +382,13 @@ func (p *Parser) Gap(off, n int64, ts time.Time) {
 		return
 	case stHold:
 		if p.dropOff < 0 {
-			if k := len(p.segs) - 1; k >= 0 && p.segs[k].gap {
-				p.segs[k].n += n // 相邻的缺口合并，segs 的长度不超过缓存的字节数加一
-			} else {
+			switch k := len(p.segs) - 1; {
+			case k >= 0 && p.segs[k].gap:
+				p.segs[k].n += n // 相邻的缺口合并
+			case p.holdRoom() >= 0:
 				p.segs = append(p.segs, held{off: off, n: n, ts: ts, gap: true})
+			default:
+				p.dropOff = off // 连一条缺口记录也放不下：从这里开始丢弃
 			}
 		}
 		p.holdEnd, p.holdTS = off+n, ts
@@ -451,19 +458,25 @@ func (p *Parser) lineSection() Section {
 	return SecHead
 }
 
-// holdData 缓存 Upgrade 请求之后的数据，超过 maxHold 的部分丢弃。
+// holdData 缓存 Upgrade 请求之后的数据。
+// 缓存的数据加上每段的记录一起计入 maxHold，放不下的部分丢弃。
 func (p *Parser) holdData(off int64, b []byte, ack int64, ts time.Time) {
 	if p.dropOff < 0 {
-		k := min(maxHold-len(p.hold), len(b))
+		k := min(p.holdRoom(), len(b))
 		if k > 0 {
 			p.hold = append(p.hold, b[:k]...)
 			p.segs = append(p.segs, held{off: off, n: int64(k), ack: ack, ts: ts})
 		}
 		if k < len(b) {
-			p.dropOff = off + int64(k)
+			p.dropOff = off + int64(max(k, 0))
 		}
 	}
 	p.holdEnd, p.holdTS = off+int64(len(b)), ts
+}
+
+// holdRoom 返回再追加一段记录之后，缓存里还能放下多少数据字节；放不下记录时小于等于 0。
+func (p *Parser) holdRoom() int {
+	return maxHold - len(p.hold) - (len(p.segs)+1)*heldSize
 }
 
 // dropHold 丢弃并释放 Upgrade 请求之后的缓存。

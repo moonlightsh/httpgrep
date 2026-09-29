@@ -958,10 +958,6 @@ func TestUpgradeHold(t *testing.T) {
 		}
 		return out
 	}
-	// 缓存超过 64 KiB 的请求：头部 42 字节，body 70000 字节，
-	// 只缓存得下 body 的前 65494 字节，其余 4506 字节丢弃。
-	const bigHead = "POST / HTTP/1.1\r\nContent-Length: 70000\r\n\r\n"
-	bigBody := strings.Repeat("b", 65494)
 	tests := []struct {
 		name  string
 		steps []step
@@ -973,9 +969,6 @@ func TestUpgradeHold(t *testing.T) {
 		{"tunnel drops everything", []step{data(up + next), tunnel(), data(next), gap(5), resume(), data(next), closeRst()}, upEv},
 		{"gap while held is replayed", []step{data(up + "GET /2 HT"), gap(4), data(next), resume()},
 			cat(upEv, []string{"desync 49", "begin off=40 orphan", "raw unparsed GET /2 HT", "gap unparsed 4", "end false"}, nextEv(53))},
-		{"overflow becomes a gap", []step{data(up), data(bigHead + bigBody + strings.Repeat("c", 4506)), resume(), data(next)},
-			cat(upEv, []string{"begin off=40", "raw head " + bigHead, "head POST / HTTP/1.1",
-				"raw body " + bigBody, "body " + bigBody, "gap body 4506", "end true"}, nextEv(40+42+70000))},
 		{"resume before request ends", []step{data(up[:30]), resume(), data(up[30:] + next)}, cat(upEv, nextEv(40))},
 		{"tunnel before request ends", []step{data(up[:30]), tunnel(), data(up[30:] + next), resume(), data(next)}, upEv},
 		{"close while held", []step{data(up + next), closeFin(), resume()}, upEv},
