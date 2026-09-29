@@ -803,3 +803,25 @@ func TestUpgradeReplayedRequestTiming(t *testing.T) {
 		})
 	}
 }
+
+// 服务端 FIN 之后又一个 Upgrade 请求发完：它等不到决定，不再缓存后面的字节，
+// 后面管道化的请求照常解析，发完就以 no-response(closed) 结束，不等到输入结束。
+func TestUpgradeAfterServerFin(t *testing.T) {
+	out, _ := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		a := pcapgen.NewConn(w, cli1, srv)
+		a.Handshake(ms(-1))
+		a.ServerFin(ms(0))
+		a.ClientSend(ms(1), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+		a.ClientSend(ms(2), []byte("GET /TOKEN-A HTTP/1.1\r\n\r\n"))
+		b := pcapgen.NewConn(w, cli2, srv)
+		b.Handshake(ms(5))
+		b.ClientSend(ms(6), []byte("GET /TOKEN-B HTTP/1.1\r\n\r\n"))
+		b.ServerSend(ms(7), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+	check(t, out, "2026-09-28 15:30:12.347 10.0.0.1:52814 -> 10.0.0.2:80 no-response(closed)\n"+
+		"GET /TOKEN-A HTTP/1.1\r\n\r\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.351 10.0.0.1:52815 -> 10.0.0.2:80 complete 1.0ms\n"+
+		"GET /TOKEN-B HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 204 No Content\r\n\r\n")
+}

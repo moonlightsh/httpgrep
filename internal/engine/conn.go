@@ -273,8 +273,17 @@ func (s *reqSink) End(complete bool, ts time.Time) {
 	x.reqDone = true
 	if complete {
 		x.reqLast = ts
-		// 请求解析器在 Upgrade 请求正常结束、还没有决定时开始缓存后面的字节。
-		s.c.held = x.upgrade && !x.decided
+		if x.upgrade && !x.decided {
+			if s.c.srvClosed {
+				// 服务端已经关闭，决定不会再来：现在就按被拒处理。解析器还没结束这条消息，
+				// Resume 只记下决定，随后直接继续解析，不缓存后面的字节。
+				x.decided = true
+				s.c.req.Resume()
+			} else {
+				// 请求解析器在 Upgrade 请求正常结束、还没有决定时开始缓存后面的字节。
+				s.c.held = true
+			}
+		}
 	} else {
 		x.incomplete = true
 	}
