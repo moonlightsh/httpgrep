@@ -1,7 +1,36 @@
 // Package cli 解析 httpgrep 的命令行参数。
 package cli
 
-import "time"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Usage 是英文帮助文本，覆盖设计文档第 2 节的全部选项。
+const Usage = `Usage: httpgrep [OPTION]... PATTERN [FILE]
+       httpgrep [OPTION]... -e PATTERN [-e PATTERN]... [FILE]
+
+Search HTTP conversations in a pcap capture for PATTERN and print the
+matching requests and responses. With no FILE, or when FILE is -, read
+standard input.
+
+Options:
+  -e PATTERN        Pattern to search for; may be given multiple times,
+                    an exchange matches if any pattern matches
+  -E                Interpret all patterns as regular expressions
+  --timeout DUR     Exchange timeout (default 30s)
+  --max-memory SIZE Total limit for buffered data (default 256M)
+  --max-message SIZE Limit for a single request or response (default 8M)
+  --cpus N          Number of CPUs to use (default 1)
+  --stats           Print statistics to stderr before exiting
+  --help            Show this help and exit
+  --version         Show version information and exit
+
+SIZE accepts K, M, G suffixes (powers of 1024). DUR is a Go duration
+such as 30s or 2m. Options may appear before or after PATTERN and FILE;
+arguments after -- are never treated as options.
+`
 
 // Options 是 Parse 的结果。
 type Options struct {
@@ -34,22 +63,127 @@ func Parse(args []string) (Options, error) {
 	}
 	hasE := false
 	var positional []string
-
+	// 第 i 位待处理；一个参数可能既当选项又带值，也可能合并多个短选项。
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
-		case arg == "-e":
-			if i+1 >= len(args) {
-				return opts, &Error{"option requires an argument: -e"}
+		case arg == "--":
+			// -- 之后的参数一律不当选项
+			positional = append(positional, args[i+1:]...)
+			goto done
+		case len(arg) > 2 && arg[0] == '-' && arg[1] == '-':
+			name, val, hasVal := cut(arg[2:], "=")
+			var err error
+			switch name {
+			case "e":
+				if !hasVal {
+					i, val, err = takeArg(args, i, "--e")
+					if err != nil {
+						return opts, err
+					}
+				}
+				opts.Patterns = append(opts.Patterns, splitLines(val)...)
+				hasE = true
+			case "E":
+				if hasVal {
+					return opts, &Error{"option --E does not take an argument"}
+				}
+				opts.Regex = true
+			case "timeout":
+				if !hasVal {
+					i, val, err = takeArg(args, i, "--timeout")
+					if err != nil {
+						return opts, err
+					}
+				}
+				opts.Timeout, err = parseDuration(val)
+				if err != nil {
+					return opts, err
+				}
+			case "max-memory":
+				if !hasVal {
+					i, val, err = takeArg(args, i, "--max-memory")
+					if err != nil {
+						return opts, err
+					}
+				}
+				opts.MaxMemory, err = parseSize(val)
+				if err != nil {
+					return opts, err
+				}
+			case "max-message":
+				if !hasVal {
+					i, val, err = takeArg(args, i, "--max-message")
+					if err != nil {
+						return opts, err
+					}
+				}
+				opts.MaxMessage, err = parseSize(val)
+				if err != nil {
+					return opts, err
+				}
+			case "cpus":
+				if !hasVal {
+					i, val, err = takeArg(args, i, "--cpus")
+					if err != nil {
+						return opts, err
+					}
+				}
+				opts.CPUs, err = parseInt(val)
+				if err != nil {
+					return opts, err
+				}
+			case "stats":
+				if hasVal {
+					return opts, &Error{"option --stats does not take an argument"}
+				}
+				opts.Stats = true
+			case "help":
+				if hasVal {
+					return opts, &Error{"option --help does not take an argument"}
+				}
+				opts.Help = true
+			case "version":
+				if hasVal {
+					return opts, &Error{"option --version does not take an argument"}
+				}
+				opts.Version = true
+			default:
+				return opts, &Error{"unknown option: --" + name}
 			}
-			i++
-			opts.Patterns = append(opts.Patterns, splitLines(args[i])...)
-			hasE = true
+		case len(arg) >= 2 && arg[0] == '-':
+			// 短选项串，可合并，取值时剩余部分或下一个参数充当选项值。
+			for j := 1; j < len(arg); j++ {
+				c := arg[j]
+				rest := arg[j+1:]
+				var err error
+				switch c {
+				case 'e':
+					if rest != "" {
+						opts.Patterns = append(opts.Patterns, splitLines(rest)...)
+					} else {
+						i, rest, err = takeArg(args, i, "-e")
+						if err != nil {
+							return opts, err
+						}
+						opts.Patterns = append(opts.Patterns, splitLines(rest)...)
+					}
+					hasE = true
+					j = len(arg) // 选项值之后的字符不再当选项
+				case 'E':
+					if rest != "" {
+						// 合并串里 e 之后的剩余部分仍当选项处理
+					}
+					opts.Regex = true
+				default:
+					return opts, &Error{"unknown option: -" + string(c)}
+				}
+			}
 		default:
 			positional = append(positional, arg)
 		}
 	}
-
+done:
 	if !hasE {
 		if len(positional) > 0 {
 			opts.Patterns = splitLines(positional[0])
@@ -62,10 +196,29 @@ func Parse(args []string) (Options, error) {
 	if len(positional) == 1 {
 		opts.File = positional[0]
 	}
-	if len(opts.Patterns) == 0 {
+	if !opts.Help && !opts.Version && len(opts.Patterns) == 0 {
 		return opts, &Error{"no pattern given"}
 	}
+	if opts.MaxMessage > opts.MaxMemory {
+		return opts, &Error{"--max-message cannot exceed --max-memory"}
+	}
 	return opts, nil
+}
+
+// takeArg 取选项值：优先用下一个参数。
+func takeArg(args []string, i int, name string) (int, string, error) {
+	if i+1 >= len(args) {
+		return i, "", &Error{"option requires an argument: " + name}
+	}
+	return i + 1, args[i+1], nil
+}
+
+// cut 按 s 里第一个 sep 切开。
+func cut(s, sep string) (before, after string, found bool) {
+	if i := strings.Index(s, sep); i >= 0 {
+		return s[:i], s[i+len(sep):], true
+	}
+	return s, "", false
 }
 
 // splitLines 按换行符把一个关键词拆成多个。
@@ -80,4 +233,46 @@ func splitLines(s string) []string {
 	}
 	out = append(out, s[start:])
 	return out
+}
+
+// parseSize 解析大小：纯数字是字节，可带 K/M/G 后缀（1024 进位）。
+func parseSize(s string) (int64, error) {
+	if s == "" {
+		return 0, &Error{"invalid size: " + s}
+	}
+	mult := int64(1)
+	switch s[len(s)-1] {
+	case 'k', 'K':
+		mult, s = 1024, s[:len(s)-1]
+	case 'm', 'M':
+		mult, s = 1<<20, s[:len(s)-1]
+	case 'g', 'G':
+		mult, s = 1<<30, s[:len(s)-1]
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, &Error{"invalid size: " + s}
+	}
+	if n <= 0 || n > (1<<63-1)/mult {
+		return 0, &Error{"invalid size: " + s}
+	}
+	return n * mult, nil
+}
+
+// parseInt 解析不小于 1 的整数。
+func parseInt(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 {
+		return 0, &Error{"invalid value: " + s}
+	}
+	return n, nil
+}
+
+// parseDuration 解析必须大于 0 的时长。
+func parseDuration(s string) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0, &Error{"invalid duration: " + s}
+	}
+	return d, nil
 }
