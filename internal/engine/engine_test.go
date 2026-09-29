@@ -473,3 +473,25 @@ func TestUpgrade(t *testing.T) {
 		})
 	}
 }
+
+// Finish 时：只有请求没有响应的是 no-response(eof)，响应收到一半的是 incomplete。
+func TestFinishEndsInFlight(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		a := pcapgen.NewConn(w, cli1, srv)
+		a.Handshake(ms(-1))
+		a.ClientSend(ms(0), []byte("GET /TOKEN-A HTTP/1.1\r\n\r\n"))
+		b := pcapgen.NewConn(w, cli2, srv)
+		b.Handshake(ms(1))
+		b.ClientSend(ms(2), []byte("GET /b HTTP/1.1\r\n\r\n"))
+		b.ServerSend(ms(6), []byte("HTTP/1.1 200 OK\r\n\r\nTOKEN-B"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(eof)\n"+
+		"GET /TOKEN-A HTTP/1.1\r\n\r\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.347 10.0.0.1:52815 -> 10.0.0.2:80 incomplete 4.0ms\n"+
+		"GET /b HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\n\r\nTOKEN-B\n")
+	if st.NoResponseEOF != 1 || st.Incomplete != 1 || st.Complete != 0 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
