@@ -25,3 +25,30 @@ func TestExchangeComplete(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 没有命中时不输出，但交互照样计数。
+func TestExchangeNoMatch(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN-42")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nHost: x\r\n\r\n"))
+		c.ServerSend(ms(10), []byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"))
+	})
+	check(t, out, "")
+	if st.Exchanges != 1 || st.Matched != 0 {
+		t.Fatalf("Exchanges %d Matched %d, want 1 0", st.Exchanges, st.Matched)
+	}
+}
+
+// 关键词只在请求头里，也要输出。
+func TestExchangeMatchInRequestHead(t *testing.T) {
+	out, _ := replay(t, engine.Config{Matcher: matcher(t, "TOKEN-42")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nX-Id: TOKEN-42\r\n\r\n"))
+		c.ServerSend(ms(3), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 3.0ms\n"+
+		"GET /a HTTP/1.1\r\nX-Id: TOKEN-42\r\n\r\n"+
+		"HTTP/1.1 204 No Content\r\n\r\n")
+}
