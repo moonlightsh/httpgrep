@@ -474,17 +474,59 @@ func TestSnaplenTruncation(t *testing.T) {
 	ip := ipv4Packet(addr4(1, 1, 1, 1), addr4(2, 2, 2, 2), 0, nil, tcp)
 	full := len(ip) // 20 + 20 + 100 = 140
 
-	captured := ip[:full-70] // 少 70 字节：只剩 30 字节负载
-	var seg decode.Segment
-	if got := decode.Decode(pcap.LinkRaw, captured, full, &seg); got != decode.OK {
-		t.Fatalf("Decode = %v, want OK", got)
-	}
-	if len(seg.Payload) != 30 {
-		t.Errorf("抓到负载 %d 字节, want 30", len(seg.Payload))
-	}
-	if seg.Missing != 70 {
-		t.Errorf("Missing = %d, want 70", seg.Missing)
-	}
+	t.Run("v4/raw", func(t *testing.T) {
+		captured := ip[:full-70] // 少 70 字节：只剩 30 字节负载
+		var seg decode.Segment
+		if got := decode.Decode(pcap.LinkRaw, captured, full, &seg); got != decode.OK {
+			t.Fatalf("Decode = %v, want OK", got)
+		}
+		if len(seg.Payload) != 30 {
+			t.Errorf("抓到负载 %d 字节, want 30", len(seg.Payload))
+		}
+		if seg.Missing != 70 {
+			t.Errorf("Missing = %d, want 70", seg.Missing)
+		}
+	})
+
+	t.Run("v4/ethernet", func(t *testing.T) {
+		frame := ethernet(0x0800, ip)
+		captured := frame[:len(frame)-70]
+		var seg decode.Segment
+		if got := decode.Decode(pcap.LinkEthernet, captured, len(frame), &seg); got != decode.OK {
+			t.Fatalf("Decode = %v, want OK", got)
+		}
+		if len(seg.Payload) != 30 {
+			t.Errorf("抓到负载 %d 字节, want 30", len(seg.Payload))
+		}
+		if seg.Missing != 70 {
+			t.Errorf("Missing = %d, want 70（链路层头不计入缺口）", seg.Missing)
+		}
+	})
+
+	t.Run("v6/raw", func(t *testing.T) {
+		ip6 := ipv6Packet(tcpSegment(5, 6, 7, 8, 0x18, nil, payload))
+		captured := ip6[:len(ip6)-70]
+		var seg decode.Segment
+		if got := decode.Decode(pcap.LinkRaw, captured, len(ip6), &seg); got != decode.OK {
+			t.Fatalf("Decode = %v, want OK", got)
+		}
+		if len(seg.Payload) != 30 {
+			t.Errorf("抓到负载 %d 字节, want 30", len(seg.Payload))
+		}
+		if seg.Missing != 70 {
+			t.Errorf("Missing = %d, want 70", seg.Missing)
+		}
+	})
+
+	t.Run("v4/ethernet/tcp-header-内截断", func(t *testing.T) {
+		frame := ethernet(0x0800, ip)
+		// 截在 TCP 头第 10 字节处：14+20+10
+		captured := frame[:14+20+10]
+		var seg decode.Segment
+		if got := decode.Decode(pcap.LinkEthernet, captured, len(frame), &seg); got != decode.Malformed {
+			t.Errorf("Decode = %v, want Malformed（TCP 头不完整）", got)
+		}
+	})
 }
 
 // ---- 行为 11：总长度 0（TSO）与 IPv6 负载长度 0 ----
