@@ -351,7 +351,8 @@ func (s *resSink) Head(h *http1.Head) {
 			x.decided = true
 			c.held = false
 			c.req.Tunnel()
-			c.closePendingFin()
+			// 推迟的客户端 FIN 不用再补：Tunnel 之后请求解析器已经停下，Close 不会产生事件。
+			c.cliFin = false
 		case x.upgrade && !x.msgs[x.resMsg].interim:
 			// Upgrade 请求得到普通的最终响应：请求方向继续按 HTTP 解析。
 			// 请求还没发完时 Resume 只记下决定，没有可回放的。
