@@ -661,11 +661,44 @@ func TestMalformed(t *testing.T) {
 			ip := ipv4Packet(addr4(1, 1, 1, 1), addr4(2, 2, 2, 2), 0, nil, t)
 			return ethernet(0x0800, ip), 14 + len(ip)
 		}},
+		{"IPv6 基本头不完整", func() ([]byte, int) {
+			return ipv6Packet(tcp)[:39], 39
+		}},
+		{"IPv6 扩展头被截断", func() ([]byte, int) {
+			// 扩展头声称 Hdrlen=1（16 字节），但包在扩展头中间截断
+			return ipv6ExtPacket(0, 1, tcp)[:40+10], 40 + 10
+		}},
+		{"IPv6 负载长度短于 TCP 头", func() ([]byte, int) {
+			ip6 := ipv6Packet(tcp)
+			binary.BigEndian.PutUint16(ip6[4:6], 10) // 20 字节 TCP 头都盖不住
+			return ip6, len(ip6)
+		}},
+		{"NULL 头不完整", func() ([]byte, int) {
+			return []byte{0, 0, 0}, 3 // 连 4 字节协议族都放不下
+		}},
+		{"SLL 头不完整", func() ([]byte, int) {
+			return make([]byte, 15), 15
+		}},
+		{"SLL2 头不完整", func() ([]byte, int) {
+			return make([]byte, 19), 19
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			frame, origLen := tt.build()
-			if got := decode.Decode(pcap.LinkEthernet, frame, origLen, &seg); got != decode.Malformed {
+			link := pcap.LinkEthernet
+			switch tt.name {
+			case "IPv6 基本头不完整", "IPv6 扩展头被截断", "IPv6 负载长度短于 TCP 头":
+				link = pcap.LinkRaw
+			case "NULL 头不完整", "LOOP 头不完整":
+				// 两者都构造 <4 字节帧，任一链路类型都应 Malformed
+				link = pcap.LinkNull
+			case "SLL 头不完整":
+				link = pcap.LinkLinuxSLL
+			case "SLL2 头不完整":
+				link = pcap.LinkLinuxSLL2
+			}
+			if got := decode.Decode(link, frame, origLen, &seg); got != decode.Malformed {
 				t.Errorf("Decode = %v, want Malformed", got)
 			}
 		})
