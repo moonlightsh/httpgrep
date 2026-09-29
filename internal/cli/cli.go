@@ -26,13 +26,13 @@ Options:
                     request and response data, out-of-order segments
                     and per-connection/per-exchange overhead. When it
                     is exceeded, the oldest unfinished exchanges are
-                    dropped. Not counted, each with its own cap: -E
-                    line buffers (up to 8M per scanner, only for very
-                    long lines), bytes after an Upgrade request (up to
-                    64K per connection) and resync line buffers (up to
-                    8K per direction). The process uses more memory
-                    than this; the Go runtime soft limit is set to 1.5
-                    times this value
+                    dropped. Not counted, each with its own cap:
+                    -E line buffers (up to 8M per scanner, only for
+                    very long lines), bytes after an Upgrade request
+                    (up to 64K per connection) and resync line buffers
+                    (up to 8K per direction). The process uses more
+                    memory than this; the Go runtime soft limit is set
+                    to 1.5 times this value
   --max-message SIZE
                     Limit for a single request or response; bytes over
                     it are not buffered (default 8M)
