@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -463,5 +464,69 @@ func TestPipeRealTimeFallback(t *testing.T) {
 	p.stdin.Close()
 	if code := p.wait(t); code != 0 {
 		t.Fatalf("code %d, stderr %q", code, p.stderr.String())
+	}
+}
+
+// startSlow 启动一个读管道的进程，写入一个没有响应的请求，管道不关。
+// 请求后面跟约 256 KiB 的纯 ACK，远大于管道缓冲（64 KiB）：Write 返回时进程一定已经在
+// run.Run 里读输入，信号也已经注册（注册在 run.Run 之前）。不用固定时长的 sleep，
+// 因为 macOS 首次执行新编译的程序可能要花几百毫秒做签名检查。
+func startSlow(t *testing.T) *piped {
+	t.Helper()
+	p := startPiped(t, "slow")
+	in := capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte(slowReq))
+		for range 3800 { // 每个 70 字节（记录头 16 + 帧 54）
+			c.ClientAck(ms(0))
+		}
+	})
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.stdin.Write(in)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("process did not read its input within 10s")
+	}
+	time.Sleep(100 * time.Millisecond)
+	return p
+}
+
+// waitExit 等进程退出，最多 d；超时 t.Fatal。
+func (p *piped) waitExit(t *testing.T, d time.Duration) int {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- p.cmd.Wait() }()
+	select {
+	case err := <-done:
+		return exitCode(t, err)
+	case <-time.After(d):
+		t.Fatalf("still running after %v; stdout %q", d, p.stdout.String())
+		return -1
+	}
+}
+
+// 第一次 SIGINT 或 SIGTERM：结束在途交互，命中的以 no-response(eof) 输出，按有没有命中退出（0）。
+// 管道不关，进程最多再读 1 秒就结束。
+func TestSignalEndsInFlight(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
+		t.Run(sig.String(), func(t *testing.T) {
+			p := startSlow(t)
+			if err := p.cmd.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			code := p.waitExit(t, 10*time.Second)
+			const block = "2026-09-28 07:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(eof)\n" + slowReq
+			if code != 0 || p.stdout.String() != block || p.stderr.String() != "" {
+				t.Fatalf("code %d, stdout %q, stderr %q; want 0, %q", code, p.stdout.String(), p.stderr.String(), block)
+			}
+		})
 	}
 }

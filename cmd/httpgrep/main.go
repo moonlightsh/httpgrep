@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime/debug"
+	"syscall"
 	"time"
 
 	"httpgrep/internal/cli"
@@ -49,8 +51,9 @@ func httpgrep(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		return fail(stderr, err)
 	}
 	pipe := !fi.Mode().IsRegular()
+	stop := watchSignals()
 	start := time.Now()
-	matched, st, err := run.Run(run.Config{Input: f, Pipe: pipe, Stdout: stdout, Stderr: stderr, Opts: opts})
+	matched, st, err := run.Run(run.Config{Input: f, Pipe: pipe, Stop: stop, Stdout: stdout, Stderr: stderr, Opts: opts})
 	if opts.Stats {
 		printStats(stderr, st, time.Since(start))
 	}
@@ -128,4 +131,17 @@ func printStats(w io.Writer, st engine.Stats, elapsed time.Duration) {
 	fmt.Fprintf(w, "peak buffered: %d bytes\n", st.PeakBuffered)
 	fmt.Fprintf(w, "peak in-flight exchanges: %d\n", st.PeakInFlight)
 	fmt.Fprintf(w, "peak connections: %d\n", st.PeakConns)
+}
+
+// watchSignals 在第一次收到 SIGINT 或 SIGTERM 时关闭返回的通道。
+// SIGPIPE 不注册，保持 Go 的默认行为：写标准输出遇到 EPIPE 时进程被 SIGPIPE 终止。
+func watchSignals() <-chan struct{} {
+	sigs := make(chan os.Signal, 2)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	stop := make(chan struct{})
+	go func() {
+		<-sigs
+		close(stop)
+	}()
+	return stop
 }
