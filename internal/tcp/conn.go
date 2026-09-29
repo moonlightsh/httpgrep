@@ -10,6 +10,7 @@ type dir struct {
 	started bool   // 已知这个方向的起始序号
 	base    uint32 // 偏移 0 对应的序号
 	next    int64  // 下一个期望交付的偏移
+	buf     []chunk
 }
 
 // start 以 seq 作为偏移 0 的序号。

@@ -39,10 +39,8 @@ func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 	if !d.started {
 		d.start(seg.Seq)
 	}
-	peerAck := int64(-1)
-	if seg.Flags&decode.ACK != 0 && peer.started {
-		peerAck = peer.offset(seg.Ack)
-	}
+	hasAck := seg.Flags&decode.ACK != 0
+	peerAck := peerAckOf(peer, seg.Ack, hasAck)
 	if len(seg.Payload) == 0 {
 		return
 	}
@@ -52,6 +50,9 @@ func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 		// 重叠的前缀已经交付过，只交付新的部分。
 		c.h.Data(s, d.next, seg.Payload[d.next-off:], peerAck, ts)
 		d.next = end
+		a.drain(c, s, ts)
+	} else if off > d.next {
+		a.buffer(d, off, seg.Payload, seg.Ack, hasAck, ts)
 	}
 }
 

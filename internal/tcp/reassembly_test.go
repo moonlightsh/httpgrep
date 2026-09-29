@@ -28,3 +28,39 @@ func TestRetransmission(t *testing.T) {
 		})
 	}
 }
+
+// 第 6 条：后面的段先到时先缓存，前面的段到了再按偏移顺序交付。
+func TestOutOfOrder(t *testing.T) {
+	tests := []struct {
+		name  string
+		early []pkt // 先到的后续段，到达时没有回调
+		want  []string
+	}{
+		{
+			name:  "one segment",
+			early: []pkt{c2s(1005, 5001, pshAck, "efgh")},
+			want:  []string{`data 0 off=0 "abcd" ack=0`, `data 0 off=4 "efgh" ack=0`},
+		},
+		{
+			name:  "two segments reversed",
+			early: []pkt{c2s(1009, 5001, pshAck, "ij"), c2s(1005, 5001, pshAck, "efgh")},
+			want:  []string{`data 0 off=0 "abcd" ack=0`, `data 0 off=4 "efgh" ack=0`, `data 0 off=8 "ij" ack=0`},
+		},
+		{
+			name:  "hole remains",
+			early: []pkt{c2s(1010, 5001, pshAck, "jk"), c2s(1005, 5001, pshAck, "efgh")},
+			want:  []string{`data 0 off=0 "abcd" ack=0`, `data 0 off=4 "efgh" ack=0`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, defaultConfig())
+			h.handshake(at(0))
+			h.expect("open A=10.0.0.1:40000 B=10.0.0.2:80 known=true")
+			h.feed(at(1), tt.early...)
+			h.expect()
+			h.add(c2s(1001, 5001, pshAck, "abcd"), at(2))
+			h.expect(tt.want...)
+		})
+	}
+}
