@@ -41,9 +41,9 @@ func FuzzReader(f *testing.F) {
 		}
 		_ = r.LinkType()
 		rest := len(in) - 24
-		// 每条记录至少消耗 16 字节记录头，Next 次数有上界。
+		limit := rest/16 + 1 // 每条记录至少消耗 16 字节记录头，Next 次数有上界
 		for i := 0; ; i++ {
-			if i > rest/16+1 {
+			if i > limit {
 				t.Fatalf("Next did not terminate after %d records on %d bytes", i, len(in))
 			}
 			p, err := r.Next()
