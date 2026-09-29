@@ -13,11 +13,21 @@ import (
 type conn struct {
 	e *Engine
 
-	// 角色。E1 只处理看到握手的连接（known 为真，client 是 side 0）；
-	// 角色未知的半路连接在 known 为假时按内容判定。
+	// 角色。看到握手的连接一开始就知道（client 是 side 0）；没看到握手的半路连接
+	// 在 known 为假时按内容判定，见 probe。
 	known            bool
 	client           tcp.Side
 	cliAddr, srvAddr netip.AddrPort
+	key              tcp.Key
+
+	// probes 只在角色未知时使用：每个方向各有一个请求解析器和一个响应解析器，
+	// 下标是 [side][http1.Request 或 http1.Response]。
+	probes *[2][2]probe
+	// orphanOff 是角色未知时每个方向上已经计数的最后一条 Orphan 消息的起始偏移。
+	// 同一方向的两个解析器会对同样的字节各开始一条 Orphan 消息，只计一次。
+	orphanOff [2]int64
+	// finSide 记下角色未知时已经按序结束的方向，定角色时据此设置 srvClosed。
+	finSide [2]bool
 
 	req, res *http1.Parser // 客户端方向的请求解析器、服务端方向的响应解析器
 	rq       reqSink
@@ -52,9 +62,19 @@ type resSink struct {
 	cur *exchange
 }
 
+// probe 是角色未知时挂在一个方向上的一个解析器和它的 Sink。
+// 定角色之前只看 Begin：Orphan 消息计数后丢弃，第一个非 Orphan 的 Begin 决定角色。
+// 定角色之后，留下的解析器的事件原样转给 rq 或 rs，丢弃的解析器的事件忽略。
+type probe struct {
+	c    *conn
+	side tcp.Side
+	kind http1.Kind
+	p    *http1.Parser
+}
+
 // newConn 为新连接创建 Handler。
 func (e *Engine) newConn(info tcp.ConnInfo) *conn {
-	c := &conn{e: e}
+	c := &conn{e: e, key: info.Key}
 	c.rq.c, c.rs.c = c, c
 	if info.RolesKnown {
 		c.known = true
@@ -62,8 +82,118 @@ func (e *Engine) newConn(info tcp.ConnInfo) *conn {
 		c.cliAddr, c.srvAddr = info.Key.A, info.Key.B
 		c.req = http1.NewParser(http1.Request, &c.rq, http1.Options{})
 		c.res = http1.NewParser(http1.Response, &c.rs, http1.Options{Method: c.method})
+		return c
+	}
+	c.probes = new([2][2]probe)
+	c.orphanOff = [2]int64{-1, -1}
+	for side := range c.probes {
+		for kind := range c.probes[side] {
+			pr := &c.probes[side][kind]
+			pr.c, pr.side, pr.kind = c, tcp.Side(side), http1.Kind(kind)
+			opt := http1.Options{Resync: true}
+			if pr.kind == http1.Response {
+				opt.Method = c.method
+			}
+			pr.p = http1.NewParser(pr.kind, pr, opt)
+		}
 	}
 	return c
+}
+
+// decide 按 pr 产生的第一个非 Orphan 的 Begin 确定角色：发请求行的一方是客户端，
+// 发状态行的一方是服务端。留下两个方向上对应的解析器，丢弃另外两个。
+func (c *conn) decide(pr *probe) {
+	c.client = pr.side
+	if pr.kind == http1.Response {
+		c.client = 1 - pr.side
+	}
+	srv := 1 - c.client
+	c.req = c.probes[c.client][http1.Request].p
+	c.res = c.probes[srv][http1.Response].p
+	c.cliAddr, c.srvAddr = c.key.A, c.key.B
+	if c.client == 1 {
+		c.cliAddr, c.srvAddr = c.key.B, c.key.A
+	}
+	c.srvClosed = c.finSide[srv]
+	c.known = true
+}
+
+// chosen 报告 pr 是否是定角色后留下的解析器。
+func (pr *probe) chosen() bool {
+	c := pr.c
+	return c.known && (pr.p == c.req || pr.p == c.res)
+}
+
+// Begin 实现 http1.Sink。
+func (pr *probe) Begin(b http1.Begin) {
+	c := pr.c
+	if !c.known {
+		if b.Orphan {
+			if b.Off > c.orphanOff[pr.side] {
+				c.orphanOff[pr.side] = b.Off
+				c.e.stats.Orphans++
+			}
+			return
+		}
+		c.decide(pr)
+	}
+	if !pr.chosen() {
+		return
+	}
+	if pr.kind == http1.Request {
+		c.rq.Begin(b)
+	} else {
+		c.rs.Begin(b)
+	}
+}
+
+// sink 返回定角色后 pr 的事件要转给的 Sink；定角色之前或 pr 被丢弃时返回 nil。
+// 定角色之前的消息都是 Orphan，它们的事件丢弃。
+func (pr *probe) sink() http1.Sink {
+	if !pr.chosen() {
+		return nil
+	}
+	if pr.kind == http1.Request {
+		return &pr.c.rq
+	}
+	return &pr.c.rs
+}
+
+func (pr *probe) Raw(sec http1.Section, b []byte) {
+	if s := pr.sink(); s != nil {
+		s.Raw(sec, b)
+	}
+}
+
+func (pr *probe) Head(h *http1.Head) {
+	if s := pr.sink(); s != nil {
+		s.Head(h)
+	}
+}
+
+func (pr *probe) Body(b []byte) {
+	if s := pr.sink(); s != nil {
+		s.Body(b)
+	}
+}
+
+func (pr *probe) Gap(sec http1.Section, n int64) {
+	if s := pr.sink(); s != nil {
+		s.Gap(sec, n)
+	}
+}
+
+func (pr *probe) End(complete bool, ts time.Time) {
+	if s := pr.sink(); s != nil {
+		s.End(complete, ts)
+	}
+}
+
+// Desync 实现 http1.Sink。定角色之前两个解析器都从失步状态开始，不算失步。
+func (pr *probe) Desync(off int64) {
+	if s := pr.sink(); s != nil {
+		s.Desync(off)
+	}
 }
 
 // method 告诉响应解析器对应请求的方法。
@@ -81,10 +211,11 @@ func (c *conn) method() string {
 
 // Data 实现 tcp.Handler。
 func (c *conn) Data(side tcp.Side, off int64, b []byte, peerAck int64, ts time.Time) {
+	c.now = ts
 	if !c.known {
+		c.probeFeed(side, off, b, peerAck, ts)
 		return
 	}
-	c.now = ts
 	if side == c.client {
 		c.req.Feed(off, b, peerAck, ts)
 	} else {
@@ -92,14 +223,31 @@ func (c *conn) Data(side tcp.Side, off int64, b []byte, peerAck int64, ts time.T
 	}
 }
 
+// probeFeed 在角色未知时把字节喂给这个方向的两个解析器。
+// 请求解析器在喂的过程中定了角色时，同一方向的响应解析器已被丢弃，不再喂；
+// 响应解析器定了角色时，请求解析器已经喂过这些字节，它之后的事件被忽略。
+// 定角色之后剩下的字节由留下的解析器自己在同一次 Feed 里接着处理。
+func (c *conn) probeFeed(side tcp.Side, off int64, b []byte, peerAck int64, ts time.Time) {
+	c.probes[side][http1.Request].p.Feed(off, b, peerAck, ts)
+	if !c.known {
+		c.probes[side][http1.Response].p.Feed(off, b, peerAck, ts)
+	}
+	if c.known {
+		c.probes = nil
+	}
+}
+
 // Gap 实现 tcp.Handler。
 func (c *conn) Gap(side tcp.Side, off, n int64, ts time.Time) {
 	c.e.stats.Gaps++
 	c.e.stats.GapBytes += n
+	c.now = ts
 	if !c.known {
+		// 定角色之前的消息都是 Orphan，缺口不会让某个解析器产生非 Orphan 的 Begin。
+		c.probes[side][http1.Request].p.Gap(off, n, ts)
+		c.probes[side][http1.Response].p.Gap(off, n, ts)
 		return
 	}
-	c.now = ts
 	if side == c.client {
 		c.req.Gap(off, n, ts)
 	} else {
@@ -111,6 +259,10 @@ func (c *conn) Gap(side tcp.Side, off, n int64, ts time.Time) {
 // 服务端 FIN 时，读到关闭为止的响应算收完。
 func (c *conn) Fin(side tcp.Side, ts time.Time) {
 	if !c.known {
+		// 定角色之前，这个方向的两个解析器都只有 Orphan 消息，结束它们不产生交互。
+		c.finSide[side] = true
+		c.probes[side][http1.Request].p.Close(true, ts)
+		c.probes[side][http1.Response].p.Close(true, ts)
 		return
 	}
 	c.now = ts
