@@ -34,6 +34,8 @@ type Engine struct {
 	buffered int64 // 在途交互缓存的消息字节数
 	ghosts   int   // 队列里的占位数（超时或被丢弃的交互），按 ghostOverhead 计入内存
 
+	now time.Time // 当前时刻：最近一次 Segment、Advance 或 Finish 的时间
+
 	// oldest、newest 是按开始先后排列的在途交互链表的两端（见 track），超过内存上限时从 oldest 丢起。
 	oldest, newest *exchange
 
@@ -80,6 +82,7 @@ func (e *Engine) open(info tcp.ConnInfo) tcp.Handler {
 // 先结束到 ts 为止已经超时的交互：调用方没有在两个包之间调用 Advance 时，
 // 这个段的数据也不会让已经超时的交互续命。
 func (e *Engine) Segment(seg *decode.Segment, ts time.Time) {
+	e.now = ts
 	e.expire(ts)
 	e.asm.Add(seg, ts)
 	e.enforce(ts)
@@ -87,6 +90,7 @@ func (e *Engine) Segment(seg *decode.Segment, ts time.Time) {
 
 // Advance 推进时钟，只处理到期的定时器。now 单调不减。
 func (e *Engine) Advance(now time.Time) {
+	e.now = now
 	e.expire(now)
 	e.asm.Advance(now)
 	e.enforce(now)
@@ -120,6 +124,7 @@ func (e *Engine) arm(x *exchange, at time.Time) {
 
 // Finish 在输入结束时调用：在途交互都以 eof 结束。
 func (e *Engine) Finish(now time.Time) {
+	e.now = now
 	e.asm.Flush(now)
 	if e.dropped > 0 {
 		e.warn(now)

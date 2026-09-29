@@ -58,7 +58,9 @@ type conn struct {
 	aligned                  bool
 	pendDesyncs, pendOrphans int64
 
-	now time.Time // 当前回调所属包的时间。请求的时间不用它，取 req.LastTS()：回放缓存时 now 不是那些字节的时间
+	// now 是当前回调时引擎的时刻（Engine.now）。请求和响应的时间不用它，取解析器的 LastTS()：
+	// 回放 Upgrade 缓存或乱序缓存放行时，now 不是那些字节被抓到的时间。
+	now time.Time
 }
 
 // reqSink 接收请求解析器的事件。cur 为 nil 时丢弃事件。
@@ -251,8 +253,10 @@ func (c *conn) method() string {
 }
 
 // Data 实现 tcp.Handler。
+// ts 是这些字节被抓到的时间，乱序缓存放行的字节早于当前时刻：解析器按 ts 记时间
+// （定位行、耗时），交互的计时仍按引擎的当前时刻。
 func (c *conn) Data(side tcp.Side, off int64, b []byte, peerAck int64, ts time.Time) {
-	c.now = ts
+	c.now = c.e.now
 	if !c.known {
 		c.probeFeed(side, off, b, peerAck, ts)
 		return
@@ -714,7 +718,8 @@ func (s *resSink) Raw(sec http1.Section, b []byte) {
 	if x := s.cur; x != nil && x.ghost {
 		s.c.markLate(x)
 	} else if x != nil {
-		x.resLast = s.c.now
+		// 和请求一样取这些字节所在段的抓包时间：乱序缓存放行的字节不按放行的时刻算。
+		x.resLast = s.c.res.LastTS()
 		x.touch(x.resLast)
 		s.c.e.addBuffered(x.raw(x.resMsg, sec, b, s.c.e.cfg.MaxMessage))
 	}

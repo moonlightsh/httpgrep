@@ -51,6 +51,46 @@ func TestReorderAdjacentGapChunksMerge(t *testing.T) {
 	h.expect(`data 0 off=0 "ab" ack=0`, "gap 0 off=2 n=6")
 }
 
+// tsRec 记下每次 Data 的偏移和时间。
+type tsRec struct {
+	off []int64
+	ts  []time.Time
+}
+
+func (r *tsRec) Data(_ tcp.Side, off int64, _ []byte, _ int64, ts time.Time) {
+	r.off, r.ts = append(r.off, off), append(r.ts, ts)
+}
+func (r *tsRec) Gap(tcp.Side, int64, int64, time.Time) {}
+func (r *tsRec) Fin(tcp.Side, time.Time)               {}
+func (r *tsRec) Reset(time.Time)                       {}
+func (r *tsRec) Closed(tcp.CloseReason, time.Time)     {}
+
+// 乱序缓存里的段交付时，Data 的 ts 是这段到达（被抓到）的时间，不是放行它的那个时刻。
+func TestReorderDataKeepsArrivalTime(t *testing.T) {
+	r := &tsRec{}
+	a := tcp.NewAssembler(defaultConfig(), func(tcp.ConnInfo) tcp.Handler { return r })
+	add := func(seq uint32, p string, ts time.Time) {
+		a.Add(&decode.Segment{Src: cli, Dst: srv, Seq: seq, Ack: 1, Flags: pshAck, Payload: []byte(p)}, ts)
+	}
+	a.Add(&decode.Segment{Src: cli, Dst: srv, Seq: 100, Flags: syn}, at(0))
+	add(105, "efgh", at(10))
+	add(109, "ij", at(20))
+	add(101, "abcd", at(30)) // 补上空洞
+	a.Advance(at(40))
+	add(120, "zz", at(50))
+	a.Advance(at(3000)) // 乱序超时放行 "zz"
+	wantOff := []int64{0, 4, 8, 19}
+	wantTS := []time.Time{at(30), at(10), at(20), at(50)}
+	if len(r.off) != 4 {
+		t.Fatalf("Data offsets %v, want %v", r.off, wantOff)
+	}
+	for i := range wantOff {
+		if r.off[i] != wantOff[i] || !r.ts[i].Equal(wantTS[i]) {
+			t.Fatalf("Data %d: off=%d ts=%v, want off=%d ts=%v", i, r.off[i], r.ts[i], wantOff[i], wantTS[i])
+		}
+	}
+}
+
 // 源地址和目的地址相同的自连接也算一条连接。
 func TestSelfConnCounted(t *testing.T) {
 	self := netip.MustParseAddrPort("10.0.0.9:7")
@@ -65,15 +105,6 @@ func TestSelfConnCounted(t *testing.T) {
 		t.Fatalf("Len after Flush = %d, want 0", got)
 	}
 }
-
-// tsRec 丢弃全部事件。
-type tsRec struct{}
-
-func (*tsRec) Data(tcp.Side, int64, []byte, int64, time.Time) {}
-func (*tsRec) Gap(tcp.Side, int64, int64, time.Time)          {}
-func (*tsRec) Fin(tcp.Side, time.Time)                        {}
-func (*tsRec) Reset(time.Time)                                {}
-func (*tsRec) Closed(tcp.CloseReason, time.Time)              {}
 
 // peerRec 记下 Data 的 peerAck 和 Fin。
 type peerRec struct {

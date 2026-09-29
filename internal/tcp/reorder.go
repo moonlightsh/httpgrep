@@ -151,7 +151,8 @@ func (a *Assembler) drain(c *conn, s Side, ts time.Time) {
 		if k.data == nil {
 			c.h.Gap(s, d.next, k.end()-d.next, ts)
 		} else {
-			c.h.Data(s, d.next, k.data[d.next-k.off:], peerAckOf(peer, k.ack, k.hasAck), ts)
+			// 缓存的数据按它到达的时间交付，不是放行它的那个时刻。
+			c.h.Data(s, d.next, k.data[d.next-k.off:], peerAckOf(peer, k.ack, k.hasAck), k.ts)
 		}
 		d.next = k.end()
 	}

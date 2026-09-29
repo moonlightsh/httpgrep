@@ -35,7 +35,8 @@ const (
 type Handler interface {
 	// Data 按序交付 side 方向的字节。off 是 b 在该方向流里的偏移，从 0 开始。
 	// b 只在回调期间有效。peerAck 是这个包确认到的对端流偏移
-	// （即对端流下一个期望的偏移），不知道时为 -1。
+	// （即对端流下一个期望的偏移），不知道时为 -1。ts 是 b 所在段的抓包时间：乱序缓存里的
+	// 数据是它到达的时间，可能早于放行它的那个包（或 Advance 的时刻）。
 	Data(side Side, off int64, b []byte, peerAck int64, ts time.Time)
 	// Gap 表示 side 方向 [off, off+n) 这段没抓到。
 	Gap(side Side, off, n int64, ts time.Time)
@@ -50,6 +51,6 @@ type Handler interface {
 // Config 是重组器的参数。
 type Config struct {
 	ReorderTimeout  time.Duration // 乱序数据最多等多久，取 2s
-	MaxReorderBytes int64         // 单方向乱序缓存的上限，取 --max-message
+	MaxReorderBytes int64         // 单方向乱序缓存的上限（口径见 BufferedBytes），取 --max-message
 	IdleTimeout     time.Duration // 空闲多久释放连接，取 2 倍 --timeout
 }
