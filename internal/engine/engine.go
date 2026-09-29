@@ -1,0 +1,176 @@
+// Package engine 把重组后的字节流解析成 HTTP 交互：配对请求和响应、
+// 管理交互的生命周期、按关键词匹配，命中的交互结束时整块输出。
+package engine
+
+import (
+	"time"
+
+	"httpgrep/internal/decode"
+	"httpgrep/internal/match"
+	"httpgrep/internal/output"
+	"httpgrep/internal/tcp"
+)
+
+// Config 是引擎的参数。
+type Config struct {
+	Matcher    *match.Matcher
+	Timeout    time.Duration
+	MaxMemory  int64
+	MaxMessage int64
+	Emit       func(b *output.Block) // 命中的交互结束时调用；b 只在回调期间有效
+	Warn       func(msg string)      // 内存上限告警，引擎自己限频
+}
+
+// Engine 处理一个分片的全部连接。不是并发安全的。
+type Engine struct {
+	cfg   Config
+	asm   *tcp.Assembler
+	stats Stats
+
+	free     []*exchange // 回收的交互，连同缓存和扫描器一起复用
+	inFlight int
+
+	// 输出块和它引用的切片，每次输出复用。
+	block  output.Block
+	msgs   []output.Message
+	pieces []output.Piece
+	starts []int
+}
+
+// reorderTimeout 是乱序数据最多等待的时间。
+const reorderTimeout = 2 * time.Second
+
+// New 创建引擎。
+func New(cfg Config) *Engine {
+	e := &Engine{cfg: cfg}
+	e.asm = tcp.NewAssembler(tcp.Config{
+		ReorderTimeout:  reorderTimeout,
+		MaxReorderBytes: cfg.MaxMessage,
+		IdleTimeout:     2 * cfg.Timeout,
+	}, e.open)
+	return e
+}
+
+// open 是 tcp.Assembler 新建连接时的回调。
+func (e *Engine) open(info tcp.ConnInfo) tcp.Handler {
+	e.stats.Connections++
+	if !info.RolesKnown {
+		e.stats.MidStream++
+	}
+	if n := e.asm.Len() + 1; n > e.stats.PeakConns {
+		e.stats.PeakConns = n
+	}
+	return e.newConn(info)
+}
+
+// Segment 处理一个 TCP 段。ts 是抓包时间，单调不减。
+func (e *Engine) Segment(seg *decode.Segment, ts time.Time) {
+	e.asm.Add(seg, ts)
+}
+
+// Advance 推进时钟，只处理到期的定时器。now 单调不减。
+func (e *Engine) Advance(now time.Time) {
+	e.asm.Advance(now)
+}
+
+// Finish 在输入结束时调用：在途交互都以 eof 结束。
+func (e *Engine) Finish(now time.Time) {
+	e.asm.Flush(now)
+}
+
+// newExchange 取一个空的交互。
+func (e *Engine) newExchange() *exchange {
+	var x *exchange
+	if n := len(e.free); n > 0 {
+		x = e.free[n-1]
+		e.free[n-1] = nil
+		e.free = e.free[:n-1]
+	} else {
+		x = &exchange{sc: e.cfg.Matcher.NewScanner(), alt: e.cfg.Matcher.NewScanner()}
+	}
+	x.reset()
+	e.stats.Exchanges++
+	e.inFlight++
+	if e.inFlight > e.stats.PeakInFlight {
+		e.stats.PeakInFlight = e.inFlight
+	}
+	return x
+}
+
+// finish 结束交互：计入统计，命中的输出，然后回收。
+func (e *Engine) finish(c *conn, x *exchange) {
+	x.lineBreak()
+	st := x.status()
+	switch {
+	case st == output.Status{}:
+		e.stats.Complete++
+	default:
+		if st.NoRequest {
+			e.stats.NoRequest++
+		}
+		if st.Incomplete {
+			e.stats.Incomplete++
+		}
+		switch st.NoResponse {
+		case noRespTimeout:
+			e.stats.NoResponseTimeout++
+		case noRespClosed:
+			e.stats.NoResponseClosed++
+		case noRespEOF:
+			e.stats.NoResponseEOF++
+		}
+	}
+	if x.sc.Matched() {
+		e.stats.Matched++
+		e.emit(c, x, st)
+	}
+	e.inFlight--
+	e.free = append(e.free, x)
+}
+
+// emit 把交互组装成输出块交给 Emit。
+func (e *Engine) emit(c *conn, x *exchange, st output.Status) {
+	b := &e.block
+	b.Time = x.start
+	b.Client, b.Server = c.cliAddr, c.srvAddr
+	b.Status = st
+	b.HasDuration = x.hasReq && x.hasRes
+	b.Duration = 0
+	if b.HasDuration {
+		b.Duration = x.resLast.Sub(x.reqLast)
+	}
+	// 片段按到达顺序缓存，两个方向可能交错：按消息分组后再切给各条消息。
+	e.pieces, e.starts = e.pieces[:0], e.starts[:0]
+	for mi := range x.msgs {
+		e.starts = append(e.starts, len(e.pieces))
+		for _, p := range x.pieces {
+			if p.msg == mi {
+				e.pieces = append(e.pieces, output.Piece{Kind: p.kind, Data: x.buf[p.lo:p.hi], N: p.n, InBody: p.inBody})
+			}
+		}
+	}
+	e.msgs = e.msgs[:0]
+	for mi := range x.msgs {
+		m := &x.msgs[mi]
+		end := len(e.pieces)
+		if mi+1 < len(x.msgs) {
+			end = e.starts[mi+1]
+		}
+		e.msgs = append(e.msgs, output.Message{
+			Pieces:          e.pieces[e.starts[mi]:end],
+			Binary:          m.binary,
+			ContentType:     m.ct,
+			ContentEncoding: m.ce,
+			BodySize:        m.bodySize,
+			BodyMatched:     m.bodyMatched,
+		})
+	}
+	b.Messages = e.msgs
+	e.cfg.Emit(b)
+	// 不让复用的块继续引用交互的缓存。
+	clear(e.pieces)
+	b.Messages = nil
+}
+
+// Stats 返回引擎填写的统计。
+func (e *Engine) Stats() Stats { return e.stats }
