@@ -229,3 +229,33 @@ func TestRetransmissionBeforeStart(t *testing.T) {
 	h.a.Flush(at(2))
 	h.expect("closed eof")
 }
+
+// 第 14 条：单方向流偏移超过 2³¹ 和 2³² 后仍然连续。每轮服务端先用裸 ACK
+// 越过 1.5 GiB（0x60000000）没抓到的客户端数据，客户端再从那个位置发 "hi"。
+// 只用 Gap，不分配大块内存。
+func TestLongStreamOffset(t *testing.T) {
+	h := newHarness(t, defaultConfig())
+	h.handshake(at(0))
+	h.expect("open A=10.0.0.1:40000 B=10.0.0.2:80 known=true")
+	rounds := []struct {
+		seq      uint32 // 1001 + 本轮起点偏移 + 0x60000000，按 2³² 取模
+		gap, off string
+	}{
+		{0x600003E9, "gap 0 off=0 n=1610612736", `data 0 off=1610612736 "hi" ack=0`},
+		{0xC00003EB, "gap 0 off=1610612738 n=1610612736", `data 0 off=3221225474 "hi" ack=0`},
+		{0x200003ED, "gap 0 off=3221225476 n=1610612736", `data 0 off=4831838212 "hi" ack=0`},
+		{0x800003EF, "gap 0 off=4831838214 n=1610612736", `data 0 off=6442450950 "hi" ack=0`},
+	}
+	for i, r := range rounds {
+		h.add(s2c(sISN+1, r.seq, ack, ""), at(i+1))
+		h.expect(r.gap)
+		h.add(c2s(r.seq, sISN+1, pshAck, "hi"), at(i+1))
+		h.expect(r.off)
+	}
+	// 客户端流长 6442450952 = 0x180000008，确认序号 1001+0x180000008 取模为 0x800003F1。
+	h.add(s2c(sISN+1, 0x800003F1, pshAck, "OK"), at(5))
+	h.expect(`data 1 off=0 "OK" ack=6442450952`)
+	if got := h.a.BufferedBytes(); got != 0 {
+		t.Fatalf("BufferedBytes() = %d, want 0", got)
+	}
+}
