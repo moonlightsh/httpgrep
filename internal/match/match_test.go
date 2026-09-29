@@ -125,3 +125,20 @@ func TestTrailingCRNotPartOfLine(t *testing.T) {
 		t.Fatal("abc\\r should not match line abc (trailing CR stripped)")
 	}
 }
+
+// 命中之后 Write 直接返回，不再处理后续数据。
+func TestEarlyReturnAfterMatch(t *testing.T) {
+	m, _ := match.Compile([]string{"first"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("first line\n"))
+	if !s.Matched() {
+		t.Fatal("expected match")
+	}
+	// 命中后再写入任何数据都不改变状态、不出错。
+	s.Write([]byte("more data without newline"))
+	s.Break()
+	s.Write([]byte("tail"))
+	if !s.Matched() {
+		t.Fatal("Matched must stay true")
+	}
+}
