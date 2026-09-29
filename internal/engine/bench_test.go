@@ -90,11 +90,24 @@ func newBenchEngine(emitted *int) *engine.Engine {
 // 预热之后，引擎自身每个交互不分配内存。
 // 剩下的分配来自 http1 把头部取值转成字符串（Head.Target、Head.ContentType），
 // 每条消息至多一次，不随包数增长。
+// MaxMemory 为 0（不限）时同样复用。
 func TestSteadyStateAllocs(t *testing.T) {
+	for _, maxMem := range []int64{256 << 20, 0} {
+		t.Run("MaxMemory="+strconv.FormatInt(maxMem, 10), func(t *testing.T) { steadyStateAllocs(t, maxMem) })
+	}
+}
+
+func steadyStateAllocs(t *testing.T, maxMem int64) {
 	const warm, runs = 50, 200
 	pkts, _ := decodeAll(t, keepAlive(warm+runs+1, 4000))
 	var emitted int
-	e := newBenchEngine(&emitted)
+	e := engine.New(engine.Config{
+		Matcher:    benchMatcher,
+		Timeout:    30 * time.Second,
+		MaxMemory:  maxMem,
+		MaxMessage: 8 << 20,
+		Emit:       func(*output.Block) { emitted++ },
+	})
 	// 握手 3 个包，之后每个交互 2 + ceil(响应长度/1460) 个包。
 	perExchange := (len(pkts) - 3) / (warm + runs + 1)
 	i := 0
