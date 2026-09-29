@@ -568,3 +568,35 @@ func TestBreakResetNoMemoryGrowth(t *testing.T) {
 		t.Fatalf("Write/Break/Reset cycle must not allocate anything, allocated %d bytes", grew)
 	}
 }
+
+// 空关键词和含 \r 的字面关键词不需要无限缓存：
+// 一个不含 \n 的大块写入后内存不应线性增长。
+func TestSlowPathNoUnboundedBuffer(t *testing.T) {
+	// 空关键词：遇到 \n 或 Break 直接置位，无需缓存数据。
+	m, _ := match.Compile([]string{""}, false)
+	s := m.NewScanner()
+	s.Write([]byte("no newline at all"))
+	s.Break()
+	if !s.Matched() {
+		t.Fatal("empty pattern should match via Break on line without newline")
+	}
+
+	// 含 \r 的字面关键词：超过 8 MiB 的未完成行不再缓存。
+	const miB = 1 << 20
+	m2, _ := match.Compile([]string{"a\rb"}, false)
+	s2 := m2.NewScanner()
+	flood := make([]byte, miB) // 测试自身的分配计入基准之前
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < 32; i++ { // 32 MiB，远超 8 MiB
+		s2.Write(flood)
+	}
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	// 驻留内存不应超过 8 MiB 缓存加少量杂项。
+	if grew := int64(after.HeapInuse) - int64(before.HeapInuse); grew > 12*miB {
+		t.Fatalf("\\r-pattern must not buffer past 8 MiB, heap in use grew %d bytes", grew)
+	}
+}
