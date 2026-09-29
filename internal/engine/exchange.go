@@ -42,6 +42,13 @@ type message struct {
 	bodySize    int64
 	bodyMatched bool
 	bodyAlt     bool // body 开始时这个方向的主扫描器已命中，改用 alt 判断 body 是否命中
+
+	// 超过 MaxMessage 的截断。size 是已经缓存的线上字节数；trunc 是截断标记在
+	// exchange.pieces 里的下标加 1，0 表示还没截断；bodyRoom 是紧接着的 Body
+	// 里还能喂入的字节数（http1 先交付 Raw(SecBody)，紧跟着交付同样字节的 Body）。
+	size     int64
+	trunc    int
+	bodyRoom int
 }
 
 // 消息所在的方向，也是 exchange.dirs 的下标。
@@ -165,8 +172,31 @@ func (x *exchange) addMessage(dir uint8) int {
 	return len(x.msgs) - 1
 }
 
-// raw 缓存消息 mi 的一段线上字节，并按分类喂给扫描器。
-func (x *exchange) raw(mi int, sec http1.Section, b []byte) {
+// raw 缓存消息 mi 的一段线上字节，并按分类喂给扫描器，返回缓存的字节数。
+// 消息缓存到 limit 字节为止（limit 不大于 0 时不限），超出的部分不缓存、不匹配，
+// 只在输出里记一个截断标记。
+func (x *exchange) raw(mi int, sec http1.Section, b []byte, limit int64) int {
+	m := &x.msgs[mi]
+	var over int64
+	if limit > 0 && m.size+int64(len(b)) > limit {
+		keep := int(max(limit-m.size, 0))
+		over = int64(len(b) - keep)
+		b = b[:keep]
+	}
+	m.size += int64(len(b))
+	m.bodyRoom = len(b)
+	if len(b) > 0 {
+		x.cache(mi, sec, b)
+	}
+	if over > 0 {
+		// 先缓存和喂入限额以内的部分，截断标记排在它后面。
+		x.truncate(mi, over)
+	}
+	return len(b)
+}
+
+// cache 缓存消息 mi 的一段线上字节并按分类喂给扫描器。
+func (x *exchange) cache(mi int, sec http1.Section, b []byte) {
 	kind := pieceKind(sec)
 	lo := len(x.buf)
 	x.buf = append(x.buf, b...)
@@ -189,18 +219,39 @@ feed:
 	}
 }
 
+// truncate 记下消息 mi 有 n 字节超过了 MaxMessage、没有缓存。第一次截断时在消息末尾
+// 放一个截断标记并计入 Truncated；之后超出的字节都累加到这个标记上。
+// 截断之后这条消息不会再有别的片段，标记就是它的最后一段。
+func (x *exchange) truncate(mi int, n int64) {
+	m := &x.msgs[mi]
+	if m.trunc == 0 {
+		lo := len(x.buf)
+		x.pieces = append(x.pieces, piece{msg: mi, kind: output.PieceTruncated, lo: lo, hi: lo})
+		m.trunc = len(x.pieces)
+		x.c.e.stats.Truncated++
+		// 这里不断行：限额以内的 body 字节随后才由 Body 喂入，要和前面的内容接成一行。
+		// 截断之后这条消息不再喂入，消息结束时照常断行。
+	}
+	x.pieces[m.trunc-1].n += n
+}
+
 // gap 在消息 mi 里记下 n 字节没抓到：输出缺口标记，交互不完整，
 // 这个方向在缺口处断行，缺口两边的内容不会拼成一行去匹配。
 // 带 Content-Encoding 的 body 里有缺口时也算二进制（解码后的大小不可知）。
 func (x *exchange) gap(mi int, sec http1.Section, n int64) {
 	m := &x.msgs[mi]
+	x.incomplete = true
+	if m.trunc != 0 {
+		// 截断之后没抓到的字节同样超出了 MaxMessage，并入截断标记，不单独输出缺口。
+		x.truncate(mi, n)
+		return
+	}
 	inBody := sec == http1.SecBody
 	if inBody && m.ce != "" {
 		m.binary = true
 	}
 	lo := len(x.buf)
 	x.pieces = append(x.pieces, piece{msg: mi, kind: output.PieceGap, lo: lo, hi: lo, n: n, inBody: inBody})
-	x.incomplete = true
 	x.lineBreak(m.dir)
 }
 
@@ -215,8 +266,14 @@ func (x *exchange) head(mi int, h *http1.Head) {
 // Content-Length: 0 和 chunked 的空 body（只有 "0\r\n\r\n"）原样输出，不加占位行。
 // 这几种都不会调用 body（http1 不交付空的 Body），所以判断放在这里、而不是在收到
 // Raw(SecBody) 时，就足够区分。body 里有缺口时也算二进制，由缺口处理负责标记。
+// 超过 MaxMessage 的部分不喂，也不计入 body 大小和二进制判断。
 func (x *exchange) body(mi int, b []byte) {
 	m := &x.msgs[mi]
+	n := min(len(b), m.bodyRoom)
+	m.bodyRoom -= n
+	if b = b[:n]; n == 0 {
+		return
+	}
 	m.bodySize += int64(len(b))
 	if !m.binary && (m.ce != "" || hasControl(b)) {
 		m.binary = true
