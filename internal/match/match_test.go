@@ -489,3 +489,32 @@ func TestHighlightIgnoresEmptyPattern(t *testing.T) {
 		t.Fatalf("regex empty-only: got %v want nil", got4)
 	}
 }
+
+// 慢路径处理完整行不分配内存（s.buf 复用容量、行内直接处理不拷贝）。
+func TestSlowPathZeroAllocPerLine(t *testing.T) {
+	// 正则模式。
+	mr, _ := match.Compile([]string{"zz"}, true)
+	sr := mr.NewScanner()
+	line := []byte("no match line here\n")
+	sr.Write(line) // 预热，让 buf 拿到容量
+	allocs := testing.AllocsPerRun(100, func() {
+		sr.Write(line)
+	})
+	if allocs != 0 {
+		t.Fatalf("regex line processing must not allocate, got %v allocs", allocs)
+	}
+
+	// 含 \r 的字面关键词走慢路径。
+	mc, _ := match.Compile([]string{"a\rb"}, false)
+	sc := mc.NewScanner()
+	tail := []byte("b\n")
+	rest := []byte("more\n")
+	sc.Write([]byte("xxa\r"))
+	allocsC := testing.AllocsPerRun(100, func() {
+		sc.Write(tail)
+		sc.Write(rest)
+	})
+	if allocsC != 0 {
+		t.Fatalf("\r-pattern line processing must not allocate, got %v allocs", allocsC)
+	}
+}
