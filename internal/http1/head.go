@@ -46,6 +46,8 @@ func (p *Parser) headLine(line []byte, ts time.Time) bool {
 			last = trimSpace(val[k+1:])
 		}
 		p.chunked = eqFold(last, "chunked")
+	case p.kind == Request && eqFold(name, "upgrade"):
+		p.h.Upgrade = true
 	}
 	p.headLen += len(line)
 	p.sink.Raw(SecHead, line)
@@ -231,6 +233,7 @@ func parseStart(kind Kind, s []byte, h *Head) {
 		h.Method = method(s[:i])
 		h.Target = string(s[i+1 : j])
 		h.Proto = proto(s[j+1:])
+		h.Upgrade = h.Method == "CONNECT"
 		return
 	}
 	h.Proto = proto(s[:8])

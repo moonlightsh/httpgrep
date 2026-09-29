@@ -107,6 +107,7 @@ type step struct {
 	data  string
 	gap   int64
 	close string // "fin" 或 "rst"
+	call  string // "resume" 或 "tunnel"
 	ack   int64
 	ts    time.Time
 }
@@ -129,6 +130,10 @@ func run(kind http1.Kind, opt http1.Options, chunk int, steps ...step) *rec {
 			ts = t0
 		}
 		switch {
+		case s.call == "resume":
+			p.Resume()
+		case s.call == "tunnel":
+			p.Tunnel()
 		case s.close != "":
 			p.Close(s.close == "fin", ts)
 		case s.gap > 0:
@@ -910,5 +915,24 @@ func TestScanLongLine(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestUpgradeFlag(t *testing.T) {
+	tests := []struct{ in, head string }{
+		{"GET /ws HTTP/1.1\r\nConnection: Upgrade\r\nupgrade: websocket\r\n\r\n", "head GET /ws HTTP/1.1 upgrade"},
+		{"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n", "head CONNECT example.com:443 HTTP/1.1 upgrade"},
+		{"GET / HTTP/1.1\r\nConnection: keep-alive\r\n\r\n", "head GET / HTTP/1.1"},
+	}
+	for _, tt := range tests {
+		r := run(http1.Request, http1.Options{}, 0, data(tt.in))
+		if len(r.ev) < 3 || r.ev[2] != tt.head {
+			t.Errorf("%q: events %q, want %q", tt.in, r.ev, tt.head)
+		}
+	}
+	// 响应里的 Upgrade 头不影响 Head.Upgrade。
+	r := run(http1.Response, http1.Options{}, 0, data("HTTP/1.1 426 Upgrade Required\r\nUpgrade: h2c\r\nContent-Length: 0\r\n\r\n"))
+	if len(r.heads) != 1 || r.heads[0].Upgrade || r.heads[0].Tunnel {
+		t.Errorf("response heads = %+v", r.heads)
 	}
 }
