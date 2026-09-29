@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net/netip"
 	"strconv"
 	"testing"
 	"time"
@@ -139,5 +140,70 @@ func BenchmarkKeepAlive(b *testing.B) {
 		if e.Stats().Complete != n {
 			b.Fatalf("Complete %d", e.Stats().Complete)
 		}
+	}
+}
+
+// inFlight 生成 n 条连接，每条连接上一个没有响应的请求；第 i 个请求在 t0 之后 i 微秒发出。
+func inFlight(n int) func(w *pcapgen.Writer) {
+	return func(w *pcapgen.Writer) {
+		for i := range n {
+			cli := netip.AddrPortFrom(netip.MustParseAddr("10.1.0.1"), uint16(10000+i))
+			c := pcapgen.NewConn(w, cli, srv)
+			ts := t0.Add(time.Duration(i) * time.Microsecond)
+			c.Handshake(ts)
+			c.ClientSend(ts, []byte("GET /item HTTP/1.1\r\nHost: x\r\n\r\n"))
+		}
+	}
+}
+
+// BenchmarkAdvance 测 Advance 的开销和在途交互总数的关系。
+// expire：每次 Advance 恰好到期一个交互；idle：每次 Advance 都没有交互到期。
+// 两种情况下，n=100 和 n=10000 的 ns/op 应当同一量级（最小堆是 O(log n)）。
+func BenchmarkAdvance(b *testing.B) {
+	for _, n := range []int{100, 10000} {
+		pkts, _ := decodeAll(b, inFlight(n))
+		setup := func() *engine.Engine {
+			var emitted int
+			e := newBenchEngine(&emitted)
+			for i := range pkts {
+				p := &pkts[i]
+				e.Segment(&p.seg, p.ts)
+				e.Advance(p.ts)
+			}
+			return e
+		}
+		b.Run("expire/n="+strconv.Itoa(n), func(b *testing.B) {
+			b.ReportAllocs()
+			var e *engine.Engine
+			k := n
+			for range b.N {
+				if k == n {
+					b.StopTimer()
+					e, k = setup(), 0
+					b.StartTimer()
+				}
+				// 第 k 个请求在 t0+k µs 发出，t0+k µs+30s 到期。
+				e.Advance(t0.Add(30*time.Second + time.Duration(k)*time.Microsecond))
+				k++
+			}
+			b.StopTimer()
+			if st := e.Stats(); st.NoResponseTimeout != int64(k) {
+				b.Fatalf("NoResponseTimeout %d, want %d", st.NoResponseTimeout, k)
+			}
+		})
+		b.Run("idle/n="+strconv.Itoa(n), func(b *testing.B) {
+			b.ReportAllocs()
+			e := setup()
+			now := pkts[len(pkts)-1].ts
+			b.ResetTimer()
+			for range b.N {
+				now = now.Add(time.Nanosecond)
+				e.Advance(now)
+			}
+			b.StopTimer()
+			if st := e.Stats(); st.NoResponseTimeout != 0 {
+				b.Fatalf("NoResponseTimeout %d", st.NoResponseTimeout)
+			}
+		})
 	}
 }
