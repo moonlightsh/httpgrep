@@ -35,6 +35,12 @@ type Engine struct {
 	// oldest、newest 是按开始时间排序的在途交互链表的两端，超过内存上限时从 oldest 丢起。
 	oldest, newest *exchange
 
+	// 内存告警：dropped、droppedMatched 是距上一次告警以来丢弃的交互数和其中已命中的；
+	// warnedAt 是上一次告警的抓包时间，warned 表示告警过。
+	dropped, droppedMatched int64
+	warnedAt                time.Time
+	warned                  bool
+
 	// 输出块和它引用的切片，每次输出复用。
 	block  output.Block
 	msgs   []output.Message
@@ -113,6 +119,9 @@ func (e *Engine) arm(x *exchange, at time.Time) {
 // Finish 在输入结束时调用：在途交互都以 eof 结束。
 func (e *Engine) Finish(now time.Time) {
 	e.asm.Flush(now)
+	if e.dropped > 0 {
+		e.warn(now)
+	}
 }
 
 // newExchange 为连接 c 取一个空的交互。

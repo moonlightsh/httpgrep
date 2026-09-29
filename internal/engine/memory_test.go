@@ -233,3 +233,45 @@ func TestEvictLeastRecentConnection(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// Warn 按抓包时钟最多每 10 秒调用一次，报告距上一次告警以来的累计数；Finish 时补报剩下的。
+// 上限 1600：一条连接（1024）上同时只放得下一个在途请求（512 + 19 或 23 字节），
+// 每来一个管道化的请求就丢弃前一个。丢弃发生在 t=0（R0，命中）、1（R1）、5（R2，命中）、
+// 12（R3）、13（R4）。t=0 立即告警；t=1、5 的累计到 t=10 的 Advance 时告警；
+// t=12、13 的累计不到 10 秒，Finish 时补报。R5 留到最后，以 eof 结束。
+func TestEvictWarnRateLimited(t *testing.T) {
+	var warns []string
+	var counts []int
+	cfg := engine.Config{
+		Matcher:   matcher(t, "TOKEN"),
+		MaxMemory: 1600,
+		Warn:      func(msg string) { warns = append(warns, msg) },
+	}
+	_, out, st := replayHook(t, cfg, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-600))
+		for _, r := range []struct {
+			at   float64
+			path string
+		}{{-500, "/TOKEN"}, {0, "/r1"}, {1000, "/TOKEN"}, {5000, "/r3"}, {12000, "/r4"}, {13000, "/TOKEN"}} {
+			c.ClientSend(ms(r.at), []byte("GET "+r.path+" HTTP/1.1\r\n\r\n"))
+		}
+	}, func(*engine.Engine, time.Time) { counts = append(counts, len(warns)) }, ms(9999.9), ms(10000))
+	check(t, out, "2026-09-28 15:30:25.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(eof)\n"+
+		"GET /TOKEN HTTP/1.1\r\n\r\n")
+	// 握手 3 个包，之后每个请求一个包。
+	if want := []int{0, 0, 0, 0, 1, 1, 1, 2, 2}; !slices.Equal(counts, want) {
+		t.Fatalf("warnings after each packet = %v, want %v", counts, want)
+	}
+	want := []string{
+		"dropped 1 in-flight exchanges (1 matched) to stay under --max-memory",
+		"dropped 2 in-flight exchanges (1 matched) to stay under --max-memory",
+		"dropped 2 in-flight exchanges (0 matched) to stay under --max-memory",
+	}
+	if !slices.Equal(warns, want) {
+		t.Fatalf("warnings = %q, want %q", warns, want)
+	}
+	if st.Evicted != 5 || st.EvictedMatched != 2 || st.NoResponseEOF != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
