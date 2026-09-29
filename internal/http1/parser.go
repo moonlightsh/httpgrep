@@ -127,6 +127,13 @@ func (p *Parser) Feed(off int64, b []byte, peerAck int64, ts time.Time) {
 // 字节所在包的时间；Resume 回放缓存时是对应缓存段的时间。还没有 Feed 或 Gap 时是零值。
 func (p *Parser) LastTS() time.Time { return p.lastTS }
 
+// Buffered 返回解析器内部缓存的字节数：没收完的一行（起始行、头部行、chunk 长度行或
+// trailer 行，最多 64 KiB），以及 Upgrade 请求之后缓存的数据加上每段记录的开销（最多 64 KiB）。
+// 调用方据此把这部分内存计入自己的计量。
+func (p *Parser) Buffered() int {
+	return len(p.lb) + len(p.hold) + len(p.segs)*heldSize
+}
+
 // step 处理 b 开头的一部分字节，返回消耗的字节数。
 // 不消耗字节时必须改变状态，保证 Feed 的循环能推进。
 func (p *Parser) step(off int64, b []byte, ack int64, ts time.Time) int {
