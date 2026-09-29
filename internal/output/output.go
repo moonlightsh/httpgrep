@@ -125,7 +125,9 @@ func (w *Writer) writePiece(p *Piece) {
 		} else if len(w.buf) > 0 && w.buf[len(w.buf)-1] != '\n' {
 			w.buf = append(w.buf, '\n')
 		}
-		start := len(w.buf)
+		if w.opt.TTY {
+			w.buf = append(w.buf, "\x1b[33m"...)
+		}
 		if p.Kind == PieceGap {
 			w.buf = append(w.buf, "[gap: "...)
 			w.buf = strconv.AppendInt(w.buf, p.N, 10)
@@ -136,7 +138,7 @@ func (w *Writer) writePiece(p *Piece) {
 			w.buf = append(w.buf, " bytes over --max-message]"...)
 		}
 		if w.opt.TTY {
-			w.colorize(start, len(w.buf), "\x1b[33m", "\x1b[m")
+			w.buf = append(w.buf, "\x1b[m"...)
 		}
 		w.buf = append(w.buf, '\n')
 	default:
@@ -253,7 +255,10 @@ func appendHex(buf []byte, c byte) []byte {
 
 // writeLocationLine 写定位行。
 func (w *Writer) writeLocationLine(b *Block) {
-	start := len(w.buf)
+	if w.opt.TTY {
+		// 定位行整体用紫色包住（不含末尾换行）
+		w.buf = append(w.buf, "\x1b[35m"...)
+	}
 	loc := w.opt.Location
 	if loc == nil {
 		loc = time.Local
@@ -294,21 +299,10 @@ func (w *Writer) writeLocationLine(b *Block) {
 		w.buf = strconv.AppendFloat(w.buf, float64(b.Duration)/1e6, 'f', 1, 64)
 		w.buf = append(w.buf, "ms"...)
 	}
-	w.buf = append(w.buf, '\n')
 	if w.opt.TTY {
-		// 定位行整体用紫色包住（不含末尾换行）
-		w.colorize(start, len(w.buf)-1, "\x1b[35m", "\x1b[m")
+		w.buf = append(w.buf, "\x1b[m"...)
 	}
-}
-
-// colorize 用 begin/end 把 buf[from:to] 包起来。to 之后的内容保留在后。
-func (w *Writer) colorize(from, to int, begin, end string) {
-	tail := append([]byte(nil), w.buf[to:]...)
-	seg := append([]byte(nil), w.buf[from:to]...)
-	w.buf = append(w.buf[:from], begin...)
-	w.buf = append(w.buf, seg...)
-	w.buf = append(w.buf, end...)
-	w.buf = append(w.buf, tail...)
+	w.buf = append(w.buf, '\n')
 }
 
 // writeBinaryMessage 写二进制 body 的消息：从第一个 body 类 Piece 起的连续一段
@@ -328,7 +322,9 @@ func (w *Writer) writeBinaryMessage(m *Message) {
 	} else if len(w.buf) > 0 && w.buf[len(w.buf)-1] != '\n' {
 		w.buf = append(w.buf, '\n')
 	}
-	start := len(w.buf)
+	if w.opt.TTY {
+		w.buf = append(w.buf, "\x1b[33m"...)
+	}
 	w.buf = append(w.buf, "[binary body omitted: "...)
 	if m.ContentEncoding != "" {
 		w.buf = append(w.buf, m.ContentEncoding...)
@@ -348,7 +344,7 @@ func (w *Writer) writeBinaryMessage(m *Message) {
 	}
 	w.buf = append(w.buf, "]"...)
 	if w.opt.TTY {
-		w.colorize(start, len(w.buf), "\x1b[33m", "\x1b[m")
+		w.buf = append(w.buf, "\x1b[m"...)
 	}
 	w.buf = append(w.buf, '\n')
 	// body 之后的部分

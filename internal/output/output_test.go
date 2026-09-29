@@ -563,3 +563,23 @@ func TestTTYHighlightOnRawBytes(t *testing.T) {
 		t.Errorf("原始字节高亮不正确\n得到: %q\n期望: %q", got, want)
 	}
 }
+
+// BenchmarkWriteTTYManyHits 验证多命中行的渲染是线性的：一行 80 KB、每 4 字节一个命中。
+func BenchmarkWriteTTYManyHits(b *testing.B) {
+	line := bytes.Repeat([]byte("aaaa\n"), 16384) // 80 KB，16384 行
+	hl := func(line []byte) [][2]int {
+		return [][2]int{{0, len(line)}}
+	}
+	w := output.NewWriter(io.Discard, output.Options{Location: time.UTC, TTY: true, Highlight: hl})
+	blk := &output.Block{
+		Time: time.Unix(0, 0), Client: mustAddr("127.0.0.1:1"), Server: mustAddr("127.0.0.1:2"),
+		Messages: []output.Message{{Pieces: []output.Piece{{Kind: output.PieceBody, Data: line}}}},
+	}
+	b.SetBytes(int64(len(line)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := w.Write(blk); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
