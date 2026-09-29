@@ -197,3 +197,35 @@ func TestPeerAck(t *testing.T) {
 		})
 	}
 }
+
+// 第 15 条：某方向还没发过数据（next=0）时的保活探测，seq=ISN、负载 1 字节。
+// 序号比偏移 0 小 1，不能被当成远处的乱序数据缓存。
+func TestKeepAliveBeforeData(t *testing.T) {
+	h := newHarness(t, defaultConfig())
+	h.handshake(at(0))
+	h.expect("open A=10.0.0.1:40000 B=10.0.0.2:80 known=true")
+	h.add(c2s(cISN, sISN+1, ack, "\x00"), at(1))
+	h.add(s2c(sISN, cISN+1, ack, "Z"), at(1))
+	h.expect()
+	if got := h.a.BufferedBytes(); got != 0 {
+		t.Fatalf("BufferedBytes() = %d, want 0", got)
+	}
+	h.a.Flush(at(2))
+	h.expect("closed eof")
+}
+
+// 第 5 条：按第 3 条从中途开始抓包后，收到起点之前的重传，只交付起点之后的部分。
+func TestRetransmissionBeforeStart(t *testing.T) {
+	h := newHarness(t, defaultConfig())
+	h.add(c2s(2000, 7000, pshAck, "ab"), at(0)) // 起点 seq=2000
+	h.expect("open A=10.0.0.1:40000 B=10.0.0.2:80 known=false", `data 0 off=0 "ab" ack=0`)
+	h.add(c2s(1998, 7000, pshAck, "abcdef"), at(1)) // 覆盖偏移 [-2,4)
+	h.expect(`data 0 off=2 "ef" ack=0`)
+	h.add(c2s(1990, 7000, pshAck, "old"), at(1)) // 完全在起点之前
+	h.expect()
+	if got := h.a.BufferedBytes(); got != 0 {
+		t.Fatalf("BufferedBytes() = %d, want 0", got)
+	}
+	h.a.Flush(at(2))
+	h.expect("closed eof")
+}
