@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -193,6 +194,42 @@ func TestEvictedUpgradeRequestKeepsHeld(t *testing.T) {
 	check(t, out, "2026-09-28 15:30:12.349 10.0.0.1:52814 -> 10.0.0.2:80 no-response(closed)\n"+
 		"GET /TOKEN HTTP/1.1\r\n\r\n")
 	if st.Evicted != 1 || st.EvictedMatched != 0 || st.Exchanges != 3 || st.NoResponseClosed != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 在途交互都丢完了仍然超限：释放最久没有收到包的连接，直到不超限。上限 2600。
+// C1、C2 握手后，C1 又发了一个 ACK，最久没有包的是 C2。C3 的 SYN 使计量到 3072，
+// 没有在途交互可丢，释放 C2，回到 2048。C2 的四元组上随后来的请求按半路连接新建
+// （3072 + 512 + 23）：先丢弃这个交互（已命中，不输出），仍超限，再释放此时最久没有包的 C1。
+// C3 不受影响，它的交互照常输出。
+func TestEvictLeastRecentConnection(t *testing.T) {
+	cli3 := netip.MustParseAddrPort("10.0.0.1:52816")
+	var mem []int64
+	out, st := replayEach(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 2600}, func(w *pcapgen.Writer) {
+		c1 := pcapgen.NewConn(w, cli1, srv)
+		c2 := pcapgen.NewConn(w, cli2, srv)
+		c3 := pcapgen.NewConn(w, cli3, srv)
+		c1.Handshake(ms(0))
+		c2.Handshake(ms(1))
+		c1.ClientAck(ms(2))
+		c3.Handshake(ms(3))
+		c2.ClientSend(ms(4), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+		c3.ClientSend(ms(5), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+		c3.ServerSend(ms(6), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	}, func(e *engine.Engine, _ time.Time) { mem = append(mem, e.Memory()) })
+	check(t, out, "2026-09-28 15:30:12.350 10.0.0.1:52816 -> 10.0.0.2:80 complete 1.0ms\n"+
+		"GET /TOKEN HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 204 No Content\r\n\r\n")
+	want := []int64{1024, 1024, 1024, 2048, 2048, 2048, 2048,
+		2048, 2048, 2048, // C3 握手：SYN 之后释放了 C2
+		2048,             // C2 四元组上的请求：丢弃交互，释放 C1
+		2048 + 512 + 23, 2048}
+	if !slices.Equal(mem, want) {
+		t.Fatalf("Memory after each packet = %v, want %v", mem, want)
+	}
+	if st.Connections != 4 || st.MidStream != 1 || st.Evicted != 1 || st.EvictedMatched != 1 ||
+		st.Exchanges != 2 || st.Complete != 1 {
 		t.Fatalf("stats: %+v", st)
 	}
 }

@@ -27,6 +27,15 @@ func (e *Engine) enforce(now time.Time) {
 		x := e.oldest
 		x.c.evict(x, now)
 	}
+	for e.Memory() > limit {
+		k, ok := e.asm.LeastRecent()
+		if !ok {
+			return
+		}
+		// Closed(CloseEvicted) 结束这条连接：队列里只剩占位（在途交互上面已经丢完），
+		// 回收即可。关闭前回放的 Upgrade 缓存可能又产生交互，它们随即以无响应结束。
+		e.asm.Release(k, now)
+	}
 }
 
 // track 把刚开始的交互 x 按开始时间插入在途链表。交互大体按开始时间先后创建，
