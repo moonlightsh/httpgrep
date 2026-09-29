@@ -359,10 +359,88 @@ func TestTTYEscape(t *testing.T) {
 			b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
 				Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte(tt.in)}}}}}
 			got := string(render(t, output.Options{Location: tz, TTY: true}, b))
-			want := "1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\n" + tt.want + "\n"
+			want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" + tt.want + "\n"
 			if got != want {
 				t.Errorf("转义不正确\n得到: %q\n期望: %q", got, want)
 			}
 		})
 	}
+}
+
+func TestTTYColors(t *testing.T) {
+	// Highlight 对包含 "hit" 的行返回其实际区间，其他行返回 nil。
+	hl := func(line []byte) [][2]int {
+		if i := bytes.Index(line, []byte("hit")); i >= 0 {
+			return [][2]int{{i, i + 3}}
+		}
+		return nil
+	}
+	t.Run("定位行与--的颜色", func(t *testing.T) {
+		b1 := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+			Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte("a\n")}}}}}
+		b2 := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+			Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte("b")}}}}}
+		got := string(render(t, output.Options{Location: tz, TTY: true, Highlight: hl}, b1, b2))
+		want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
+			"a\n" +
+			"\x1b[36m--\x1b[m\n" +
+			"\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
+			"b\n"
+		if got != want {
+			t.Errorf("颜色不正确\n得到: %q\n期望: %q", got, want)
+		}
+	})
+	t.Run("标记行黄色", func(t *testing.T) {
+		b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+			Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte("x")}, {Kind: output.PieceGap, N: 5, InBody: true}}}}}
+		got := string(render(t, output.Options{Location: tz, TTY: true, Highlight: hl}, b))
+		want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
+			"x\n" +
+			"\x1b[33m[gap: 5 bytes missing]\x1b[m\n"
+		if got != want {
+			t.Errorf("标记行颜色不正确\n得到: %q\n期望: %q", got, want)
+		}
+	})
+	t.Run("高亮一行内跨 Piece", func(t *testing.T) {
+		b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+			Messages: []output.Message{{Pieces: []output.Piece{
+				{Data: []byte("ab")},
+				{Data: []byte("hit\r\n")},
+				{Data: []byte("no hit here\n")},
+			}}}}
+		got := string(render(t, output.Options{Location: tz, TTY: true, Highlight: hl}, b))
+		want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
+			"ab\x1b[01;31mt\x1b[m\x1b[01;31m \x1b[m\x1b[01;31mt\x1b[m\r\n" +
+			"no \x1b[01;31mt\x1b[m\x1b[01;31m \x1b[m\x1b[01;31mt\x1b[m here\n"
+		_ = want
+		// 上面区间是编的，实际期望按规则算：行是 "abhit"（去 \r\n），命中 [2,5)。
+		want = "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
+			"ab\x1b[01;31mhit\x1b[m\r\n" +
+			"no \x1b[01;31mhit\x1b[m here\n"
+		if got != want {
+			t.Errorf("高亮不正确\n得到: %q\n期望: %q", got, want)
+		}
+	})
+	t.Run("Highlight 为 nil 不加色", func(t *testing.T) {
+		b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+			Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte("hit\n")}}}}}
+		got := string(render(t, output.Options{Location: tz, TTY: true}, b))
+		want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
+			"hit\n"
+		if got != want {
+			t.Errorf("nil Highlight 不正确\n得到: %q\n期望: %q", got, want)
+		}
+	})
+	t.Run("末尾没有换行的行也高亮", func(t *testing.T) {
+		b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+			Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte("xx hit yy")}}}}}
+		got := string(render(t, output.Options{Location: tz, TTY: true, Highlight: hl}, b))
+		want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
+			"xx xx\x1b[01;31mhit\x1b[m yy" // 注意 hl 固定返回 [2,5)
+		want = "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
+			"xx \x1b[01;31mhit\x1b[m yy\n"
+		if got != want {
+			t.Errorf("末行高亮不正确\n得到: %q\n期望: %q", got, want)
+		}
+	})
 }

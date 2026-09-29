@@ -2,6 +2,7 @@
 package output
 
 import (
+	"bytes"
 	"io"
 	"net/netip"
 	"strconv"
@@ -67,7 +68,9 @@ type Writer struct {
 	w    io.Writer
 	opt  Options
 	buf  []byte
-	prev bool // 之前是否已经写过块
+	prev bool   // 之前是否已经写过块
+	line []byte // TTY 模式下暂存还没写完的行
+	esc  []byte // TTY 模式下转义后的行缓冲
 }
 
 // NewWriter 创建一个 Writer。
@@ -79,12 +82,21 @@ func NewWriter(w io.Writer, opt Options) *Writer {
 func (w *Writer) Write(b *Block) error {
 	w.buf = w.buf[:0]
 	if w.prev {
-		w.buf = append(w.buf, "--\n"...)
+		if w.opt.TTY {
+			w.buf = append(w.buf, "\x1b[36m--\x1b[m\n"...)
+		} else {
+			w.buf = append(w.buf, "--\n"...)
+		}
 	}
 	w.prev = true
 	w.writeLocationLine(b)
 	for i := range b.Messages {
 		w.writeMessage(&b.Messages[i])
+		// 消息结束时，暂存的行即使没有换行也要写出并补换行
+		if w.opt.TTY && len(w.line) > 0 {
+			w.flushLine(false)
+			w.buf = append(w.buf, '\n')
+		}
 	}
 	_, err := w.w.Write(w.buf)
 	return err
@@ -107,61 +119,124 @@ func (w *Writer) writeMessage(m *Message) {
 func (w *Writer) writePiece(p *Piece) {
 	switch p.Kind {
 	case PieceGap, PieceTruncated:
-		if len(w.buf) > 0 && w.buf[len(w.buf)-1] != '\n' {
+		if len(w.line) > 0 {
+			// 标记行必须自己占一行，先把暂存的行写出（flushLine 已带换行）
+			w.flushLine(true)
+		} else if len(w.buf) > 0 && w.buf[len(w.buf)-1] != '\n' {
 			w.buf = append(w.buf, '\n')
 		}
+		start := len(w.buf)
 		if p.Kind == PieceGap {
 			w.buf = append(w.buf, "[gap: "...)
 			w.buf = strconv.AppendInt(w.buf, p.N, 10)
-			w.buf = append(w.buf, " bytes missing]\n"...)
+			w.buf = append(w.buf, " bytes missing]"...)
 		} else {
 			w.buf = append(w.buf, "[truncated: "...)
 			w.buf = strconv.AppendInt(w.buf, p.N, 10)
-			w.buf = append(w.buf, " bytes over --max-message]\n"...)
+			w.buf = append(w.buf, " bytes over --max-message]"...)
 		}
+		if w.opt.TTY {
+			w.colorize(start, len(w.buf), "\x1b[33m", "\x1b[m")
+		}
+		w.buf = append(w.buf, '\n')
 	default:
 		if w.opt.TTY {
-			w.appendEscaped(p.Data)
+			w.appendHighlighted(p.Data)
 		} else {
 			w.buf = append(w.buf, p.Data...)
 		}
 	}
 }
 
-// appendEscaped 把内容里的控制字符转成可见的 \xNN 形式后追加：
+// appendHighlighted 把内容转义后追加，按行调用 Highlight，命中区间用红色包住。
+// 一行可能跨多个 Piece：行缓冲在 Writer 里暂存，遇到换行或块结束时才写出。
+func (w *Writer) appendHighlighted(data []byte) {
+	for len(data) > 0 {
+		// 找下一个换行
+		i := bytes.IndexByte(data, '\n')
+		if i < 0 {
+			w.line = append(w.line, data...)
+			return
+		}
+		w.line = append(w.line, data[:i]...)
+		data = data[i+1:]
+		w.flushLine(true)
+	}
+}
+
+// flushLine 把暂存的行写出。有换行时 lineEnd 是 "\n"，行尾的 \r 不逃逸不参与高亮。
+func (w *Writer) flushLine(newline bool) {
+	line := w.line
+	tail := ""
+	if newline && len(line) > 0 && line[len(line)-1] == '\r' {
+		tail = "\r"
+		line = line[:len(line)-1]
+	}
+	// 先转义到临时缓冲区，再把转义后的行传给 Highlight
+	w.esc = w.esc[:0]
+	w.esc = appendEscapedTo(w.esc, line)
+	start := len(w.buf)
+	w.buf = append(w.buf, w.esc...)
+	if w.opt.Highlight != nil {
+		ranges := w.opt.Highlight(w.esc)
+		// 逆序应用区间，避免位置移动
+		for i := len(ranges) - 1; i >= 0; i-- {
+			lo, hi := ranges[i][0], ranges[i][1]
+			if lo < 0 {
+				lo = 0
+			}
+			if hi > len(w.esc) {
+				hi = len(w.esc)
+			}
+			if lo >= hi {
+				continue
+			}
+			w.colorize(start+lo, start+hi, "\x1b[01;31m", "\x1b[m")
+		}
+	}
+	if tail != "" {
+		w.buf = append(w.buf, tail...)
+	}
+	if newline {
+		w.buf = append(w.buf, '\n')
+	}
+	w.line = w.line[:0]
+}
+
 // \t、\r、\n 以外的 C0 字符和 DEL；合法 UTF-8 编码的 C1 字符（C2 80–C2 9F，
 // 两字节都转义）；以及不成 UTF-8 序列的单个 0x80–0x9F 字节。其他字节原样。
-func (w *Writer) appendEscaped(data []byte) {
+func appendEscapedTo(buf, data []byte) []byte {
 	for i := 0; i < len(data); {
 		c := data[i]
 		switch {
 		case c < 0x20 && c != '\t' && c != '\r' && c != '\n', c == 0x7f:
-			w.appendHex(c)
+			buf = appendHex(buf, c)
 			i++
 		case c == 0xc2 && i+1 < len(data) && data[i+1] >= 0x80 && data[i+1] <= 0x9f:
 			// 合法 UTF-8 的 C1 字符，两个字节都转义
-			w.appendHex(c)
-			w.appendHex(data[i+1])
+			buf = appendHex(buf, c)
+			buf = appendHex(buf, data[i+1])
 			i += 2
 		case c >= 0x80 && c <= 0x9f:
 			// 不成 UTF-8 序列的单字节（前面不是能和它组成序列的引导字节）
-			w.appendHex(c)
+			buf = appendHex(buf, c)
 			i++
 		case c >= 0xc2 && c < 0xf0 && i+1 < len(data):
 			// 多字节 UTF-8 序列，原样拷贝
 			n := utf8SeqLen(c)
 			if i+n <= len(data) && validSeq(data[i:i+n]) {
-				w.buf = append(w.buf, data[i:i+n]...)
+				buf = append(buf, data[i:i+n]...)
 				i += n
 			} else {
-				w.buf = append(w.buf, c)
+				buf = append(buf, c)
 				i++
 			}
 		default:
-			w.buf = append(w.buf, c)
+			buf = append(buf, c)
 			i++
 		}
 	}
+	return buf
 }
 
 // utf8SeqLen 返回引导字节对应的序列长度（假定是合法引导字节）。
@@ -187,13 +262,14 @@ func validSeq(s []byte) bool {
 }
 
 // appendHex 追加小写十六进制形式的 \xNN。
-func (w *Writer) appendHex(c byte) {
+func appendHex(buf []byte, c byte) []byte {
 	const hexdigits = "0123456789abcdef"
-	w.buf = append(w.buf, '\\', 'x', hexdigits[c>>4], hexdigits[c&0xf])
+	return append(buf, '\\', 'x', hexdigits[c>>4], hexdigits[c&0xf])
 }
 
 // writeLocationLine 写定位行。
 func (w *Writer) writeLocationLine(b *Block) {
+	start := len(w.buf)
 	loc := w.opt.Location
 	if loc == nil {
 		loc = time.Local
@@ -235,6 +311,20 @@ func (w *Writer) writeLocationLine(b *Block) {
 		w.buf = append(w.buf, "ms"...)
 	}
 	w.buf = append(w.buf, '\n')
+	if w.opt.TTY {
+		// 定位行整体用紫色包住（不含末尾换行）
+		w.colorize(start, len(w.buf)-1, "\x1b[35m", "\x1b[m")
+	}
+}
+
+// colorize 用 begin/end 把 buf[from:to] 包起来。to 之后的内容保留在后。
+func (w *Writer) colorize(from, to int, begin, end string) {
+	tail := append([]byte(nil), w.buf[to:]...)
+	seg := append([]byte(nil), w.buf[from:to]...)
+	w.buf = append(w.buf[:from], begin...)
+	w.buf = append(w.buf, seg...)
+	w.buf = append(w.buf, end...)
+	w.buf = append(w.buf, tail...)
 }
 
 // writeBinaryMessage 写二进制 body 的消息：从第一个 body 类 Piece 起的连续一段
