@@ -224,3 +224,34 @@ func TestTimeoutOrderByDeadline(t *testing.T) {
 		"2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n"+
 		"GET /TOKEN-A HTTP/1.1\r\n\r\n")
 }
+
+// 空闲 60 秒（2 倍交互超时）的连接被释放：A、B 在 t=60 释放后，同时存在的连接数随之减少，
+// 之后 C 打开时只有 2 条连接（PeakConns 为 2，不释放的话是 3）。
+// 之后 A 的四元组上的新数据按半路连接处理：新建连接、按内容判定角色，交互照常输出。
+// A 的请求已经在 t=30 超时输出，释放时占位直接回收，不再以 no-response(closed) 输出。
+func TestIdleConnectionReleased(t *testing.T) {
+	cli3 := netip.MustParseAddrPort("10.0.0.1:52816")
+	snaps, out, st := replayTicks(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		a := pcapgen.NewConn(w, cli1, srv)
+		a.Handshake(ms(-1))
+		a.ClientSend(ms(0), []byte("GET /TOKEN-1 HTTP/1.1\r\n\r\n"))
+		b := pcapgen.NewConn(w, cli2, srv)
+		b.Handshake(ms(0))
+		a.ClientSend(ms(61000), []byte("GET /TOKEN-2 HTTP/1.1\r\n\r\n"))
+		a.ServerSend(ms(61003), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+		c := pcapgen.NewConn(w, cli3, srv)
+		c.Handshake(ms(62000))
+	}, ms(30000), ms(59999.9), ms(60000))
+	first := "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n" +
+		"GET /TOKEN-1 HTTP/1.1\r\n\r\n"
+	check(t, snaps[0], first)
+	check(t, snaps[2], first)
+	check(t, out, first+
+		"--\n"+
+		"2026-09-28 15:31:13.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 3.0ms\n"+
+		"GET /TOKEN-2 HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 204 No Content\r\n\r\n")
+	if st.Connections != 4 || st.MidStream != 1 || st.PeakConns != 2 || st.NoResponseClosed != 0 || st.NoResponseTimeout != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
