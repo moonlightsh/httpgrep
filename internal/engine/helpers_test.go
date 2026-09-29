@@ -47,6 +47,16 @@ func matcher(t *testing.T, patterns ...string) *match.Matcher {
 // cfg 里为零的 Timeout、MaxMemory、MaxMessage 取命令行的默认值。
 func replay(t *testing.T, cfg engine.Config, build func(w *pcapgen.Writer)) (string, engine.Stats) {
 	t.Helper()
+	_, out, st := replayTicks(t, cfg, build)
+	return out, st
+}
+
+// replayTicks 同 replay，另外在 ticks 的每个时刻单独调用一次 Advance（不带包），
+// 模拟流量停下来后时钟继续前进。早于某个包的时刻在喂这个包之前处理，
+// 和包同时的时刻在它之后处理。snaps[i] 是 Advance(ticks[i]) 之后已经渲染出的全部文本。
+// 最后以最后一个包和最后一个时刻里较晚的那个调用 Finish。ticks 要按时间先后排列。
+func replayTicks(t *testing.T, cfg engine.Config, build func(w *pcapgen.Writer), ticks ...time.Time) (snaps []string, final string, st engine.Stats) {
+	t.Helper()
 	var capture bytes.Buffer
 	w := pcapgen.NewWriter(&capture, pcap.LinkEthernet)
 	build(w)
@@ -71,6 +81,10 @@ func replay(t *testing.T, cfg engine.Config, build func(w *pcapgen.Writer)) (str
 		}
 	}
 	e := engine.New(cfg)
+	tick := func(now time.Time) {
+		e.Advance(now)
+		snaps = append(snaps, out.String())
+	}
 
 	r, err := pcap.NewReader(&capture)
 	if err != nil {
@@ -86,15 +100,27 @@ func replay(t *testing.T, cfg engine.Config, build func(w *pcapgen.Writer)) (str
 		if err != nil {
 			t.Fatal(err)
 		}
+		for len(ticks) > 0 && ticks[0].Before(p.Timestamp) {
+			tick(ticks[0])
+			ticks = ticks[1:]
+		}
 		if decode.Decode(r.LinkType(), p.Data, p.OrigLen, &seg) != decode.OK {
 			t.Fatalf("packet at %v does not decode", p.Timestamp)
 		}
 		e.Segment(&seg, p.Timestamp)
 		e.Advance(p.Timestamp)
 		last = p.Timestamp
+		for len(ticks) > 0 && ticks[0].Equal(p.Timestamp) {
+			tick(ticks[0])
+			ticks = ticks[1:]
+		}
+	}
+	for _, now := range ticks {
+		tick(now)
+		last = now
 	}
 	e.Finish(last)
-	return out.String(), e.Stats()
+	return snaps, out.String(), e.Stats()
 }
 
 // check 比较渲染出的文本。

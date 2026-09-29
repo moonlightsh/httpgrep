@@ -360,6 +360,15 @@ func (c *conn) closeQueue(why string, all bool) {
 	}
 }
 
+// timeout 在 at 结束超时的交互 x：没收到响应的标为 no-response(timeout)。
+func (c *conn) timeout(x *exchange, at time.Time) {
+	c.now = at
+	if !x.hasRes {
+		x.noResp = noRespTimeout
+	}
+	c.finish(x)
+}
+
 // resumeHeld 把请求解析器缓存的、Upgrade 请求之后的字节按 HTTP 回放，
 // 然后补上推迟的客户端 FIN。Upgrade 请求得到普通响应、要关闭连接或超时之前调用。
 // 回放出的请求可能又是 Upgrade 请求而重新开始缓存，此时 held 仍为真。
@@ -416,19 +425,21 @@ func (s *reqSink) Begin(b http1.Begin) {
 		return
 	}
 	c := s.c
-	x := c.e.newExchange()
+	x := c.e.newExchange(c)
 	x.hasReq = true
 	x.start, x.reqLast = b.TS, b.TS
 	x.reqOff = b.Off
 	x.reqMsg = x.addMessage(dirReq)
 	c.queue = append(c.queue, x)
 	s.cur = x
+	c.e.arm(x, b.TS)
 }
 
 func (s *reqSink) Raw(sec http1.Section, b []byte) {
 	if x := s.cur; x != nil {
 		// 回放 Upgrade 请求之后缓存的字节时，LastTS 是这些字节所在缓存段的时间。
 		x.reqLast = s.c.req.LastTS()
+		x.touch(x.reqLast)
 		x.raw(x.reqMsg, sec, b)
 		s.c.e.addBuffered(len(b))
 	}
@@ -517,9 +528,10 @@ func (s *resSink) Begin(b http1.Begin) {
 			c.e.stats.Orphans++
 			return
 		}
-		x = c.e.newExchange()
+		x = c.e.newExchange(c)
 		x.noReq, x.reqDone = true, true
 		x.start = b.TS
+		c.e.arm(x, b.TS)
 	}
 	s.open(x, b.Orphan)
 }
@@ -557,6 +569,7 @@ func (s *resSink) open(x *exchange, orphan bool) {
 func (s *resSink) Raw(sec http1.Section, b []byte) {
 	if x := s.cur; x != nil {
 		x.resLast = s.c.now
+		x.touch(x.resLast)
 		x.raw(x.resMsg, sec, b)
 		s.c.e.addBuffered(len(b))
 	}

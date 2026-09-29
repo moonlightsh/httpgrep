@@ -63,11 +63,19 @@ type scanDir struct {
 
 // exchange 是一个交互：一个请求和它的响应（含 1xx）。
 type exchange struct {
+	c *conn // 所属连接
+
 	start   time.Time // 定位行的时间：请求第一个包，缺请求时用响应的
 	reqLast time.Time // 请求最后一个包
 	resLast time.Time // 响应最后一个包
 
 	reqOff int64 // 请求第一个字节的流偏移，用于 ACK 校验
+
+	// 超时计时。last 是最后一次收到属于它的数据的时间（开始计时的时刻也算）；
+	// key 和 hpos 由 timers 维护，hpos 为 0 表示不在计时。
+	last time.Time
+	key  time.Time
+	hpos int
 
 	hasReq     bool
 	noReq      bool // 缺请求：响应配不上任何请求
@@ -99,6 +107,13 @@ const (
 	noRespClosed  = "closed"
 	noRespEOF     = "eof"
 )
+
+// touch 记下 ts 收到了属于这个交互的数据。
+func (x *exchange) touch(ts time.Time) {
+	if ts.After(x.last) {
+		x.last = ts
+	}
+}
 
 // status 返回交互结束时的状态。
 func (x *exchange) status() output.Status {

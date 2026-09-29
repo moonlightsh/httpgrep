@@ -28,6 +28,7 @@ type Engine struct {
 	stats Stats
 
 	free     []*exchange // 回收的交互，连同缓存和扫描器一起复用
+	timers   timers      // 正在计时的在途交互，按到期时间排序
 	inFlight int
 	buffered int64 // 在途交互缓存的消息字节数
 
@@ -65,13 +66,43 @@ func (e *Engine) open(info tcp.ConnInfo) tcp.Handler {
 }
 
 // Segment 处理一个 TCP 段。ts 是抓包时间，单调不减。
+// 先结束到 ts 为止已经超时的交互：调用方没有在两个包之间调用 Advance 时，
+// 这个段的数据也不会让已经超时的交互续命。
 func (e *Engine) Segment(seg *decode.Segment, ts time.Time) {
+	e.expire(ts)
 	e.asm.Add(seg, ts)
 }
 
 // Advance 推进时钟，只处理到期的定时器。now 单调不减。
 func (e *Engine) Advance(now time.Time) {
+	e.expire(now)
 	e.asm.Advance(now)
+}
+
+// expire 按到期时间的先后结束到 now 为止超时的交互。
+// 堆里的 key 不随每个包更新（见 timers），堆顶到期时先按 last 核对真正的到期时间。
+func (e *Engine) expire(now time.Time) {
+	for len(e.timers) > 0 {
+		x := e.timers[0]
+		if x.key.After(now) {
+			return
+		}
+		if at := x.last.Add(e.cfg.Timeout); at.After(x.key) {
+			x.key = at
+			e.timers.fixTop()
+			continue
+		}
+		e.timers.remove(x)
+		x.c.timeout(x, x.key)
+	}
+}
+
+// arm 从 at 起给交互 x 计时：at 之前收到的数据不再算数。
+func (e *Engine) arm(x *exchange, at time.Time) {
+	if at.After(x.last) {
+		x.last = at
+	}
+	e.timers.push(x, x.last.Add(e.cfg.Timeout))
 }
 
 // Finish 在输入结束时调用：在途交互都以 eof 结束。
@@ -79,8 +110,8 @@ func (e *Engine) Finish(now time.Time) {
 	e.asm.Flush(now)
 }
 
-// newExchange 取一个空的交互。
-func (e *Engine) newExchange() *exchange {
+// newExchange 为连接 c 取一个空的交互。
+func (e *Engine) newExchange(c *conn) *exchange {
 	var x *exchange
 	if n := len(e.free); n > 0 {
 		x = e.free[n-1]
@@ -94,6 +125,7 @@ func (e *Engine) newExchange() *exchange {
 		}
 	}
 	x.reset()
+	x.c = c
 	e.stats.Exchanges++
 	e.inFlight++
 	if e.inFlight > e.stats.PeakInFlight {
@@ -104,6 +136,7 @@ func (e *Engine) newExchange() *exchange {
 
 // finish 结束交互：计入统计，命中的输出，然后回收。
 func (e *Engine) finish(c *conn, x *exchange) {
+	e.timers.remove(x)
 	x.breakAll()
 	st := x.status()
 	switch {
