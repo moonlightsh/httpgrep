@@ -90,9 +90,12 @@ type work struct {
 	fin bool
 }
 
-// newMulti 创建 n 个分片，内存上限平均分给各分片。
+// newMulti 创建 n 个分片，内存上限平均分给各分片。每个分片至少 1 字节：
+// 整除成 0 的话引擎会当作不限（cli 已经拒绝 --max-memory 小于 --cpus，这里是兜底）。
 func newMulti(n int, cfg engine.Config, free chan<- *batch, out *sink) *multi {
-	cfg.MaxMemory /= int64(n)
+	if cfg.MaxMemory > 0 {
+		cfg.MaxMemory = max(cfg.MaxMemory/int64(n), 1)
+	}
 	m := &multi{free: free, out: out}
 	for i := range n {
 		s := &shard{idx: i, e: engine.New(cfg), in: make(chan work, poolSize)}
