@@ -504,3 +504,59 @@ func TestConnectRejected(t *testing.T) {
 	var calls int
 	checkAllChunkings(t, http1.Response, http1.Options{Method: methodFn("CONNECT", &calls)}, want, data(in))
 }
+
+func TestClose(t *testing.T) {
+	const toClose = "HTTP/1.1 200 OK\r\n\r\nabc"
+	toCloseEv := []string{"begin off=0", "raw head HTTP/1.1 200 OK\r\n\r\n", "head 200 HTTP/1.1", "raw body abc", "body abc"}
+	tests := []struct {
+		name  string
+		kind  http1.Kind
+		in    string
+		close step
+		want  []string // 在 in 的事件之后，由 Close 产生的事件
+		pre   []string // in 的事件
+	}{
+		{"read-to-close body fin", http1.Response, toClose, closeFin(), []string{"end true"}, toCloseEv},
+		{"read-to-close body rst", http1.Response, toClose, closeRst(), []string{"end false"}, toCloseEv},
+		{
+			"content-length body cut", http1.Response, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nab", closeFin(),
+			[]string{"end false"},
+			[]string{"begin off=0", "raw head HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", "head 200 HTTP/1.1", "raw body ab", "body ab"},
+		},
+		{
+			"head cut", http1.Request, "GET / HTTP/1.1\r\nHost: a\r\nAcc", closeFin(),
+			[]string{"end false"},
+			[]string{"begin off=0", "raw head GET / HTTP/1.1\r\nHost: a\r\nAcc"},
+		},
+		{
+			"chunked cut", http1.Request, "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nab", closeFin(),
+			[]string{"end false"},
+			[]string{"begin off=0", "raw head POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", "head POST / HTTP/1.1", "raw body 3\r\nab", "body ab"},
+		},
+		{
+			"trailer cut", http1.Request, "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX: 1\r\n", closeRst(),
+			[]string{"end false"},
+			[]string{"begin off=0", "raw head POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", "head POST / HTTP/1.1", "raw body 0\r\n", "raw trailer X: 1\r\n"},
+		},
+		{
+			"between messages", http1.Request, "GET / HTTP/1.1\r\n\r\n", closeFin(),
+			nil,
+			[]string{"begin off=0", "raw head GET / HTTP/1.1\r\n\r\n", "head GET / HTTP/1.1", "end true"},
+		},
+		{"partial start line", http1.Request, "GET / HT", closeFin(), nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := append(append([]string(nil), tt.pre...), tt.want...)
+			// Close 之后再喂数据，不再产生事件。
+			checkAllChunkings(t, tt.kind, http1.Options{}, want,
+				data(tt.in), tt.close.at(5), data("GET / HTTP/1.1\r\n\r\n"), gap(3), closeFin())
+			r := run(tt.kind, http1.Options{}, 0, data(tt.in), tt.close.at(5))
+			if tt.want != nil {
+				if len(r.ends) != 1 || !r.ends[len(r.ends)-1].Equal(t0.Add(5*time.Second)) {
+					t.Errorf("end times = %v, want the close time", r.ends)
+				}
+			}
+		})
+	}
+}

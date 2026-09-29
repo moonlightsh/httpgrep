@@ -194,7 +194,27 @@ func (p *Parser) Close(fin bool, ts time.Time) {
 	if p.st == stDead {
 		return
 	}
+	if p.open {
+		// 没收完的一行照样交付，保证 Raw 拼起来是原文。
+		if len(p.lb) > 0 {
+			p.sink.Raw(p.lineSection(), p.lb)
+		}
+		p.sink.End(fin && p.st == stBodyClose, ts)
+		p.open = false
+	}
+	p.lb = p.lb[:0]
 	p.st = stDead
+}
+
+// lineSection 返回当前状态下正在读的行所属的 Section。
+func (p *Parser) lineSection() Section {
+	switch p.st {
+	case stChunkSize, stChunkEnd:
+		return SecBody
+	case stTrailer:
+		return SecTrailer
+	}
+	return SecHead
 }
 
 // Resume 把 Upgrade 请求之后缓存的字节按 HTTP 解析。只对请求解析器有效。
