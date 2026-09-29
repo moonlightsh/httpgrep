@@ -389,7 +389,7 @@ func (c *conn) timeout(x *exchange, at time.Time) {
 		x.incomplete = true
 	}
 	c.e.end(c, x)
-	x.bury()
+	c.e.bury(x)
 	if !x.decided && (x.upgrade || !x.reqDone) {
 		// Upgrade 请求等不到决定了，按被拒处理：缓存在它后面的请求回放出来照常排队，
 		// 从现在起计时。请求还没发完时 Resume 只记下决定，发完后直接继续解析。
@@ -447,6 +447,9 @@ func (c *conn) finish(x *exchange) {
 
 // drop 回收不再需要的占位 x。
 func (c *conn) drop(x *exchange) {
+	if x.ghost {
+		c.e.ghosts--
+	}
 	c.unlink(x)
 	c.e.recycle(x)
 	c.rearm(c.now)

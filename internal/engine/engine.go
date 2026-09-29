@@ -32,6 +32,7 @@ type Engine struct {
 	timers   timers      // 正在计时的在途交互，按到期时间排序
 	inFlight int
 	buffered int64 // 在途交互缓存的消息字节数
+	ghosts   int   // 队列里的占位数（超时或被丢弃的交互），按 ghostOverhead 计入内存
 
 	// oldest、newest 是按开始时间排序的在途交互链表的两端，超过内存上限时从 oldest 丢起。
 	oldest, newest *exchange

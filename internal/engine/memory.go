@@ -9,13 +9,31 @@ import (
 const (
 	connOverhead     = 1024 // 每条连接
 	exchangeOverhead = 512  // 每个在途交互
+	// ghostOverhead 是每个占位的固定开销：占位只剩交互对象（64 位下 352 字节）和队列里的
+	// 一个指针，缓存和扫描器都已释放（见 exchange.bury）。
+	ghostOverhead = 384
 )
 
 // Memory 返回当前的内存计量值：在途交互缓存的消息字节、乱序缓存、
-// 每条连接和每个在途交互的固定开销。内存上限按它判断。
+// 每条连接、每个在途交互和每个占位的固定开销。内存上限按它判断。
+//
+// 已知的漏计（都不在计划列出的计量项里）：
+//   - 正则模式（以及含 \r 的字面关键词）下，扫描器缓存着没写完的行，最多 8 MiB，
+//     body 里没有换行时它和缓存的 body 差不多大，实际内存最多约为计量值的两倍。
+//     字面关键词走快速路径，不缓存行。match 没有导出行缓存的大小，引擎无法区分这两种情况。
+//   - http1 解析器内部的缓存：Upgrade 请求之后缓存的字节（每条连接最多 64 KiB）、
+//     没收完的头部行（最多 64 KiB），以及半路连接定角色之前多出来的两个解析器。
+//     每条连接 1 KiB 的固定开销不覆盖这些缓存。
 func (e *Engine) Memory() int64 {
 	return e.buffered + e.asm.BufferedBytes() +
-		int64(e.asm.Len())*connOverhead + int64(e.inFlight)*exchangeOverhead
+		int64(e.asm.Len())*connOverhead + int64(e.inFlight)*exchangeOverhead +
+		int64(e.ghosts)*ghostOverhead
+}
+
+// bury 把已经结束的交互 x 变成占位，计入占位数。
+func (e *Engine) bury(x *exchange) {
+	x.bury()
+	e.ghosts++
 }
 
 // 回收的交互不计入内存计量，所以限量：最多留 maxFree 个；它们留着的内存
@@ -147,7 +165,7 @@ func (c *conn) evict(x *exchange, now time.Time) {
 	e.inFlight--
 	e.buffered -= int64(len(x.buf))
 	x.evicted = true
-	x.bury()
+	e.bury(x)
 	// 排在它后面的请求轮到队首，从现在起计时。
 	c.rearm(now)
 }
