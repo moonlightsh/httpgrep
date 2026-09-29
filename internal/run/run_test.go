@@ -279,14 +279,14 @@ func TestRunStopReadsUntilEOF(t *testing.T) {
 		"GET /a HTTP/1.1\r\nX: HIT\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n")
 }
 
-// --cpus 4 时每个分片的内存上限是 --max-memory 的 1/4：一个缓存了约 100 KB 的在途请求
-// 在 256K 的上限下放得下，在 64K 的分片上限下被丢弃，stderr 写一行告警。
+// --cpus 4 时每个分片的内存上限是 --max-memory 的 1/4：一个缓存了 64053 字节的在途请求
+// 在 256K 的上限下放得下，在 64K 的分片上限下（加上连接和交互的固定开销）被丢弃，stderr 写一行告警。
 func TestRunShardMemoryLimit(t *testing.T) {
 	in := capture(t, func(w *pcapgen.Writer) {
 		c := pcapgen.NewConn(w, cli1, srv)
 		c.Handshake(ms(-1))
 		c.ClientSend(ms(0), []byte("POST /up HTTP/1.1\r\nX: HIT\r\nContent-Length: 200000\r\n\r\n"))
-		c.ClientSend(ms(1), bytes.Repeat([]byte("b"), 100000))
+		c.ClientSend(ms(1), bytes.Repeat([]byte("b"), 64000))
 	})
 	for _, tc := range []struct {
 		cpus        string
@@ -301,7 +301,7 @@ func TestRunShardMemoryLimit(t *testing.T) {
 		t.Run("cpus="+tc.cpus, func(t *testing.T) {
 			var out, errOut bytes.Buffer
 			matched, st, err := run.Run(run.Config{Input: bytes.NewReader(in), Stdout: &out, Stderr: &errOut,
-				Opts: opts(t, "--cpus", tc.cpus, "--max-memory", "256K", "--max-message", "128K", "HIT")})
+				Opts: opts(t, "--cpus", tc.cpus, "--max-memory", "256K", "--max-message", "64K", "HIT")})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -317,7 +317,7 @@ func TestRunShardMemoryLimit(t *testing.T) {
 // 距上一次告警不到 10 秒的丢弃累计到下一次，满 10 秒的一批报一次，输入结束时补报剩下的。
 // 输入分四段写进管道，每段各成一批：0 秒丢 3 个（告警），5 秒丢 3 个（累计），
 // 12 秒丢 2 个（告警 5 个），15 秒丢 3 个（输入结束时告警）。每个交互缓存约 70 KB，
-// 单核 64K、四核每个分片 16K 的上限都放不下，所以每个都被丢弃；
+// --max-message 取每个分片上限（单核 64K、四核 16K），截断后加上固定开销仍然放不下，所以每个都被丢弃；
 // 每段的连接落在不止一个分片上（--cpus 4 时分片各自告警就会多出几行）。
 func TestRunShardWarnsRateLimited(t *testing.T) {
 	var capture bytes.Buffer
@@ -350,13 +350,13 @@ func TestRunShardWarnsRateLimited(t *testing.T) {
 	const want = "httpgrep: dropped 3 in-flight exchanges (3 matched) to stay under --max-memory\n" +
 		"httpgrep: dropped 5 in-flight exchanges (5 matched) to stay under --max-memory\n" +
 		"httpgrep: dropped 3 in-flight exchanges (3 matched) to stay under --max-memory\n"
-	for _, cpus := range []string{"1", "4"} {
-		t.Run("cpus="+cpus, func(t *testing.T) {
+	for _, tc := range []struct{ cpus, maxMsg string }{{"1", "64K"}, {"4", "16K"}} {
+		t.Run("cpus="+tc.cpus, func(t *testing.T) {
 			pr, pw := io.Pipe()
 			defer pw.Close()
 			var out, errOut bytes.Buffer
 			ch := goRun(run.Config{Input: pr, Stdout: &out, Stderr: &errOut,
-				Opts: opts(t, "--cpus", cpus, "--max-memory", "64K", "--max-message", "64K", "HIT")})
+				Opts: opts(t, "--cpus", tc.cpus, "--max-memory", "64K", "--max-message", tc.maxMsg, "HIT")})
 			prev := 0
 			for _, c := range cuts {
 				// io.Pipe 的一次 Write 由读端一次读完；读下一段之前，读取协程先交出已经读到的包，

@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"math"
 	"slices"
 	"time"
 
@@ -60,13 +61,21 @@ type Engine struct {
 // reorderTimeout 是乱序数据最多等待的时间。
 const reorderTimeout = 2 * time.Second
 
+// idleTimeout 是连接空闲释放的时长：两倍交互超时，溢出时取最大值。
+func idleTimeout(d time.Duration) time.Duration {
+	if d > math.MaxInt64/2 {
+		return math.MaxInt64
+	}
+	return 2 * d
+}
+
 // New 创建引擎。
 func New(cfg Config) *Engine {
 	e := &Engine{cfg: cfg}
 	e.asm = tcp.NewAssembler(tcp.Config{
 		ReorderTimeout:  reorderTimeout,
 		MaxReorderBytes: cfg.MaxMessage,
-		IdleTimeout:     2 * cfg.Timeout,
+		IdleTimeout:     idleTimeout(cfg.Timeout),
 	}, e.open)
 	return e
 }

@@ -21,7 +21,7 @@ Options:
                     an exchange matches if any pattern matches
   -E                Interpret all patterns as regular expressions
   --timeout DUR     Exchange timeout: end an unfinished exchange after
-                    DUR without new data (default 30s)
+                    DUR without new data (default 30s); at most 8760h
   --max-memory SIZE Approximate limit for buffered data (default 256M):
                     request and response data, out-of-order segments,
                     partial header lines, bytes held after an Upgrade
@@ -34,8 +34,14 @@ Options:
                     runtime soft limit is set to 1.5 times this value
   --max-message SIZE
                     Limit for a single request or response; bytes over
-                    it are not buffered (default 8M)
-  --cpus N          Number of CPUs to use, 1 to 1024 (default 1)
+                    it are not buffered (default 8M). It cannot exceed
+                    --max-memory divided by --cpus; the default is
+                    lowered to that when it is smaller
+  --cpus N          Number of CPUs to use, 1 to 1024 (default 1). With
+                    N > 1, connections are split among N workers, each
+                    limited to 1/N of --max-memory; output is ordered
+                    by exchange end only within a worker, so blocks
+                    from different workers may be interleaved
   --stats           Print statistics to stderr before exiting
   --help            Show this help and exit
   --version         Show version information and exit
@@ -44,7 +50,7 @@ SIZE accepts K, M, G suffixes (powers of 1024). DUR is a Go duration
 such as 30s or 2m. Options may appear before or after PATTERN and FILE;
 arguments after -- are never treated as options.
 
-Live search (tcpdump 4.7 or later):
+Live search:
   tcpdump -i lo -U --immediate-mode -w - port 7010 | httpgrep PATTERN
 Without --immediate-mode, tcpdump may hold packets for up to about 1s
 before writing them, so matches are printed that much later.
@@ -81,7 +87,7 @@ func Parse(args []string) (Options, error) {
 		MaxMessage: 8 << 20,
 		CPUs:       1,
 	}
-	hasE := false
+	hasE, msgSet := false, false
 	var positional []string
 	// 第 i 位待处理；一个参数可能既当选项又带值，也可能合并多个短选项。
 	for i := 0; i < len(args); i++ {
@@ -106,6 +112,9 @@ func Parse(args []string) (Options, error) {
 				if err != nil {
 					return opts, err
 				}
+				if opts.Timeout > maxTimeout {
+					return opts, &errBadArg{"invalid duration for --timeout: " + val + " (at most 8760h)"}
+				}
 			case "max-memory":
 				if !hasVal {
 					i, val, err = takeArg(args, i, "--max-memory")
@@ -128,6 +137,7 @@ func Parse(args []string) (Options, error) {
 				if err != nil {
 					return opts, err
 				}
+				msgSet = true
 			case "cpus":
 				if !hasVal {
 					i, val, err = takeArg(args, i, "--cpus")
@@ -201,11 +211,24 @@ done:
 	if !opts.Help && !opts.Version && len(opts.Patterns) == 0 {
 		return opts, &errBadArg{"no pattern given"}
 	}
+	// 每个分片的内存上限是 MaxMemory/CPUs。单条消息超过它时，本该截断的消息会整笔
+	// 因内存上限丢弃，所以 MaxMessage 不能超过它；没给 --max-message 时默认值随之下调。
+	share := opts.MaxMemory / int64(opts.CPUs)
+	if !msgSet {
+		opts.MaxMessage = min(opts.MaxMessage, share)
+	}
 	if opts.MaxMessage > opts.MaxMemory {
 		return opts, &errBadArg{"--max-message cannot exceed --max-memory"}
 	}
+	if opts.MaxMessage > share {
+		return opts, &errBadArg{"--max-message cannot exceed --max-memory divided by --cpus (" +
+			strconv.FormatInt(share, 10) + " bytes per worker with --cpus " + strconv.Itoa(opts.CPUs) + ")"}
+	}
 	return opts, nil
 }
+
+// maxTimeout 是 --timeout 的上限（一年）。连接空闲释放用两倍超时，再大会溢出。
+const maxTimeout = 8760 * time.Hour
 
 // takeArg 取选项值：优先用下一个参数。
 func takeArg(args []string, i int, name string) (int, string, error) {
