@@ -130,6 +130,7 @@ func printStats(w io.Writer, st engine.Stats, elapsed time.Duration) {
 		{"gaps", st.Gaps},
 		{"gap bytes", st.GapBytes},
 		{"desyncs", st.Desyncs},
+		{"non-HTTP connections", st.NonHTTP},
 		{"ip fragments", st.Fragments},
 		{"not tcp", st.NotTCP},
 		{"malformed", st.Malformed},

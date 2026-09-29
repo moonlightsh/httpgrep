@@ -138,10 +138,10 @@ func tlsRecord(n int) []byte {
 	return append(b, "TOKEN-42"...)
 }
 
-// 客户端方向的 Orphan 消息只计数、丢弃：一条 TLS 连接不产生交互，也不输出任何块，
-// 即使字节里含关键词。服务端方向同样找不到状态行，队列为空，Orphan 也丢弃。
-// 两个方向各失步一次，各开始一条 Orphan 消息（找不到起始行，一直不结束）。
-func TestTLSConnectionOrphans(t *testing.T) {
+// 非 HTTP 的连接（比如 TLS）：一条 TLS 连接不产生交互，也不输出任何块，即使字节里含关键词。
+// 两个方向都找不到起始行，从来没有对齐过，不计入 Desyncs 和 Orphans（否则 TLS 流量多时
+// 失步数没有参考意义），改为计入 NonHTTP，每条连接计一次。
+func TestTLSConnectionNonHTTP(t *testing.T) {
 	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN-42")}, func(w *pcapgen.Writer) {
 		c := pcapgen.NewConn(w, cli1, srv)
 		c.Handshake(ms(-1))
@@ -153,7 +153,42 @@ func TestTLSConnectionOrphans(t *testing.T) {
 		c.ServerFin(ms(5))
 	})
 	check(t, out, "")
-	if st.Exchanges != 0 || st.Orphans != 2 || st.Desyncs != 2 {
+	if st.Connections != 1 || st.Exchanges != 0 || st.Orphans != 0 || st.Desyncs != 0 || st.NonHTTP != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 没看到 SYN 的 TLS 连接（角色一直定不下来），输入结束时还没关闭：同样只计入 NonHTTP。
+func TestMidStreamTLSNonHTTP(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN-42")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.ClientSend(ms(0), tlsRecord(300))
+		c.ServerSend(ms(1), tlsRecord(3000))
+	})
+	check(t, out, "")
+	if st.MidStream != 1 || st.Exchanges != 0 || st.Orphans != 0 || st.Desyncs != 0 || st.NonHTTP != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 连接先有非 HTTP 的字节、后来对齐了起始行：对齐之前的失步和 Orphan 照常计数，不算非 HTTP 连接。
+// 没有载荷的连接（只有握手和 FIN）也不算。
+func TestDesyncBeforeAlignCounted(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("garbage TOKEN-x\r\n"))
+		c.ClientSend(ms(1), []byte("GET /a HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(3), []byte("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-a"))
+		c2 := pcapgen.NewConn(w, cli2, srv)
+		c2.Handshake(ms(4))
+		c2.ClientFin(ms(5))
+		c2.ServerFin(ms(6))
+	})
+	check(t, out, "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 complete 2.0ms\n"+
+		"GET /a HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-a\n")
+	if st.Connections != 2 || st.Exchanges != 1 || st.Complete != 1 || st.Desyncs != 1 || st.Orphans != 1 || st.NonHTTP != 0 {
 		t.Fatalf("stats: %+v", st)
 	}
 }

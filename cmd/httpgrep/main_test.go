@@ -339,6 +339,7 @@ func TestStats(t *testing.T) {
 		{"gaps", "0"},
 		{"gap bytes", "0"},
 		{"desyncs", "0"},
+		{"non-HTTP connections", "0"},
 		{"ip fragments", "0"},
 		{"not tcp", "0"},
 		{"malformed", "0"},

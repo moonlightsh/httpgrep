@@ -51,6 +51,13 @@ type conn struct {
 	cliFin   bool
 	cliFinTS time.Time
 
+	// aligned 表示这条连接对齐过起始行：任一方向的解析器产生过非 Orphan 的 Begin。
+	// 对齐之前的失步和 Orphan 消息先记在 pendDesyncs、pendOrphans 里，第一次对齐时计入统计；
+	// 连接释放时还没对齐过、却有这样的字节，就是非 HTTP 的连接（比如 TLS），计入 NonHTTP，
+	// 不计入 Desyncs 和 Orphans。
+	aligned                  bool
+	pendDesyncs, pendOrphans int64
+
 	now time.Time // 当前回调所属包的时间。请求的时间不用它，取 req.LastTS()：回放缓存时 now 不是那些字节的时间
 }
 
@@ -120,6 +127,36 @@ func (c *conn) decide(pr *probe) {
 	}
 	c.srvClosed = c.finSide[srv]
 	c.known = true
+	c.align()
+}
+
+// align 在连接第一次对齐起始行时调用：之前记下的失步和 Orphan 计入统计。
+func (c *conn) align() {
+	if c.aligned {
+		return
+	}
+	c.aligned = true
+	c.e.stats.Desyncs += c.pendDesyncs
+	c.e.stats.Orphans += c.pendOrphans
+	c.pendDesyncs, c.pendOrphans = 0, 0
+}
+
+// desync 记一次失步，orphan 记一条不属于任何交互、丢弃的 Orphan 消息；
+// 连接还没对齐过时先记下，见 aligned。
+func (c *conn) desync() {
+	if c.aligned {
+		c.e.stats.Desyncs++
+	} else {
+		c.pendDesyncs++
+	}
+}
+
+func (c *conn) orphan() {
+	if c.aligned {
+		c.e.stats.Orphans++
+	} else {
+		c.pendOrphans++
+	}
 }
 
 // chosen 报告 pr 是否是定角色后留下的解析器。
@@ -135,7 +172,7 @@ func (pr *probe) Begin(b http1.Begin) {
 		if b.Orphan {
 			c.orphanOff[pr.side][pr.kind] = b.Off
 			if c.orphanOff[pr.side][1-pr.kind] == b.Off {
-				c.e.stats.Orphans++
+				c.orphan()
 			}
 			return
 		}
@@ -320,6 +357,7 @@ func (c *conn) Reset(ts time.Time) {
 // 连续 2 倍交互超时没有任何包，同样是等不到响应。
 // 因内存上限释放（CloseEvicted）时在途交互已经都丢弃了，队列里只剩占位；
 // 等决定的 Upgrade 请求在丢弃时已经放弃（见 giveUp），请求解析器没有缓存。
+// 从未对齐过起始行、却有失步或 Orphan 字节的连接在这里计入 NonHTTP（见 aligned）。
 func (c *conn) Closed(reason tcp.CloseReason, ts time.Time) {
 	why := noRespClosed
 	switch reason {
@@ -329,6 +367,9 @@ func (c *conn) Closed(reason tcp.CloseReason, ts time.Time) {
 		why = noRespTimeout
 	}
 	c.close(why, ts)
+	if !c.aligned && c.pendDesyncs+c.pendOrphans > 0 {
+		c.e.stats.NonHTTP++
+	}
 }
 
 // close 结束两个方向的解析和所有在途交互：没收完的消息标为不完整，
@@ -499,11 +540,12 @@ func (c *conn) rearm(at time.Time) {
 // 客户端方向的 Orphan 消息（连请求行都没抓到）丢弃，只计数。
 func (s *reqSink) Begin(b http1.Begin) {
 	if b.Orphan {
-		s.c.e.stats.Orphans++
+		s.c.orphan()
 		s.cur = nil
 		return
 	}
 	c := s.c
+	c.align()
 	x := c.e.newExchange(c)
 	x.hasReq = true
 	x.start, x.reqLast = b.TS, b.TS
@@ -600,7 +642,7 @@ func (s *reqSink) End(complete bool, ts time.Time) {
 	}
 }
 
-func (s *reqSink) Desync(off int64) { s.c.e.stats.Desyncs++ }
+func (s *reqSink) Desync(off int64) { s.c.desync() }
 
 // Begin 实现 http1.Sink：响应按顺序归入第一个还没收完最终响应的交互。
 // 通常就是队首；队首的请求还没发完、响应却已收完时，它还留在队列里。
@@ -613,10 +655,13 @@ func (s *reqSink) Desync(off int64) { s.c.e.stats.Desyncs++ }
 func (s *resSink) Begin(b http1.Begin) {
 	s.cur = nil
 	c := s.c
+	if !b.Orphan {
+		c.align()
+	}
 	x := s.target(b.PeerAck)
 	if x == nil {
 		if b.Orphan {
-			c.e.stats.Orphans++
+			c.orphan()
 			return
 		}
 		x = c.e.newExchange(c)
@@ -785,4 +830,4 @@ func (s *resSink) End(complete bool, ts time.Time) {
 	s.c.finish(x)
 }
 
-func (s *resSink) Desync(off int64) { s.c.e.stats.Desyncs++ }
+func (s *resSink) Desync(off int64) { s.c.desync() }
