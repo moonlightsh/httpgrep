@@ -129,23 +129,6 @@ func TestTrailingCRNotPartOfLine(t *testing.T) {
 	}
 }
 
-// 命中之后 Write 直接返回，不再处理后续数据。
-func TestEarlyReturnAfterMatch(t *testing.T) {
-	m, _ := match.Compile([]string{"first"}, false)
-	s := m.NewScanner()
-	s.Write([]byte("first line\n"))
-	if !s.Matched() {
-		t.Fatal("expected match")
-	}
-	// 命中后再写入任何数据都不改变状态、不出错。
-	s.Write([]byte("more data without newline"))
-	s.Break()
-	s.Write([]byte("tail"))
-	if !s.Matched() {
-		t.Fatal("Matched must stay true")
-	}
-}
-
 // 正则按行匹配，^、$ 锚定行首行尾，支持 (?i)，多个正则合并编译。
 func TestRegexLineMatching(t *testing.T) {
 	m, err := match.Compile([]string{`^POST\s`, `(?i)content-type:\s*application/json`}, true)
@@ -456,6 +439,13 @@ func TestEarlyReturnZeroAlloc(t *testing.T) {
 	// 命中后允许零星分配，但绝不应缓存近 8 MiB。
 	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
 		t.Fatalf("Write after match must not process data; allocated %d bytes", grew)
+	}
+	// 命中后再写入、Break 都不改变状态。
+	s.Write([]byte("more data without newline"))
+	s.Break()
+	s.Write([]byte("tail"))
+	if !s.Matched() || !sr.Matched() {
+		t.Fatal("Matched must stay true after match")
 	}
 }
 
