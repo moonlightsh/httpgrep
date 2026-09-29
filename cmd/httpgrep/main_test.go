@@ -256,3 +256,33 @@ func TestHelp(t *testing.T) {
 		}
 	}
 }
+
+// --version 输出 "httpgrep <版本>"；版本默认是 dev，可以用 -ldflags -X main.version 注入；
+// 构建信息里有 vcs.revision 时附在后面。
+func TestVersion(t *testing.T) {
+	if os.Getenv("HTTPGREP_BIN") != "" {
+		t.Skip("HTTPGREP_BIN 指向外部程序，版本号未知")
+	}
+	t.Run("default", func(t *testing.T) {
+		rev, err := exec.Command("git", "rev-parse", "HEAD").Output()
+		if err != nil {
+			t.Skip("git 不可用：", err)
+		}
+		got := runBin(t, nil, "--version")
+		wantOut := "httpgrep dev (revision " + strings.TrimSpace(string(rev)) + ")\n"
+		if got.code != 0 || got.stderr != "" || got.stdout != wantOut {
+			t.Fatalf("code %d, stdout %q, stderr %q; want stdout %q", got.code, got.stdout, got.stderr, wantOut)
+		}
+	})
+	t.Run("ldflags", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "httpgrep")
+		out, err := exec.Command("go", "build", "-buildvcs=false", "-ldflags", "-X main.version=1.2.3", "-o", p, ".").CombinedOutput()
+		if err != nil {
+			t.Fatalf("go build: %v\n%s", err, out)
+		}
+		stdout, err := exec.Command(p, "--version").Output()
+		if err != nil || string(stdout) != "httpgrep 1.2.3\n" {
+			t.Fatalf("stdout %q, err %v; want %q", stdout, err, "httpgrep 1.2.3\n")
+		}
+	})
+}
