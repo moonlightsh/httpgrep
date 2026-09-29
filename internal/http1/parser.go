@@ -184,7 +184,26 @@ func (p *Parser) line(off int64, b []byte, ack int64, ts time.Time, limit int) (
 
 // Gap 表示 [off, off+n) 这段没抓到。
 func (p *Parser) Gap(off, n int64, ts time.Time) {
-	if p.st == stDead {
+	if n <= 0 {
+		return
+	}
+	switch p.st {
+	case stBodyCL, stChunkData:
+		if n <= p.rem {
+			// 缺口落在长度已知的数据里：不影响解析。
+			p.sink.Gap(SecBody, n)
+			p.rem -= n
+			if p.rem == 0 {
+				if p.st == stBodyCL {
+					p.end(true, ts)
+				} else {
+					p.st = stChunkEnd
+				}
+			}
+			return
+		}
+	case stBodyClose:
+		p.sink.Gap(SecBody, n)
 		return
 	}
 }

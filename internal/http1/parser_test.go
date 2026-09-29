@@ -560,3 +560,56 @@ func TestClose(t *testing.T) {
 		})
 	}
 }
+
+func TestGapInBody(t *testing.T) {
+	const clHead = "POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\n"
+	const chHead = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+	tests := []struct {
+		name  string
+		kind  http1.Kind
+		steps []step
+		want  []string
+	}{
+		{
+			"content-length", http1.Request,
+			[]step{data(clHead + "ab"), gap(5), data("cde")},
+			[]string{"begin off=0", "raw head " + clHead, "head POST / HTTP/1.1",
+				"raw body ab", "body ab", "gap body 5", "raw body cde", "body cde", "end true"},
+		},
+		{
+			"gap completes content-length", http1.Request,
+			[]step{data(clHead + "abcde"), gap(5).at(3), data("GET / HTTP/1.1\r\n\r\n")},
+			[]string{"begin off=0", "raw head " + clHead, "head POST / HTTP/1.1",
+				"raw body abcde", "body abcde", "gap body 5", "end true",
+				"begin off=49", "raw head GET / HTTP/1.1\r\n\r\n", "head GET / HTTP/1.1", "end true"},
+		},
+		{
+			"chunk data", http1.Request,
+			[]step{data(chHead + "5\r\nhe"), gap(2), data("o\r\n0\r\n\r\n")},
+			[]string{"begin off=0", "raw head " + chHead, "head POST / HTTP/1.1",
+				"raw body 5\r\nhe", "body he", "gap body 2", "raw body o\r\n0\r\n", "body o", "raw trailer \r\n", "end true"},
+		},
+		{
+			"gap ends chunk data", http1.Request,
+			[]step{data(chHead + "5\r\nhel"), gap(2), data("\r\n0\r\n\r\n")},
+			[]string{"begin off=0", "raw head " + chHead, "head POST / HTTP/1.1",
+				"raw body 5\r\nhel", "body hel", "gap body 2", "raw body \r\n0\r\n", "raw trailer \r\n", "end true"},
+		},
+		{
+			"read-to-close body", http1.Response,
+			[]step{data("HTTP/1.1 200 OK\r\n\r\nab"), gap(4), data("cd"), closeFin()},
+			[]string{"begin off=0", "raw head HTTP/1.1 200 OK\r\n\r\n", "head 200 HTTP/1.1",
+				"raw body ab", "body ab", "gap body 4", "raw body cd", "body cd", "end true"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checkAllChunkings(t, tt.kind, http1.Options{}, tt.want, tt.steps...)
+		})
+	}
+	// 缺口补齐 Content-Length 时，End 的时间是缺口的时间。
+	r := run(http1.Request, http1.Options{}, 0, data(clHead+"abcde"), gap(5).at(3))
+	if len(r.ends) != 1 || !r.ends[0].Equal(t0.Add(3*time.Second)) {
+		t.Errorf("end times = %v, want gap time", r.ends)
+	}
+}
