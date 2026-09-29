@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"httpgrep/internal/decode"
 )
 
 // 第 5 条：重传已经交付过的数据时没有回调，部分重叠时只交付新的部分。
@@ -168,6 +170,30 @@ func TestKeepAlive(t *testing.T) {
 			)
 			h.add(tt.p, at(2))
 			h.expect()
+		})
+	}
+}
+
+// 第 18 条：peerAck 是对端流的偏移，服务端包的 Ack = 客户端 ISN+1+N 时为 N。
+func TestPeerAck(t *testing.T) {
+	tests := []struct {
+		name string
+		p    pkt
+		want string
+	}{
+		{"acks nothing", s2c(5001, cISN+1, pshAck, "OK"), `data 1 off=0 "OK" ack=0`},
+		{"acks 3 bytes", s2c(5001, cISN+1+3, pshAck, "OK"), `data 1 off=0 "OK" ack=3`},
+		{"acks 10 bytes", s2c(5001, cISN+1+10, pshAck, "OK"), `data 1 off=0 "OK" ack=10`},
+		{"no ack flag", s2c(5001, cISN+1+10, decode.PSH, "OK"), `data 1 off=0 "OK" ack=-1`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, defaultConfig())
+			h.handshake(at(0))
+			h.add(c2s(1001, 5001, pshAck, "0123456789"), at(1))
+			h.log = nil
+			h.add(tt.p, at(2))
+			h.expect(tt.want)
 		})
 	}
 }
