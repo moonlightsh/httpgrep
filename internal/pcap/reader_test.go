@@ -217,3 +217,33 @@ func TestNewReaderPassesThroughIOError(t *testing.T) {
 		})
 	}
 }
+
+// Next 读记录头或记录数据时遇到非 EOF 错误，要原样透出，不能当成正常结束。
+func TestNextPassesThroughIOError(t *testing.T) {
+	le := binary.LittleEndian
+	rec := recBlock(le, 1, 0, []byte("payload"), 7)
+	tests := []struct {
+		name string
+		tail []byte // 文件头之后、错误之前的字节
+	}{
+		{"before record header", nil},
+		{"inside record header", rec[:9]},
+		{"inside record data", rec[:19]},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := io.MultiReader(
+				bytes.NewReader(fileHeader(le, 0xa1b2c3d4, 1)),
+				bytes.NewReader(tt.tail),
+				iotest.ErrReader(errBoom),
+			)
+			r, err := pcap.NewReader(in)
+			if err != nil {
+				t.Fatalf("NewReader: %v", err)
+			}
+			if _, err := r.Next(); !errors.Is(err, errBoom) {
+				t.Fatalf("Next error = %v, want %v", err, errBoom)
+			}
+		})
+	}
+}
