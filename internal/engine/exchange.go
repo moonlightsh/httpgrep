@@ -89,6 +89,13 @@ type exchange struct {
 	upgrade    bool // 请求是 CONNECT 或带 Upgrade 头
 	decided    bool // 已经就 Upgrade 请求调用过 Resume 或 Tunnel
 
+	// ghost 表示交互已经超时结束、留在原位置当占位，保证后面的响应配对正确。
+	// 它之后的请求字节和迟到响应只由解析器解析长度，不缓存、不匹配、不输出。
+	ghost bool
+	late  bool // 已经为它计过一次 Late
+	// lateInterim 表示占位上正在收的迟到响应是 1xx（不含 101），之后还有最终响应。
+	lateInterim bool
+
 	reqMsg, resMsg int // 正在接收的请求、响应消息的下标
 
 	dirs [2]scanDir // 按方向的匹配状态，下标是 dirReq、dirRes
@@ -113,6 +120,12 @@ func (x *exchange) touch(ts time.Time) {
 	if ts.After(x.last) {
 		x.last = ts
 	}
+}
+
+// bury 把已经结束的交互变成占位：丢掉缓存（已经不计入缓存计量），只留配对要用的状态。
+func (x *exchange) bury() {
+	x.ghost = true
+	x.buf, x.pieces, x.msgs = x.buf[:0], x.pieces[:0], x.msgs[:0]
 }
 
 // status 返回交互结束时的状态。

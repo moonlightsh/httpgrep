@@ -344,13 +344,21 @@ func (c *conn) closeQueue(why string, all bool) {
 	if x := c.noReq; x != nil {
 		// 只收到 1xx 的缺请求交互不会再有最终响应。
 		c.noReq = nil
-		x.noResp = why
-		c.finish(x)
+		if x.ghost {
+			c.drop(x)
+		} else {
+			x.noResp = why
+			c.finish(x)
+		}
 	}
 	for i := 0; i < len(c.queue); {
 		x := c.queue[i]
 		if !all && !x.reqDone {
 			i++
+			continue
+		}
+		if x.ghost {
+			c.drop(x)
 			continue
 		}
 		if !x.hasRes {
@@ -370,7 +378,17 @@ func (c *conn) timeout(x *exchange, at time.Time) {
 	if !x.reqDone || x.hasRes && !x.resDone {
 		x.incomplete = true
 	}
-	c.finish(x)
+	c.e.end(c, x)
+	x.bury()
+	c.rearm(at)
+}
+
+// markLate 在迟到响应的字节到达占位 x 时计数，每个占位只计一次。
+func (c *conn) markLate(x *exchange) {
+	if !x.late {
+		x.late = true
+		c.e.stats.Late++
+	}
 }
 
 // resumeHeld 把请求解析器缓存的、Upgrade 请求之后的字节按 HTTP 回放，
@@ -400,6 +418,20 @@ func (c *conn) closePendingFin() {
 
 // finish 结束交互 x：移出队列，命中的输出，然后回收。
 func (c *conn) finish(x *exchange) {
+	c.unlink(x)
+	c.e.finish(c, x)
+	c.rearm(c.now)
+}
+
+// drop 回收不再需要的占位 x。
+func (c *conn) drop(x *exchange) {
+	c.unlink(x)
+	c.e.free = append(c.e.free, x)
+	c.rearm(c.now)
+}
+
+// unlink 把 x 移出队列，清掉连接对它的引用。
+func (c *conn) unlink(x *exchange) {
 	for i, q := range c.queue {
 		if q == x {
 			copy(c.queue[i:], c.queue[i+1:])
@@ -417,16 +449,17 @@ func (c *conn) finish(x *exchange) {
 	if c.noReq == x {
 		c.noReq = nil
 	}
-	c.e.finish(c, x)
-	c.rearm(c.now)
 }
 
-// rearm 保证队列里排在最前的交互在计时：排队等响应的请求轮到它时（at）才开始计时。
-// 缺请求的交互不在队列里，创建时就开始计时。
+// rearm 保证队列里排在最前的在途交互（占位不算）在计时：
+// 排队等响应的请求轮到它时（at）才开始计时。缺请求的交互不在队列里，创建时就开始计时。
 func (c *conn) rearm(at time.Time) {
-	if len(c.queue) > 0 {
-		if x := c.queue[0]; x.hpos == 0 {
-			c.e.arm(x, at)
+	for _, x := range c.queue {
+		if !x.ghost {
+			if x.hpos == 0 {
+				c.e.arm(x, at)
+			}
+			return
 		}
 	}
 }
@@ -451,7 +484,7 @@ func (s *reqSink) Begin(b http1.Begin) {
 }
 
 func (s *reqSink) Raw(sec http1.Section, b []byte) {
-	if x := s.cur; x != nil {
+	if x := s.cur; x != nil && !x.ghost {
 		// 回放 Upgrade 请求之后缓存的字节时，LastTS 是这些字节所在缓存段的时间。
 		x.reqLast = s.c.req.LastTS()
 		x.touch(x.reqLast)
@@ -465,7 +498,10 @@ func (s *reqSink) Head(h *http1.Head) {
 	if x == nil {
 		return
 	}
-	x.head(x.reqMsg, h)
+	if !x.ghost {
+		x.head(x.reqMsg, h)
+	}
+	// 占位也要记下方法和 Upgrade：迟到响应的长度和隧道判断要用。
 	switch h.Method {
 	case "HEAD":
 		x.method = methodHead
@@ -476,13 +512,13 @@ func (s *reqSink) Head(h *http1.Head) {
 }
 
 func (s *reqSink) Body(b []byte) {
-	if x := s.cur; x != nil {
+	if x := s.cur; x != nil && !x.ghost {
 		x.body(x.reqMsg, b)
 	}
 }
 
 func (s *reqSink) Gap(sec http1.Section, n int64) {
-	if x := s.cur; x != nil {
+	if x := s.cur; x != nil && !x.ghost {
 		x.gap(x.reqMsg, sec, n)
 	}
 }
@@ -494,6 +530,13 @@ func (s *reqSink) End(complete bool, ts time.Time) {
 	}
 	s.cur = nil
 	x.reqDone = true
+	if x.ghost {
+		// 请求发到一半就超时的占位：它的响应已经收完或不会再来时回收。
+		if x.resDone || s.c.srvClosed {
+			s.c.drop(x)
+		}
+		return
+	}
 	if complete {
 		x.reqLast = ts
 		if x.upgrade && !x.decided {
@@ -572,17 +615,22 @@ func (s *resSink) target(peerAck int64) *exchange {
 
 // open 在交互 x 上开始一条响应消息。orphan 表示它是失步后没有状态行的字节。
 func (s *resSink) open(x *exchange, orphan bool) {
+	s.cur = x
+	if x.ghost {
+		// 迟到响应：只解析长度，其余事件忽略。
+		s.c.markLate(x)
+		return
+	}
 	x.hasRes = true
 	x.resOrphan = orphan
 	if orphan {
 		x.incomplete = true
 	}
 	x.resMsg = x.addMessage(dirRes)
-	s.cur = x
 }
 
 func (s *resSink) Raw(sec http1.Section, b []byte) {
-	if x := s.cur; x != nil {
+	if x := s.cur; x != nil && !x.ghost {
 		x.resLast = s.c.now
 		x.touch(x.resLast)
 		x.raw(x.resMsg, sec, b)
@@ -592,9 +640,14 @@ func (s *resSink) Raw(sec http1.Section, b []byte) {
 
 func (s *resSink) Head(h *http1.Head) {
 	if x := s.cur; x != nil {
-		x.head(x.resMsg, h)
 		// 1xx 中间响应（101 除外）归入所属交互，之后还有最终响应。
-		x.msgs[x.resMsg].interim = h.Status >= 100 && h.Status < 200 && h.Status != 101
+		interim := h.Status >= 100 && h.Status < 200 && h.Status != 101
+		if x.ghost {
+			x.lateInterim = interim
+		} else {
+			x.head(x.resMsg, h)
+			x.msgs[x.resMsg].interim = interim
+		}
 		// 对 Upgrade 请求的决定要立即交给请求解析器：同一个段里可能紧跟着
 		// 下一个响应，它要配给 Upgrade 请求之后缓存着的请求。两个方向的解析器
 		// 互相独立，请求解析器回放时只改动队列和 rq，不碰响应解析器和 rs.cur。
@@ -611,7 +664,7 @@ func (s *resSink) Head(h *http1.Head) {
 			c.req.Tunnel()
 			// 推迟的客户端 FIN 不用再补：Tunnel 之后请求解析器已经停下，Close 不会产生事件。
 			c.cliFin = false
-		case x.upgrade && !x.msgs[x.resMsg].interim:
+		case x.upgrade && !interim && !x.decided:
 			// Upgrade 请求得到普通的最终响应：请求方向继续按 HTTP 解析。
 			// 请求还没发完时 Resume 只记下决定，没有可回放的。
 			x.decided = true
@@ -621,7 +674,7 @@ func (s *resSink) Head(h *http1.Head) {
 }
 
 func (s *resSink) Body(b []byte) {
-	if x := s.cur; x != nil {
+	if x := s.cur; x != nil && !x.ghost {
 		x.body(x.resMsg, b)
 	}
 }
@@ -646,6 +699,9 @@ func (s *resSink) Gap(sec http1.Section, n int64) {
 		}
 		s.open(x, true)
 	}
+	if x.ghost {
+		return
+	}
 	x.gap(x.resMsg, sec, n)
 }
 
@@ -655,6 +711,19 @@ func (s *resSink) End(complete bool, ts time.Time) {
 		return
 	}
 	s.cur = nil
+	if x.ghost {
+		if complete && x.lateInterim {
+			if x.noReq {
+				s.c.noReq = x
+			}
+			return
+		}
+		x.resDone = true
+		if x.reqDone {
+			s.c.drop(x)
+		}
+		return
+	}
 	if complete {
 		x.resLast = ts
 	} else {

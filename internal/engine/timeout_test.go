@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"strings"
 	"testing"
 
 	"httpgrep/internal/engine"
@@ -82,4 +83,28 @@ func TestTimeoutPipelinedSingleAdvance(t *testing.T) {
 		"--\n"+
 		"2026-09-28 15:30:13.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n"+
 		"GET /TOKEN-2 HTTP/1.1\r\n\r\n")
+}
+
+// 迟到响应：R1 在 t=30 超时，它的响应 t=35 才到。不输出第二块，Late 加 1，也不缓存它的数据；
+// 之后的 R2 和它自己的响应配对。
+// 缓存峰值是 R2 的请求加响应：25 + 40 = 65 字节，迟到响应的 5041 字节不计入。
+func TestLateResponse(t *testing.T) {
+	late := "HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n" + strings.Repeat("TOKEN-LATE", 500)
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /TOKEN-1 HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(35000), []byte(late))
+		c.ClientSend(ms(40000), []byte("GET /TOKEN-2 HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(40003), []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n"+
+		"GET /TOKEN-1 HTTP/1.1\r\n\r\n"+
+		"--\n"+
+		"2026-09-28 15:30:52.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 3.0ms\n"+
+		"GET /TOKEN-2 HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok\n")
+	if st.Late != 1 || st.Exchanges != 2 || st.NoRequest != 0 || st.Complete != 1 || st.PeakBuffered != 65 {
+		t.Fatalf("stats: %+v", st)
+	}
 }

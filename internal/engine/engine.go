@@ -136,6 +136,13 @@ func (e *Engine) newExchange(c *conn) *exchange {
 
 // finish 结束交互：计入统计，命中的输出，然后回收。
 func (e *Engine) finish(c *conn, x *exchange) {
+	e.end(c, x)
+	e.free = append(e.free, x)
+}
+
+// end 结束交互但不回收：停止计时，计入统计，命中的输出，缓存不再计入。
+// 超时的交互之后还要留在队列里当占位，由调用方决定何时回收。
+func (e *Engine) end(c *conn, x *exchange) {
 	e.timers.remove(x)
 	x.breakAll()
 	st := x.status()
@@ -164,7 +171,6 @@ func (e *Engine) finish(c *conn, x *exchange) {
 	}
 	e.inFlight--
 	e.buffered -= int64(len(x.buf))
-	e.free = append(e.free, x)
 }
 
 // addBuffered 记下在途交互新缓存的 n 字节，更新峰值。
