@@ -418,6 +418,17 @@ func (c *conn) finish(x *exchange) {
 		c.noReq = nil
 	}
 	c.e.finish(c, x)
+	c.rearm(c.now)
+}
+
+// rearm 保证队列里排在最前的交互在计时：排队等响应的请求轮到它时（at）才开始计时。
+// 缺请求的交互不在队列里，创建时就开始计时。
+func (c *conn) rearm(at time.Time) {
+	if len(c.queue) > 0 {
+		if x := c.queue[0]; x.hpos == 0 {
+			c.e.arm(x, at)
+		}
+	}
 }
 
 // Begin 实现 http1.Sink：开始一个新的交互，排到队尾。
@@ -436,7 +447,7 @@ func (s *reqSink) Begin(b http1.Begin) {
 	x.reqMsg = x.addMessage(dirReq)
 	c.queue = append(c.queue, x)
 	s.cur = x
-	c.e.arm(x, b.TS)
+	c.rearm(b.TS)
 }
 
 func (s *reqSink) Raw(sec http1.Section, b []byte) {
