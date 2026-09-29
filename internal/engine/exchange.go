@@ -50,7 +50,7 @@ type exchange struct {
 	resLast time.Time // 响应最后一个包
 
 	hasReq     bool
-	hasRes     bool // 收到过响应（含 1xx）
+	hasRes     bool // 收到过最终响应（或没收完、还不知道是不是 1xx 的响应）
 	reqDone    bool // 请求已结束
 	incomplete bool
 	noResp     string // 无响应的原因

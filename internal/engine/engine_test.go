@@ -329,6 +329,20 @@ func TestConnectionClosed(t *testing.T) {
 			closed: 0, incomplete: 1,
 		},
 		{
+			name: "RST after 100 Continue",
+			build: func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				c.ClientSend(ms(0), []byte("PUT /TOKEN HTTP/1.1\r\nContent-Length: 0\r\n\r\n"))
+				c.ServerSend(ms(1), []byte("HTTP/1.1 100 Continue\r\n\r\n"))
+				c.ClientRst(ms(4))
+			},
+			want: "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(closed)\n" +
+				"PUT /TOKEN HTTP/1.1\r\nContent-Length: 0\r\n\r\n" +
+				"HTTP/1.1 100 Continue\r\n\r\n",
+			closed: 1, incomplete: 0,
+		},
+		{
 			name: "replaced before response",
 			build: func(w *pcapgen.Writer) {
 				c := pcapgen.NewConn(w, cli1, srv)

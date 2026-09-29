@@ -324,7 +324,9 @@ func (s *resSink) End(complete bool, ts time.Time) {
 	}
 	x.lineBreak()
 	if complete && x.msgs[x.resMsg].interim {
-		return // 等最终响应
+		// 等最终响应；只有 1xx 的交互不算有响应，不输出耗时。
+		x.hasRes = false
+		return
 	}
 	s.c.finish(x)
 }
