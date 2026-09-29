@@ -178,3 +178,81 @@ func TestHeadResponseHasNoBody(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 两条连接交错传输：后开始但先结束的交互先输出。
+func TestInterleavedConnsOutputInFinishOrder(t *testing.T) {
+	out, _ := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		a := pcapgen.NewConn(w, cli1, srv)
+		b := pcapgen.NewConn(w, cli2, srv)
+		a.Handshake(ms(-2))
+		b.Handshake(ms(-1))
+		a.ClientSend(ms(0), []byte("GET /slow HTTP/1.1\r\n\r\n"))
+		b.ClientSend(ms(1), []byte("GET /fast HTTP/1.1\r\n\r\n"))
+		a.ServerSend(ms(2), []byte("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nTOKEN"))
+		b.ServerSend(ms(3), []byte("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-B"))
+		a.ServerSend(ms(20), []byte("-SLOW"))
+	})
+	check(t, out, "2026-09-28 15:30:12.346 10.0.0.1:52815 -> 10.0.0.2:80 complete 2.0ms\n"+
+		"GET /fast HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-B\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 20.0ms\n"+
+		"GET /slow HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nTOKEN-SLOW\n")
+}
+
+// 二进制 body 输出占位行：body 含 NUL 且关键词在 body 里时带 matched；
+// 带 Content-Encoding 时行里写上编码。
+func TestBinaryBodyPlaceholder(t *testing.T) {
+	cases := []struct {
+		name, keyword, req, res, want string
+	}{
+		{
+			name:    "NUL, match in body",
+			keyword: "TOKEN",
+			req:     "GET /a HTTP/1.1\r\n\r\n",
+			res:     "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 9\r\n\r\nab\x00TOKEN\n",
+			want: "GET /a HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 9\r\n\r\n" +
+				"[binary body omitted: application/octet-stream, 9 B, matched]\n",
+		},
+		{
+			name:    "NUL, match in head only",
+			keyword: "TOKEN",
+			req:     "GET /TOKEN HTTP/1.1\r\n\r\n",
+			res:     "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\na\x00b",
+			want: "GET /TOKEN HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n" +
+				"[binary body omitted: 3 B]\n",
+		},
+		{
+			name:    "NUL, match in head and body",
+			keyword: "TOKEN",
+			req:     "GET /TOKEN HTTP/1.1\r\n\r\n",
+			res:     "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n\x00TOKEN\x01",
+			want: "GET /TOKEN HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n" +
+				"[binary body omitted: 7 B, matched]\n",
+		},
+		{
+			name:    "gzip",
+			keyword: "TOKEN",
+			req:     "GET /TOKEN HTTP/1.1\r\n\r\n",
+			res:     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: 5\r\n\r\nhello",
+			want: "GET /TOKEN HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: 5\r\n\r\n" +
+				"[binary body omitted: gzip, application/json, 5 B]\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _ := replay(t, engine.Config{Matcher: matcher(t, tc.keyword)}, func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				c.ClientSend(ms(0), []byte(tc.req))
+				c.ServerSend(ms(1), []byte(tc.res))
+			})
+			check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\n"+tc.want)
+		})
+	}
+}
