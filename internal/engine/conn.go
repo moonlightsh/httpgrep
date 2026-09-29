@@ -26,6 +26,11 @@ type conn struct {
 	queue []*exchange // 按请求顺序排队、还没结束的交互；队首是正在等（或正在收）响应的
 
 	srvClosed bool // 服务端方向已结束（FIN），之后的请求不会再有响应
+	tunnel    bool // 101 或 CONNECT 2xx 之后：不再解析，也不再缓存
+
+	// 对 Upgrade 请求的决定：响应头部解析完时记下，等响应解析器的调用返回后
+	// 再交给请求解析器，免得在一个解析器的回调里驱动另一个解析器。
+	pending uint8
 
 	now time.Time // 当前回调所属包的时间
 }
@@ -69,9 +74,16 @@ func (c *conn) method() string {
 	return ""
 }
 
+// 对 Upgrade 请求的决定。
+const (
+	upNone uint8 = iota
+	upResume
+	upTunnel
+)
+
 // Data 实现 tcp.Handler。
 func (c *conn) Data(side tcp.Side, off int64, b []byte, peerAck int64, ts time.Time) {
-	if !c.known {
+	if !c.known || c.tunnel {
 		return
 	}
 	c.now = ts
@@ -79,12 +91,13 @@ func (c *conn) Data(side tcp.Side, off int64, b []byte, peerAck int64, ts time.T
 		c.req.Feed(off, b, peerAck, ts)
 	} else {
 		c.res.Feed(off, b, peerAck, ts)
+		c.decide()
 	}
 }
 
 // Gap 实现 tcp.Handler。
 func (c *conn) Gap(side tcp.Side, off, n int64, ts time.Time) {
-	if !c.known {
+	if !c.known || c.tunnel {
 		return
 	}
 	c.now = ts
@@ -92,6 +105,20 @@ func (c *conn) Gap(side tcp.Side, off, n int64, ts time.Time) {
 		c.req.Gap(off, n, ts)
 	} else {
 		c.res.Gap(off, n, ts)
+		c.decide()
+	}
+}
+
+// decide 把对 Upgrade 请求的决定交给请求解析器。
+func (c *conn) decide() {
+	switch c.pending {
+	case upResume:
+		c.pending = upNone
+		c.req.Resume()
+	case upTunnel:
+		c.pending = upNone
+		c.tunnel = true
+		c.req.Tunnel()
 	}
 }
 
@@ -264,6 +291,14 @@ func (s *resSink) Head(h *http1.Head) {
 		x.head(x.resMsg, h)
 		// 1xx 中间响应（101 除外）归入所属交互，之后还有最终响应。
 		x.msgs[x.resMsg].interim = h.Status >= 100 && h.Status < 200 && h.Status != 101
+		switch {
+		case h.Tunnel:
+			// 101 或 CONNECT 的 2xx：此后连接不再按 HTTP 解析。
+			s.c.pending = upTunnel
+		case x.upgrade && !x.msgs[x.resMsg].interim:
+			// Upgrade 请求得到普通的最终响应：请求方向继续按 HTTP 解析。
+			s.c.pending = upResume
+		}
 	}
 }
 

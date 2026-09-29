@@ -393,3 +393,83 @@ func TestClientFinThenResponse(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 101 升级、CONNECT 加 200 之后，连接不再按 HTTP 解析：即使出现关键词也不再输出。
+// 带 Upgrade 头的请求得到 400 时继续按 HTTP 解析，下一个请求照常配对。
+func TestUpgrade(t *testing.T) {
+	// 隧道里看起来像 HTTP 的数据，里面有关键词。
+	tunnelData := func(c *pcapgen.Conn) {
+		c.ClientSend(ms(20), []byte("GET /TOKEN-IN-TUNNEL HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(21), []byte("HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\nTOKEN-IN-TUNNEL"))
+	}
+	cases := []struct {
+		name      string
+		build     func(c *pcapgen.Conn)
+		want      string
+		exchanges int64
+	}{
+		{
+			name: "101 switching protocols",
+			build: func(c *pcapgen.Conn) {
+				c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\nX-Id: TOKEN\r\n\r\n"))
+				c.ServerSend(ms(2), []byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n"))
+				tunnelData(c)
+			},
+			want: "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 2.0ms\n" +
+				"GET /chat HTTP/1.1\r\nUpgrade: websocket\r\nX-Id: TOKEN\r\n\r\n" +
+				"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n",
+			exchanges: 1,
+		},
+		{
+			name: "CONNECT 200",
+			build: func(c *pcapgen.Conn) {
+				c.ClientSend(ms(0), []byte("CONNECT TOKEN.example:443 HTTP/1.1\r\n\r\n"))
+				c.ServerSend(ms(3), []byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+				tunnelData(c)
+			},
+			want: "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 3.0ms\n" +
+				"CONNECT TOKEN.example:443 HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 200 Connection Established\r\n\r\n",
+			exchanges: 1,
+		},
+		{
+			name: "400, next request sent after it",
+			build: func(c *pcapgen.Conn) {
+				c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+				c.ServerSend(ms(2), []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"))
+				c.ClientSend(ms(10), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+				c.ServerSend(ms(11), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+			},
+			want: "2026-09-28 15:30:12.355 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\n" +
+				"GET /TOKEN HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 204 No Content\r\n\r\n",
+			exchanges: 2,
+		},
+		{
+			name: "400, next request sent before it",
+			build: func(c *pcapgen.Conn) {
+				c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+				c.ClientSend(ms(1), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+				c.ServerSend(ms(2), []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"))
+				c.ServerSend(ms(4), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+			},
+			want: "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 complete 3.0ms\n" +
+				"GET /TOKEN HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 204 No Content\r\n\r\n",
+			exchanges: 2,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				tc.build(c)
+			})
+			check(t, out, tc.want)
+			if st.Exchanges != tc.exchanges || st.Complete != tc.exchanges {
+				t.Fatalf("Exchanges %d Complete %d, want %d", st.Exchanges, st.Complete, tc.exchanges)
+			}
+		})
+	}
+}
