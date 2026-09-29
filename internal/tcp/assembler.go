@@ -54,16 +54,20 @@ func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 		// 对端的数据已经送达，只是没抓到。
 		a.skipTo(c, 1-s, peerAck, ts)
 	}
-	if len(seg.Payload) == 0 {
+	if len(seg.Payload) == 0 && seg.Missing <= 0 {
 		return
 	}
 	off := d.offset(seg.Seq)
 	if off > d.next {
-		a.buffer(d, off, seg.Payload, seg.Ack, hasAck, ts)
+		a.buffer(d, off, seg.Payload, int64(max(seg.Missing, 0)), seg.Ack, hasAck, ts)
 		a.limitReorder(c, s, ts)
 		return
 	}
 	a.deliver(c, s, off, seg.Payload, peerAck, ts)
+	if seg.Missing > 0 {
+		// 截断的字节紧跟在负载之后，按缺口交付。
+		a.skipTo(c, s, off+int64(len(seg.Payload))+int64(seg.Missing), ts)
+	}
 }
 
 // deliver 交付从 off 开始、off <= next 的负载，已交付的前缀跳过。

@@ -2,21 +2,24 @@ package tcp
 
 import "time"
 
-// chunk 是乱序缓存里的一段数据。缓存按偏移排序。
+// chunk 是乱序缓存里的一段 [off, off+n)。data 为 nil 时这段是因截断而没抓到的字节，
+// 交付时认定为缺口。缓存按偏移排序，互不重叠。
 type chunk struct {
 	off    int64
-	data   []byte // 负载的拷贝
+	n      int64
+	data   []byte // 负载的拷贝，len(data) == n
 	ack    uint32 // 所在段的 Ack，交付时再换算成 peerAck
 	hasAck bool
 	ts     time.Time // 到达时间
 }
 
-func (k *chunk) end() int64 { return k.off + int64(len(k.data)) }
+func (k *chunk) end() int64 { return k.off + k.n }
 
-// buffer 把 [off, off+len(b)) 中缓存里还没有的部分拷进乱序缓存。
-// 缓存里的段互不重叠，重叠部分以先到的为准。
-func (a *Assembler) buffer(d *dir, off int64, b []byte, ack uint32, hasAck bool, ts time.Time) {
-	cur, end := off, off+int64(len(b))
+// buffer 把 [off, off+len(b)+missing) 中缓存里还没有的部分放进乱序缓存：
+// 负载部分拷贝，截断的 missing 部分记为缺口段。重叠部分以先到的为准。
+func (a *Assembler) buffer(d *dir, off int64, b []byte, missing int64, ack uint32, hasAck bool, ts time.Time) {
+	dataEnd := off + int64(len(b))
+	cur, end := off, dataEnd+missing
 	i := 0
 	for i < len(d.buf) && d.buf[i].end() <= cur {
 		i++
@@ -31,15 +34,27 @@ func (a *Assembler) buffer(d *dir, off int64, b []byte, ack uint32, hasAck bool,
 		if i < len(d.buf) && d.buf[i].off < end {
 			stop = d.buf[i].off
 		}
-		k := chunk{off: cur, data: append([]byte(nil), b[cur-off:stop-off]...), ack: ack, hasAck: hasAck, ts: ts}
-		d.buf = append(d.buf, chunk{})
-		copy(d.buf[i+1:], d.buf[i:])
-		d.buf[i] = k
-		d.bufLen += int64(len(k.data))
-		a.buffered += int64(len(k.data))
-		i++
-		cur = stop
+		if cur < dataEnd {
+			ds := min(stop, dataEnd)
+			a.insert(d, i, chunk{off: cur, n: ds - cur, data: append([]byte(nil), b[cur-off:ds-off]...), ack: ack, hasAck: hasAck, ts: ts})
+			i++
+			cur = ds
+		}
+		if cur < stop {
+			a.insert(d, i, chunk{off: cur, n: stop - cur, ack: ack, hasAck: hasAck, ts: ts})
+			i++
+			cur = stop
+		}
 	}
+}
+
+// insert 把 k 插到缓存的第 i 个位置。
+func (a *Assembler) insert(d *dir, i int, k chunk) {
+	d.buf = append(d.buf, chunk{})
+	copy(d.buf[i+1:], d.buf[i:])
+	d.buf[i] = k
+	d.bufLen += int64(len(k.data))
+	a.buffered += int64(len(k.data))
 }
 
 // limitReorder 在 side 方向乱序缓存超过 MaxReorderBytes 时，
@@ -63,7 +78,11 @@ func (a *Assembler) drain(c *conn, s Side, ts time.Time) {
 		if k.end() <= d.next {
 			continue
 		}
-		c.h.Data(s, d.next, k.data[d.next-k.off:], peerAckOf(peer, k.ack, k.hasAck), ts)
+		if k.data == nil {
+			c.h.Gap(s, d.next, k.end()-d.next, ts)
+		} else {
+			c.h.Data(s, d.next, k.data[d.next-k.off:], peerAckOf(peer, k.ack, k.hasAck), ts)
+		}
 		d.next = k.end()
 	}
 }

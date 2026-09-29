@@ -90,7 +90,48 @@ func TestReorderBufferLimit(t *testing.T) {
 	h.add(c2s(1005, 5001, pshAck, "efgh"), at(1)) // 缓存 4 字节
 	h.add(c2s(1011, 5001, pshAck, "kl"), at(2))   // 缓存 6 字节，没超过
 	h.add(s2c(5001, 1001, pshAck, "HTTP/1.1"), at(3))
-	h.expect(`data 1 off=0 "HTTP/1.1" ack=0`) // 另一方向不受影响
+	h.expect(`data 1 off=0 "HTTP/1.1" ack=0`)  // 另一方向不受影响
 	h.add(c2s(1013, 5001, pshAck, "m"), at(4)) // 缓存 7 字节，超过
 	h.expect("gap 0 off=0 n=4", `data 0 off=4 "efgh" ack=0`)
+}
+
+// 第 11 条：Segment.Missing 不为 0 时，先交付 Payload，再交付紧跟其后的缺口。
+func TestTruncatedSegment(t *testing.T) {
+	tests := []struct {
+		name string
+		ps   []pkt
+		want []string
+	}{
+		{
+			name: "in order",
+			ps: []pkt{
+				{src: cli, dst: srv, seq: 1001, ack: 5001, flags: pshAck, payload: "abcd", missing: 6},
+				c2s(1011, 5001, pshAck, "kl"),
+			},
+			want: []string{`data 0 off=0 "abcd" ack=0`, "gap 0 off=4 n=6", `data 0 off=10 "kl" ack=0`},
+		},
+		{
+			name: "nothing captured",
+			ps:   []pkt{{src: cli, dst: srv, seq: 1001, ack: 5001, flags: ack, missing: 5}},
+			want: []string{"gap 0 off=0 n=5"},
+		},
+		{
+			name: "buffered then filled",
+			ps: []pkt{
+				{src: cli, dst: srv, seq: 1003, ack: 5001, flags: pshAck, payload: "cd", missing: 3},
+				c2s(1008, 5001, pshAck, "hi"),
+				c2s(1001, 5001, pshAck, "ab"),
+			},
+			want: []string{`data 0 off=0 "ab" ack=0`, `data 0 off=2 "cd" ack=0`, "gap 0 off=4 n=3", `data 0 off=7 "hi" ack=0`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, defaultConfig())
+			h.handshake(at(0))
+			h.expect("open A=10.0.0.1:40000 B=10.0.0.2:80 known=true")
+			h.feed(at(1), tt.ps...)
+			h.expect(tt.want...)
+		})
+	}
 }
