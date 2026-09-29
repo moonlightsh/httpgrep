@@ -1,0 +1,291 @@
+package engine_test
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"net/netip"
+	"strconv"
+	"testing"
+	"time"
+
+	"httpgrep/internal/decode"
+	"httpgrep/internal/engine"
+	"httpgrep/internal/match"
+	"httpgrep/internal/output"
+	"httpgrep/internal/pcap"
+	"httpgrep/internal/pcapgen"
+)
+
+// packet 是解码好的一个段和它的抓包时间；Payload 已拷贝，可以反复喂。
+type packet struct {
+	seg decode.Segment
+	ts  time.Time
+}
+
+// decodeAll 用 build 生成抓包，经 pcap.Reader 和 decode.Decode 解码成段的序列。
+func decodeAll(tb testing.TB, build func(w *pcapgen.Writer)) (pkts []packet, payload int64) {
+	tb.Helper()
+	var capture bytes.Buffer
+	w := pcapgen.NewWriter(&capture, pcap.LinkEthernet)
+	build(w)
+	if err := w.Err(); err != nil {
+		tb.Fatal(err)
+	}
+	r, err := pcap.NewReader(&capture)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	for {
+		p, err := r.Next()
+		if errors.Is(err, io.EOF) {
+			return pkts, payload
+		}
+		if err != nil {
+			tb.Fatal(err)
+		}
+		var seg decode.Segment
+		if decode.Decode(r.LinkType(), p.Data, p.OrigLen, &seg) != decode.OK {
+			tb.Fatal("packet does not decode")
+		}
+		seg.Payload = bytes.Clone(seg.Payload)
+		payload += int64(len(seg.Payload))
+		pkts = append(pkts, packet{seg, p.Timestamp})
+	}
+}
+
+// keepAlive 在一条连接上生成 n 个 keep-alive 交互，响应 body 是 size 字节，不含关键词。
+func keepAlive(n, size int) func(w *pcapgen.Writer) {
+	body := bytes.Repeat([]byte("abcdefghij"), size/10)
+	res := append([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"), body...)
+	return func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(0))
+		for i := range n {
+			c.ClientSend(ms(float64(2*i+1)), []byte("GET /item HTTP/1.1\r\nHost: x\r\n\r\n"))
+			c.ServerSend(ms(float64(2*i+2)), res)
+		}
+	}
+}
+
+var benchMatcher = func() *match.Matcher {
+	m, err := match.Compile([]string{"NEEDLE"}, false)
+	if err != nil {
+		panic(err)
+	}
+	return m
+}()
+
+func newBenchEngine(emitted *int) *engine.Engine {
+	return engine.New(engine.Config{
+		Matcher:    benchMatcher,
+		Timeout:    30 * time.Second,
+		MaxMemory:  256 << 20,
+		MaxMessage: 8 << 20,
+		Emit:       func(*output.Block) { *emitted++ },
+	})
+}
+
+// 同一连接上反复出现的交互复用交互对象、缓存和扫描器：
+// 预热之后，引擎自身每个交互不分配内存。
+// 剩下的分配来自 http1 把头部取值转成字符串（Head.Target、Head.ContentType），
+// 每条消息至多一次，不随包数增长。
+// MaxMemory 为 0（不限）时同样复用。
+func TestSteadyStateAllocs(t *testing.T) {
+	for _, maxMem := range []int64{256 << 20, 0} {
+		t.Run("MaxMemory="+strconv.FormatInt(maxMem, 10), func(t *testing.T) { steadyStateAllocs(t, maxMem) })
+	}
+}
+
+func steadyStateAllocs(t *testing.T, maxMem int64) {
+	const warm, runs = 50, 200
+	pkts, _ := decodeAll(t, keepAlive(warm+runs+1, 4000))
+	var emitted int
+	e := engine.New(engine.Config{
+		Matcher:    benchMatcher,
+		Timeout:    30 * time.Second,
+		MaxMemory:  maxMem,
+		MaxMessage: 8 << 20,
+		Emit:       func(*output.Block) { emitted++ },
+	})
+	// 握手 3 个包，之后每个交互 2 + ceil(响应长度/1460) 个包。
+	perExchange := (len(pkts) - 3) / (warm + runs + 1)
+	i := 0
+	feed := func(n int) {
+		for range n {
+			p := &pkts[i]
+			e.Segment(&p.seg, p.ts)
+			e.Advance(p.ts)
+			i++
+		}
+	}
+	feed(3 + warm*perExchange)
+	allocs := testing.AllocsPerRun(runs-1, func() { feed(perExchange) })
+	if allocs > 2 {
+		t.Fatalf("allocs per exchange = %v, want <= 2 (Head.Target, Head.ContentType)", allocs)
+	}
+	if st := e.Stats(); st.Complete < warm+runs-1 || emitted != 0 {
+		t.Fatalf("Complete %d emitted %d", st.Complete, emitted)
+	}
+}
+
+// BenchmarkKeepAlive 测引擎处理 keep-alive 交互的吞吐（从 Segment 算起，不含 pcap 读取和解码）。
+func BenchmarkKeepAlive(b *testing.B) {
+	const n = 1000
+	pkts, payload := decodeAll(b, keepAlive(n, 16000))
+	b.SetBytes(payload)
+	b.ReportAllocs()
+	for b.Loop() {
+		var emitted int
+		e := engine.New(engine.Config{
+			Matcher:    benchMatcher,
+			Timeout:    30 * time.Second,
+			MaxMemory:  256 << 20,
+			MaxMessage: 8 << 20,
+			Emit:       func(*output.Block) { emitted++ },
+		})
+		for i := range pkts {
+			p := &pkts[i]
+			e.Segment(&p.seg, p.ts)
+			e.Advance(p.ts)
+		}
+		e.Finish(pkts[len(pkts)-1].ts)
+		if e.Stats().Complete != n {
+			b.Fatalf("Complete %d", e.Stats().Complete)
+		}
+	}
+}
+
+// inFlight 生成 n 条连接，每条连接上一个没有响应的请求；第 i 个请求在 t0 之后 i 微秒发出。
+func inFlight(n int) func(w *pcapgen.Writer) {
+	return func(w *pcapgen.Writer) {
+		for i := range n {
+			cli := netip.AddrPortFrom(netip.MustParseAddr("10.1.0.1"), uint16(10000+i))
+			c := pcapgen.NewConn(w, cli, srv)
+			ts := t0.Add(time.Duration(i) * time.Microsecond)
+			c.Handshake(ts)
+			c.ClientSend(ts, []byte("GET /item HTTP/1.1\r\nHost: x\r\n\r\n"))
+		}
+	}
+}
+
+// BenchmarkAdvance 测 Advance 的开销和在途交互总数的关系。
+// expire：每次 Advance 恰好到期一个交互；idle：每次 Advance 都没有交互到期。
+// 这两项的时钟每次只推进 1µs 以内，tcp.Assembler.Advance 每 100ms（抓包时间）一次的
+// 全表扫描被跳过，测的是引擎自己的定时器：n=100 和 n=10000 的 ns/op 应当同一量级（最小堆是 O(log n)）。
+// idle-scan：每次推进 100ms，每次都触发 tcp 的全表扫描，这部分和连接数成正比，不属于引擎的定时器。
+func BenchmarkAdvance(b *testing.B) {
+	for _, n := range []int{100, 10000} {
+		pkts, _ := decodeAll(b, inFlight(n))
+		setup := func() *engine.Engine {
+			var emitted int
+			e := newBenchEngine(&emitted)
+			for i := range pkts {
+				p := &pkts[i]
+				e.Segment(&p.seg, p.ts)
+				e.Advance(p.ts)
+			}
+			return e
+		}
+		b.Run("expire/n="+strconv.Itoa(n), func(b *testing.B) {
+			b.ReportAllocs()
+			var e *engine.Engine
+			k := n
+			for range b.N {
+				if k == n {
+					b.StopTimer()
+					e, k = setup(), 0
+					b.StartTimer()
+				}
+				// 第 k 个请求在 t0+k µs 发出，t0+k µs+30s 到期。
+				e.Advance(t0.Add(30*time.Second + time.Duration(k)*time.Microsecond))
+				k++
+			}
+			b.StopTimer()
+			if st := e.Stats(); st.NoResponseTimeout != int64(k) {
+				b.Fatalf("NoResponseTimeout %d, want %d", st.NoResponseTimeout, k)
+			}
+		})
+		b.Run("idle/n="+strconv.Itoa(n), func(b *testing.B) {
+			b.ReportAllocs()
+			e := setup()
+			now := pkts[len(pkts)-1].ts
+			b.ResetTimer()
+			for range b.N {
+				now = now.Add(time.Nanosecond)
+				e.Advance(now)
+			}
+			b.StopTimer()
+			if st := e.Stats(); st.NoResponseTimeout != 0 {
+				b.Fatalf("NoResponseTimeout %d", st.NoResponseTimeout)
+			}
+		})
+		b.Run("idle-scan/n="+strconv.Itoa(n), func(b *testing.B) {
+			b.ReportAllocs()
+			var e *engine.Engine
+			var now time.Time
+			k := 0
+			for range b.N {
+				// 推进到 25s 后重建，免得交互到期或连接空闲释放。
+				if k == 0 {
+					b.StopTimer()
+					e, now = setup(), pkts[len(pkts)-1].ts
+					b.StartTimer()
+				}
+				now = now.Add(100 * time.Millisecond)
+				e.Advance(now)
+				k = (k + 1) % 250
+			}
+			b.StopTimer()
+			if st := e.Stats(); st.NoResponseTimeout != 0 {
+				b.Fatalf("NoResponseTimeout %d", st.NoResponseTimeout)
+			}
+		})
+	}
+}
+
+// mixedBodies 生成 conns 条连接上一共 n 个 keep-alive 交互，连接之间按交互轮流进行；
+// 响应 body 在 1–30 KB 之间（按固定的伪随机序列取），不含关键词。
+func mixedBodies(n, conns int) func(w *pcapgen.Writer) {
+	const maxBody = 30 << 10
+	body := bytes.Repeat([]byte("abcdefghij"), maxBody/10+1)
+	return func(w *pcapgen.Writer) {
+		cs := make([]*pcapgen.Conn, conns)
+		for i := range cs {
+			cli := netip.AddrPortFrom(netip.MustParseAddr("10.3.0.1"), uint16(10000+i))
+			cs[i] = pcapgen.NewConn(w, cli, srv)
+			cs[i].Handshake(t0)
+		}
+		seed := uint32(1)
+		for i := range n {
+			seed = seed*1664525 + 1013904223 // 线性同余，结果固定
+			size := 1<<10 + int(seed>>8)%(maxBody-1<<10+1)
+			c := cs[i%conns]
+			ts := t0.Add(time.Duration(i+1) * time.Millisecond)
+			c.ClientSend(ts, []byte("GET /item HTTP/1.1\r\nHost: x\r\n\r\n"))
+			c.ServerSend(ts, append([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "+strconv.Itoa(size)+"\r\n\r\n"), body[:size]...))
+		}
+	}
+}
+
+// BenchmarkMixedBodies 测 1 万个交互（100 条连接，body 1–30 KB，不含命中）的吞吐，
+// 从 Segment 算起，不含 pcap 读取和解码。计划要求本机单核不低于 150 MB/s。
+func BenchmarkMixedBodies(b *testing.B) {
+	const n = 10000
+	pkts, payload := decodeAll(b, mixedBodies(n, 100))
+	b.SetBytes(payload)
+	b.ReportAllocs()
+	for b.Loop() {
+		var emitted int
+		e := newBenchEngine(&emitted)
+		for i := range pkts {
+			p := &pkts[i]
+			e.Segment(&p.seg, p.ts)
+			e.Advance(p.ts)
+		}
+		e.Finish(pkts[len(pkts)-1].ts)
+		if st := e.Stats(); st.Complete != n || emitted != 0 {
+			b.Fatalf("Complete %d emitted %d", st.Complete, emitted)
+		}
+	}
+}

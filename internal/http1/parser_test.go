@@ -2,6 +2,7 @@ package http1_test
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -121,7 +122,8 @@ func tunnel() step                { return step{call: "tunnel"} }
 func (s step) at(sec int) step    { s.ts = t0.Add(time.Duration(sec) * time.Second); return s }
 func (s step) acked(a int64) step { s.ack = a; return s }
 
-// run 依次执行 steps。chunk > 0 时把每段数据按 chunk 字节切开喂入。
+// run 依次执行 steps。chunk > 0 时把每段数据按 chunk 字节切开喂入；
+// chunk < 0 时只在换行之后切开，每 -chunk 行喂入一次。
 func run(kind http1.Kind, opt http1.Options, chunk int, steps ...step) *rec {
 	r := &rec{}
 	p := http1.NewParser(kind, r, opt)
@@ -149,6 +151,9 @@ func run(kind http1.Kind, opt http1.Options, chunk int, steps ...step) *rec {
 			}
 			for len(b) > 0 {
 				k := min(n, len(b))
+				if chunk < 0 {
+					k = lineCut(b, -chunk)
+				}
 				// 每次喂入一份独立的拷贝，喂完后涂掉，检查解析器没有保留传入的切片。
 				piece := append([]byte(nil), b[:k]...)
 				p.Feed(off, piece, s.ack, ts)
@@ -163,6 +168,19 @@ func run(kind http1.Kind, opt http1.Options, chunk int, steps ...step) *rec {
 	return r
 }
 
+// lineCut 返回 b 里前 lines 行（含换行）的长度；不够时返回 len(b)。
+func lineCut(b []byte, lines int) int {
+	k := 0
+	for range lines {
+		i := strings.IndexByte(string(b[k:]), '\n')
+		if i < 0 {
+			return len(b)
+		}
+		k += i + 1
+	}
+	return k
+}
+
 func checkEvents(t *testing.T, got *rec, want []string) {
 	t.Helper()
 	if strings.Join(got.ev, "\n") != strings.Join(want, "\n") {
@@ -170,10 +188,30 @@ func checkEvents(t *testing.T, got *rec, want []string) {
 	}
 }
 
+// fixedChunkings 是按固定字节数切分的方式（0 表示整段），lineChunkings 是只在换行之后切分的方式。
+var (
+	fixedChunkings = []int{0, 1, 2, 3, 7}
+	lineChunkings  = []int{0, -1, -2, -3}
+)
+
 // checkAllChunkings 用整段、逐字节和几种切分方式喂入，事件都应等于 want。
+// 只适用于不进入扫描状态的流：扫描状态下每次 Feed 的开头都是行首候选，切分会影响对齐，
+// 那样的流用 checkLineChunkings。
 func checkAllChunkings(t *testing.T, kind http1.Kind, opt http1.Options, want []string, steps ...step) {
 	t.Helper()
-	for _, c := range []int{0, 1, 2, 3, 7} {
+	checkChunkings(t, kind, opt, fixedChunkings, want, steps...)
+}
+
+// checkLineChunkings 用整段和几种只在换行之后切开的方式喂入，事件都应等于 want。
+// 换行之后本来就是行首，这样切分在扫描状态下也不影响结果。
+func checkLineChunkings(t *testing.T, kind http1.Kind, opt http1.Options, want []string, steps ...step) {
+	t.Helper()
+	checkChunkings(t, kind, opt, lineChunkings, want, steps...)
+}
+
+func checkChunkings(t *testing.T, kind http1.Kind, opt http1.Options, chunkings []int, want []string, steps ...step) {
+	t.Helper()
+	for _, c := range chunkings {
 		got := run(kind, opt, c, steps...)
 		if strings.Join(got.ev, "\n") != strings.Join(want, "\n") {
 			t.Errorf("chunk=%d events:\n  got:  %q\n  want: %q", c, got.ev, want)
@@ -805,6 +843,7 @@ func TestDesyncLimits(t *testing.T) {
 }
 
 func TestScan(t *testing.T) {
+	// 扫描状态下每次 Feed 的开头也是行首候选（见 TestScanSegmentStart），这里只在换行之后切分。
 	t.Run("start line only at line start or after gap", func(t *testing.T) {
 		want := []string{
 			"begin off=0", "raw head GET / HTTP/1.1\r\n", "desync 16",
@@ -812,7 +851,7 @@ func TestScan(t *testing.T) {
 			"begin off=51", "raw head GET /2 HTTP/1.1\r\n\r\n", "head GET /2 HTTP/1.1", "end true",
 		}
 		// 已经失步时再遇到缺口，不再报告 Desync。
-		checkAllChunkings(t, http1.Request, http1.Options{}, want,
+		checkLineChunkings(t, http1.Request, http1.Options{}, want,
 			data("GET / HTTP/1.1\r\nbad\r\nx GET /no HTTP/1.1\r\ngarbage"), gap(3), data("GET /2 HTTP/1.1\r\n\r\n"))
 	})
 	t.Run("response side looks for status lines", func(t *testing.T) {
@@ -822,7 +861,7 @@ func TestScan(t *testing.T) {
 			"raw unparsed nocolon\r\nGET / HTTP/1.1\r\n xHTTP/1.1 200 OK\r\n", "end false",
 			"begin off=61", "raw head " + ok, "head 200 HTTP/1.1", "end true",
 		}
-		checkAllChunkings(t, http1.Response, http1.Options{}, want,
+		checkLineChunkings(t, http1.Response, http1.Options{}, want,
 			data("HTTP/1.1 200 OK\r\nnocolon\r\nGET / HTTP/1.1\r\n xHTTP/1.1 200 OK\r\n"+ok))
 	})
 }
@@ -1058,6 +1097,8 @@ func TestHeadFields(t *testing.T) {
 }
 
 // 各种合法、不合法的片段随机拼接后，按不同方式切分喂入，事件记录都与整段喂入相同。
+// 进入扫描状态的流（Resync，或整段喂入时出现过失步）只在换行之后切分：
+// 扫描状态下每次 Feed 的开头都是行首候选，任意切分本来就会改变对齐的位置。
 func TestChunkingInvariance(t *testing.T) {
 	pieces := []string{
 		"GET / HTTP/1.1\r\n\r\n",
@@ -1085,10 +1126,59 @@ func TestChunkingInvariance(t *testing.T) {
 		kind := http1.Kind(i % 2)
 		opt := http1.Options{Resync: i%3 == 0}
 		want := run(kind, opt, 0, data(in), closeFin())
-		for _, c := range []int{1, 2, 5, 13} {
+		chunkings := []int{1, 2, 5, 13}
+		if opt.Resync || slices.ContainsFunc(want.ev, func(e string) bool { return strings.HasPrefix(e, "desync ") }) {
+			chunkings = []int{-1, -2, -3}
+		}
+		for _, c := range chunkings {
 			got := run(kind, opt, c, data(in), closeFin())
 			if strings.Join(got.ev, "\n") != strings.Join(want.ev, "\n") {
 				t.Fatalf("input %q kind=%d resync=%v chunk=%d:\n  got:  %q\n  want: %q", in, kind, opt.Resync, c, got.ev, want.ev)
+			}
+		}
+	}
+}
+
+// 只由合法消息拼成的流不会进入扫描状态，按任意字节数切分喂入，事件记录都与整段喂入相同。
+// 补上 TestChunkingInvariance 里随机拼接大多会失步、很少走到固定切分的缺口。
+func TestChunkingInvarianceValidStreams(t *testing.T) {
+	pieces := [2][]string{
+		http1.Request: {
+			"GET / HTTP/1.1\r\n\r\n",
+			"POST /p HTTP/1.1\r\nContent-Length: 4\r\n\r\nbody",
+			"POST /c HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3;x\r\nabc\r\n0\r\nT: 1\r\n\r\n",
+			"\r\n",
+		},
+		http1.Response: {
+			"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nxyz",
+			"HTTP/1.1 100 Continue\r\n\r\n",
+			"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n",
+			"HTTP/1.1 204 No Content\r\n\r\n",
+			"\n",
+		},
+	}
+	x := uint32(7)
+	rnd := func(n int) int {
+		x ^= x << 13
+		x ^= x >> 17
+		x ^= x << 5
+		return int(x % uint32(n))
+	}
+	for i := range 200 {
+		kind := http1.Kind(i % 2)
+		var sb strings.Builder
+		for range 1 + rnd(8) {
+			sb.WriteString(pieces[kind][rnd(len(pieces[kind]))])
+		}
+		in := sb.String()
+		want := run(kind, http1.Options{}, 0, data(in), closeFin())
+		if slices.ContainsFunc(want.ev, func(e string) bool { return strings.HasPrefix(e, "desync ") }) {
+			t.Fatalf("input %q desyncs: %q", in, want.ev)
+		}
+		for _, c := range []int{1, 2, 5, 13} {
+			got := run(kind, http1.Options{}, c, data(in), closeFin())
+			if strings.Join(got.ev, "\n") != strings.Join(want.ev, "\n") {
+				t.Fatalf("input %q kind=%d chunk=%d:\n  got:  %q\n  want: %q", in, kind, c, got.ev, want.ev)
 			}
 		}
 	}

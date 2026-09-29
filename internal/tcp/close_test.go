@@ -137,6 +137,21 @@ func TestIdle(t *testing.T) {
 	}
 }
 
+// 第 17 条：空闲超过 IdleTimeout 之后才到的包，即使期间没有调用 Advance（或者被 Advance 的
+// 扫描间隔跳过），也不挂到旧连接上：旧连接先以 Closed(CloseIdle) 释放，这个包按新连接处理。
+func TestIdleBeforeAdd(t *testing.T) {
+	h := newHarness(t, defaultConfig())
+	h.handshake(at(0))
+	h.a.Advance(at(59950))
+	h.a.Advance(at(60000)) // 距上次扫描不到 100ms，被跳过
+	h.expect("open A=10.0.0.1:40000 B=10.0.0.2:80 known=true")
+	h.add(c2s(1001, 5001, pshAck, "x"), at(61000))
+	h.expect("closed idle", "open A=10.0.0.1:40000 B=10.0.0.2:80 known=false", `data 0 off=0 "x" ack=0`)
+	if n := h.a.Len(); n != 1 {
+		t.Fatalf("Len() = %d, want 1", n)
+	}
+}
+
 // 第 17 条：空闲释放时，FIN 之前的空洞认定为缺口后 FIN 生效。
 func TestIdlePendingFin(t *testing.T) {
 	cfg := defaultConfig()

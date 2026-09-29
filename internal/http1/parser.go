@@ -105,9 +105,16 @@ func NewParser(kind Kind, sink Sink, opt Options) *Parser {
 }
 
 // Feed 按序喂入从流偏移 off 开始的字节 b。b 只在调用期间使用，不保留。
+// 扫描状态下，b 的开头也算行首候选（调用方按 TCP 段喂入时就是段的开头）：
+// 失步前的字节常常不以换行结尾，比如 JSON body，下一个消息通常从新的段开始。
+// 所以扫描状态下，同一段流按不同方式切开喂入，对齐的位置可能不同。
 func (p *Parser) Feed(off int64, b []byte, peerAck int64, ts time.Time) {
 	if len(b) > 0 {
 		p.lastTS = ts
+	}
+	if p.st == stScan && len(p.lb) == 0 {
+		// 已经缓存着一个跨段的起始行候选时接着读它，不从这里重新开始。
+		p.bol = true
 	}
 	for len(b) > 0 && p.st != stDead {
 		n := p.step(off, b, peerAck, ts)
@@ -115,6 +122,10 @@ func (p *Parser) Feed(off int64, b []byte, peerAck int64, ts time.Time) {
 		b = b[n:]
 	}
 }
+
+// LastTS 返回最近一次 Feed 或 Gap 所带的时间。在 Sink 回调里调用时，它就是正在交付的
+// 字节所在包的时间；Resume 回放缓存时是对应缓存段的时间。还没有 Feed 或 Gap 时是零值。
+func (p *Parser) LastTS() time.Time { return p.lastTS }
 
 // step 处理 b 开头的一部分字节，返回消耗的字节数。
 // 不消耗字节时必须改变状态，保证 Feed 的循环能推进。
