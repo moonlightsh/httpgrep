@@ -313,6 +313,19 @@ func TestBinaryBodyOmitted(t *testing.T) {
 			want: "[gap: 10 bytes missing]\n[binary body omitted: 100 B]\n",
 		},
 		{
+			name: "body 后的 Unparsed 和非 body gap 保留",
+			msg: output.Message{
+				Binary: true, BodySize: 100,
+				Pieces: []output.Piece{
+					{Kind: output.PieceBody, Data: []byte("\x00data")},
+					{Kind: output.PieceUnparsed, Data: []byte("junk\r\n")},
+					{Kind: output.PieceGap, N: 9, InBody: false},
+					{Kind: output.PieceBody, Data: []byte("tail")},
+				},
+			},
+			want: "[binary body omitted: 100 B]\njunk\r\n[gap: 9 bytes missing]\ntail\n",
+		},
+		{
 			name: "非二进制不动",
 			msg: output.Message{
 				Binary: false, ContentType: "text/plain", BodySize: 100, BodyMatched: true,
