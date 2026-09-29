@@ -168,25 +168,30 @@ func TestRunStopGivesUpBlockedRead(t *testing.T) {
 		c.Handshake(ms(-1))
 		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nX: HIT\r\n\r\n"))
 	})
-	pr, pw := io.Pipe()
-	defer pw.Close()
-	stop := make(chan struct{})
-	var out bytes.Buffer
-	ch := goRun(run.Config{Input: pr, Stop: stop, Stdout: &out, Opts: opts(t, "HIT")})
-	if _, err := pw.Write(in); err != nil {
-		t.Fatal(err)
+	for _, cpus := range []string{"1", "4"} {
+		t.Run("cpus="+cpus, func(t *testing.T) {
+			t.Parallel()
+			pr, pw := io.Pipe()
+			defer pw.Close()
+			stop := make(chan struct{})
+			out := newNotifyWriter()
+			ch := goRun(run.Config{Input: pr, Stop: stop, Stdout: out, Opts: opts(t, "--cpus", cpus, "HIT")})
+			if _, err := pw.Write(in); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			close(stop)
+			r := wait(t, ch, 3*time.Second)
+			if el := time.Since(start); el < 800*time.Millisecond || el > 2500*time.Millisecond {
+				t.Fatalf("Run returned %v after Stop, want about 1s", el)
+			}
+			if r.err != nil || !r.matched {
+				t.Fatalf("matched %v err %v", r.matched, r.err)
+			}
+			check(t, out.String(), "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(eof)\n"+
+				"GET /a HTTP/1.1\r\nX: HIT\r\n\r\n")
+		})
 	}
-	start := time.Now()
-	close(stop)
-	r := wait(t, ch, 3*time.Second)
-	if el := time.Since(start); el < 800*time.Millisecond || el > 2500*time.Millisecond {
-		t.Fatalf("Run returned %v after Stop, want about 1s", el)
-	}
-	if r.err != nil || !r.matched {
-		t.Fatalf("matched %v err %v", r.matched, r.err)
-	}
-	check(t, out.String(), "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(eof)\n"+
-		"GET /a HTTP/1.1\r\nX: HIT\r\n\r\n")
 }
 
 // Stop 关闭后 1 秒内写入的数据照样处理（连文件头都在 Stop 之后才到）；
