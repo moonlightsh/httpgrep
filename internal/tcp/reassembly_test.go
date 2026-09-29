@@ -1,6 +1,8 @@
 package tcp_test
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -118,4 +120,27 @@ func TestOverlapFirstWins(t *testing.T) {
 			h.expect(tt.want...)
 		})
 	}
+}
+
+// 第 14 条：序号回绕。ISN 为 0xFFFFFF00 时，跨过 2³² 的偏移仍然连续。
+func TestSequenceWrap(t *testing.T) {
+	h := newHarness(t, defaultConfig())
+	const isn uint32 = 0xFFFFFF00
+	h.feed(at(0),
+		c2s(isn, 0, syn, ""),
+		s2c(sISN, isn+1, synAck, ""),
+		c2s(isn+1, sISN+1, ack, ""),
+	)
+	h.expect("open A=10.0.0.1:40000 B=10.0.0.2:80 known=true")
+	first := strings.Repeat("a", 254)                   // 序号 0xFFFFFF01 到 0xFFFFFFFE
+	h.add(c2s(0x00000000, sISN+1, pshAck, "yz"), at(1)) // 偏移 255，回绕后第一个序号，先到
+	h.add(c2s(0xFFFFFF01, sISN+1, pshAck, first), at(1))
+	h.add(c2s(0xFFFFFFFF, sISN+1, pshAck, "x"), at(1))  // 偏移 254，最后一个回绕前的序号
+	h.add(s2c(sISN+1, 0x00000002, pshAck, "OK"), at(1)) // 0xFFFFFF01+257 回绕后是 2
+	h.expect(
+		fmt.Sprintf("data 0 off=0 %q ack=0", first),
+		`data 0 off=254 "x" ack=0`,
+		`data 0 off=255 "yz" ack=0`,
+		`data 1 off=0 "OK" ack=257`,
+	)
 }
