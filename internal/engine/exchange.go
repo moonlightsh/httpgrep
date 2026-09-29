@@ -155,6 +155,21 @@ feed:
 	}
 }
 
+// gap 在消息 mi 里记下 n 字节没抓到：输出缺口标记，交互不完整，
+// 这个方向在缺口处断行，缺口两边的内容不会拼成一行去匹配。
+// 带 Content-Encoding 的 body 里有缺口时也算二进制（解码后的大小不可知）。
+func (x *exchange) gap(mi int, sec http1.Section, n int64) {
+	m := &x.msgs[mi]
+	inBody := sec == http1.SecBody
+	if inBody && m.ce != "" {
+		m.binary = true
+	}
+	lo := len(x.buf)
+	x.pieces = append(x.pieces, piece{msg: mi, kind: output.PieceGap, lo: lo, hi: lo, n: n, inBody: inBody})
+	x.incomplete = true
+	x.lineBreak(m.dir)
+}
+
 // head 记下头部里输出要用的信息。
 func (x *exchange) head(mi int, h *http1.Head) {
 	m := &x.msgs[mi]

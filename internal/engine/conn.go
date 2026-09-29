@@ -92,6 +92,8 @@ func (c *conn) Data(side tcp.Side, off int64, b []byte, peerAck int64, ts time.T
 
 // Gap 实现 tcp.Handler。
 func (c *conn) Gap(side tcp.Side, off, n int64, ts time.Time) {
+	c.e.stats.Gaps++
+	c.e.stats.GapBytes += n
 	if !c.known {
 		return
 	}
@@ -262,7 +264,11 @@ func (s *reqSink) Body(b []byte) {
 	}
 }
 
-func (s *reqSink) Gap(sec http1.Section, n int64) {}
+func (s *reqSink) Gap(sec http1.Section, n int64) {
+	if x := s.cur; x != nil {
+		x.gap(x.reqMsg, sec, n)
+	}
+}
 
 func (s *reqSink) End(complete bool, ts time.Time) {
 	x := s.cur
@@ -368,7 +374,11 @@ func (s *resSink) Body(b []byte) {
 	}
 }
 
-func (s *resSink) Gap(sec http1.Section, n int64) {}
+func (s *resSink) Gap(sec http1.Section, n int64) {
+	if x := s.cur; x != nil {
+		x.gap(x.resMsg, sec, n)
+	}
+}
 
 func (s *resSink) End(complete bool, ts time.Time) {
 	x := s.cur
