@@ -64,3 +64,17 @@ func BenchmarkHighlight(b *testing.B) {
 		m.Highlight(line)
 	}
 }
+
+// 快速路径整块扫描的稳态分配（含块边界候选更新）。
+func BenchmarkFastTailUpdate(b *testing.B) {
+	m, _ := match.Compile([]string{"keyword"}, false)
+	s := m.NewScanner()
+	chunk := []byte("some line without keyword\n") // 每块以 \n 结束
+	s.Write(chunk)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s.Write(chunk)
+		s.Break()
+	}
+}
