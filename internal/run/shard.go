@@ -48,6 +48,10 @@ func (s *single) finish(now time.Time) engine.Stats {
 func (s *single) abort() engine.Stats { return s.e.Stats() }
 
 // multi 是多分片：每个分片一个协程、一个引擎，按连接分包，时钟推进广播给所有分片。
+//
+// 输出顺序：同一分片内按交互结束的先后排列；不同分片的块按各分片写出的先后交错，
+// 同一批包里在不同分片结束的交互，先后不保证与单核时一致。
+// 内存告警由各分片的引擎各自限频、各自计数，--cpus N 时最多有 N 路告警。
 type multi struct {
 	shards []*shard
 	free   chan<- *batch
@@ -102,6 +106,7 @@ func (m *multi) run(s *shard) {
 }
 
 // release 在一个分片处理完批次后调用，最后一个分片把批次放回空闲池。
+// 放回时不会阻塞：批次总数等于 free 的容量（poolSize），空闲池总放得下所有批次。
 func (m *multi) release(b *batch) {
 	if b.pending.Add(-1) == 0 {
 		b.reset()

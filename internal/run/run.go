@@ -70,6 +70,10 @@ func (s *sink) failed() error {
 }
 
 // Run 处理整个输入。matched 为真表示至少输出了一块。
+//
+// --cpus N 时 st 是各分片统计的合并（engine.Stats.Merge）：计数是总数，
+// 峰值（PeakBuffered、PeakInFlight、PeakConns）是各分片峰值之和，只是上界，
+// 不是同一时刻的全局峰值。
 func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 	o := cfg.Opts
 	m, err := match.Compile(o.Patterns, o.Regex)

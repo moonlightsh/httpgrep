@@ -64,7 +64,7 @@ type header struct {
 type reader struct {
 	src  io.Reader
 	cur  *batch      // 正在填的批次
-	free chan *batch // 空闲批次
+	free chan *batch // 空闲批次，容量等于批次总数，放回时不阻塞
 	out  chan *batch // 填好的批次
 	hdr  chan header
 	done chan struct{} // Run 返回时关闭
