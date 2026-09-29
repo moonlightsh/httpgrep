@@ -1,4 +1,6 @@
-package main_test
+// 测试用 package main 而不是 main_test：黑盒测试运行的是 go build 出来的程序，
+// 测试二进制本身要链接 main.go 及其依赖，main.go 或 internal 包改动时 go test 的缓存才会失效。
+package main
 
 import (
 	"bytes"
@@ -542,5 +544,30 @@ func TestSecondSIGINTExits130(t *testing.T) {
 	}
 	if code := p.waitExit(t, 5*time.Second); code != 130 || p.stdout.String() != "" {
 		t.Fatalf("code %d, stdout %q; want 130 and no output", code, p.stdout.String())
+	}
+}
+
+// 标准输出被关闭时，和 grep 一样被 SIGPIPE 终止（Go 对 fd 1 写出 EPIPE 时的默认行为）。
+func TestClosedStdoutKilledBySIGPIPE(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+	defer w.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "TOKEN-42")
+	cmd.Stdin = bytes.NewReader(twoExchanges(t))
+	cmd.Stdout = w
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("err = %v, want killed by SIGPIPE", err)
+	}
+	if ws, ok := ee.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGPIPE {
+		t.Fatalf("exit %v, stderr %q; want killed by SIGPIPE", err, stderr.String())
 	}
 }
