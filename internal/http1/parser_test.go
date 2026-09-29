@@ -971,6 +971,8 @@ func TestUpgradeHold(t *testing.T) {
 		{"tunnel drops everything", []step{data(up + next), tunnel(), data(next), gap(5), resume(), data(next), closeRst()}, upEv},
 		{"gap while held is replayed", []step{data(up + "GET /2 HT"), gap(4), data(next), resume()},
 			cat(upEv, []string{"desync 49", "begin off=40 orphan", "raw unparsed GET /2 HT", "gap unparsed 4", "end false"}, nextEv(53))},
+		{"adjacent gaps while held merge", []step{data(up), gap(3), gap(4), data(next), resume()},
+			cat(upEv, []string{"desync 40", "begin off=40 orphan", "gap unparsed 7", "end false"}, nextEv(47))},
 		{"resume before request ends", []step{data(up[:30]), resume(), data(up[30:] + next)}, cat(upEv, nextEv(40))},
 		{"tunnel before request ends", []step{data(up[:30]), tunnel(), data(up[30:] + next), resume(), data(next)}, upEv},
 		{"close while held", []step{data(up + next), closeFin(), resume()}, upEv},
