@@ -55,3 +55,59 @@ func TestEmptyPatternMatchesEverything(t *testing.T) {
 		t.Fatal("empty pattern should match empty line")
 	}
 }
+
+// 跨多次 Write 的命中也能找到；跨行、跨 Break 的不算。
+func TestMatchAcrossWritesNotLines(t *testing.T) {
+	m, _ := match.Compile([]string{"490419C6"}, false)
+	s := m.NewScanner()
+	s.Write([]byte(`{"sn":"4904`))
+	s.Write([]byte(`19C6117A"}` + "\n"))
+	if !s.Matched() {
+		t.Fatal("match spanning two Write calls should be found")
+	}
+
+	// 跨行不算：同一行内没有完整关键词。
+	m2, _ := match.Compile([]string{"490419C6"}, false)
+	s2 := m2.NewScanner()
+	s2.Write([]byte("4904\n19C6\n"))
+	if s2.Matched() {
+		t.Fatal("match must not span lines")
+	}
+
+	// 跨 Break 不算：Break 等同于行结束。
+	m3, _ := match.Compile([]string{"490419C6"}, false)
+	s3 := m3.NewScanner()
+	s3.Write([]byte("4904"))
+	s3.Break()
+	s3.Write([]byte("19C6\n"))
+	if s3.Matched() {
+		t.Fatal("match must not span Break")
+	}
+}
+
+// Reset 后可以重新扫描。
+func TestScannerReset(t *testing.T) {
+	m, _ := match.Compile([]string{"hit"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("a hit b\n"))
+	if !s.Matched() {
+		t.Fatal("expected match")
+	}
+	s.Reset()
+	if s.Matched() {
+		t.Fatal("after Reset, matched should be false")
+	}
+	s.Write([]byte("no such thing\n"))
+	s.Break()
+	if s.Matched() {
+		t.Fatal("should not match after reset on clean data")
+	}
+	// Reset 后未完成的行缓冲也清空：跨 Reset 拼接不算命中。
+	s.Reset()
+	s.Write([]byte("hi"))
+	s.Reset()
+	s.Write([]byte("t here\n"))
+	if s.Matched() {
+		t.Fatal("partial line buffer must be cleared by Reset")
+	}
+}
