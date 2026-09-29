@@ -169,7 +169,7 @@ while IFS= read -r f <&3; do
 	ex=$(stat exchanges "$s")
 	rss=$(awk '/maximum resident set size/{printf "%.1f MiB", $1/1048576}' "$s")
 	real=$(awk '/ real /{print $1 "s"}' "$s")
-	say "stats $b: packets=$(stat packets "$s") bytes=$(stat bytes "$s") elapsed=$(stat elapsed "$s") throughput=$(stat throughput "$s") connections=$(stat connections "$s") mid-stream=$(stat 'mid-stream connections' "$s") exchanges=$ex gaps=$(stat gaps "$s") desyncs=$(stat desyncs "$s") orphans=$(stat 'orphan messages' "$s") maxrss=$rss real=$real"
+	say "stats $b: packets=$(stat packets "$s") bytes=$(stat bytes "$s") elapsed=$(stat elapsed "$s") throughput=$(stat throughput "$s") connections=$(stat connections "$s") mid-stream=$(stat 'mid-stream connections' "$s") exchanges=$ex gaps=$(stat gaps "$s") desyncs=$(stat desyncs "$s") orphans=$(stat 'orphan messages' "$s") non-http=$(stat 'non-HTTP connections' "$s") maxrss=$rss real=$real"
 	# 退出码：有交互时 0，没有时 1。
 	want=1
 	[ "${ex:-0}" -gt 0 ] && want=0

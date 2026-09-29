@@ -45,6 +45,11 @@ SIZE accepts K, M, G suffixes (powers of 1024). DUR is a Go duration
 such as 30s or 2m. Options may appear before or after PATTERN and FILE;
 arguments after -- are never treated as options.
 
+Live search (tcpdump 4.7 or later):
+  tcpdump -i lo -U --immediate-mode -w - port 7010 | httpgrep PATTERN
+Without --immediate-mode, tcpdump may hold packets for up to about 1s
+before writing them, so matches are printed that much later.
+
 Exit status is 0 if an exchange matched, 1 if none matched, 2 on error.
 `
 
