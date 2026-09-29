@@ -37,6 +37,13 @@ func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 	}
 	c.last = ts
 	a.lru.touch(c)
+	if seg.Flags&decode.RST != 0 {
+		// RST 立即生效，不检查序号是否在窗口内。
+		a.flushHoles(c, ts)
+		c.h.Reset(ts)
+		a.close(c, CloseReset, ts)
+		return
+	}
 	a.segment(c, c.side(seg.Src), seg, ts)
 	a.settle(c, ts)
 }

@@ -69,3 +69,48 @@ func TestFin(t *testing.T) {
 		})
 	}
 }
+
+// 第 13 条：RST 先按缺口规则交付缓存数据，再 Reset、Closed(CloseReset)。
+func TestReset(t *testing.T) {
+	tests := []struct {
+		name string
+		ps   []pkt
+		want []string
+	}{
+		{
+			name: "no buffered data",
+			ps:   []pkt{c2s(1001, 5001, pshAck, "ab"), s2c(5001, 1003, rstAck, "")},
+			want: []string{`data 0 off=0 "ab" ack=0`, "reset", "closed reset"},
+		},
+		{
+			name: "buffered data in both directions",
+			ps: []pkt{
+				c2s(1005, 5001, pshAck, "ef"),
+				s2c(5003, 1001, pshAck, "CD"),
+				c2s(1001, 0, rst, ""),
+			},
+			want: []string{
+				"gap 0 off=0 n=4", `data 0 off=4 "ef" ack=0`,
+				"gap 1 off=0 n=2", `data 1 off=2 "CD" ack=0`,
+				"reset", "closed reset",
+			},
+		},
+		{
+			name: "sequence out of window",
+			ps:   []pkt{s2c(123456, 0, rst, "")},
+			want: []string{"reset", "closed reset"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, defaultConfig())
+			h.handshake(at(0))
+			h.expect("open A=10.0.0.1:40000 B=10.0.0.2:80 known=true")
+			h.feed(at(1), tt.ps...)
+			h.expect(tt.want...)
+			if n := h.a.Len(); n != 0 {
+				t.Fatalf("Len() = %d, want 0", n)
+			}
+		})
+	}
+}

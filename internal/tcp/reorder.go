@@ -136,3 +136,13 @@ func (a *Assembler) expireReorder(c *conn, s Side, now time.Time) {
 		a.skipTo(c, s, d.finOff, now)
 	}
 }
+
+// flushHoles 把两个方向缓存之间的空洞都认定为缺口，交付全部缓存数据。
+func (a *Assembler) flushHoles(c *conn, ts time.Time) {
+	for s := range Side(2) {
+		d := &c.d[s]
+		if n := len(d.buf); n > 0 {
+			a.skipTo(c, s, d.buf[n-1].end(), ts)
+		}
+	}
+}
