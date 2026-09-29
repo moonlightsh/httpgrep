@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 // Status 是交互的异常状态。
@@ -221,12 +222,13 @@ func appendEscapedTo(buf, data []byte) []byte {
 			// 不成 UTF-8 序列的单字节（前面不是能和它组成序列的引导字节）
 			buf = appendHex(buf, c)
 			i++
-		case c >= 0xc2 && c < 0xf0 && i+1 < len(data):
-			// 多字节 UTF-8 序列，原样拷贝
-			n := utf8SeqLen(c)
-			if i+n <= len(data) && validSeq(data[i:i+n]) {
-				buf = append(buf, data[i:i+n]...)
-				i += n
+		case c >= 0xc2:
+			// 可能是合法 UTF-8 序列的引导字节，用 utf8 判断；
+			// DecodeRune 同时拒绝过长编码和代理区编码
+			_, size := utf8.DecodeRune(data[i:])
+			if size > 1 {
+				buf = append(buf, data[i:i+size]...)
+				i += size
 			} else {
 				buf = append(buf, c)
 				i++
@@ -237,28 +239,6 @@ func appendEscapedTo(buf, data []byte) []byte {
 		}
 	}
 	return buf
-}
-
-// utf8SeqLen 返回引导字节对应的序列长度（假定是合法引导字节）。
-func utf8SeqLen(c byte) int {
-	switch {
-	case c < 0xe0:
-		return 2
-	case c < 0xf0:
-		return 3
-	default:
-		return 4
-	}
-}
-
-// validSeq 判断一个 UTF-8 序列的续字节是否合法。
-func validSeq(s []byte) bool {
-	for _, b := range s[1:] {
-		if b&0xc0 != 0x80 {
-			return false
-		}
-	}
-	return true
 }
 
 // appendHex 追加小写十六进制形式的 \xNN。

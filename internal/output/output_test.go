@@ -352,6 +352,9 @@ func TestTTYEscape(t *testing.T) {
 		{"C2 A0 不转", "\xc2\xa0", "\xc2\xa0"},
 		{"孤立的 0x85 转义", "a\x85b", "a\\x85b"},
 		{"GBK 文本原样", "\xd6\xd0\xce\xc4", "\xd6\xd0\xce\xc4"},
+		{"4 字节 emoji 原样", "a\xf0\x9f\x98\x80b", "a\xf0\x9f\x98\x80b"},
+		{"3 字节中文原样", "\xe4\xb8\xad\xe6\x96\x87", "\xe4\xb8\xad\xe6\x96\x87"},
+		{"F4 开头原样", "\xf4\x8f\xbf\xbf", "\xf4\x8f\xbf\xbf"},
 		{"截断的 C2 序列原样", "a\xc2", "a\xc2"},
 		{"0x80 孤立转义", "\x80", "\\x80"},
 	}
