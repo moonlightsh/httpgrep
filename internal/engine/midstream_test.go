@@ -101,3 +101,21 @@ func TestMidStreamGapAfterOrphan(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 角色按字节流里先出现的起始行判定：服务端这一段先是状态行，body 里有一行像请求行
+// （message/http 的 TRACE 回显），仍然判定发状态行的一方是服务端。
+// 第一个响应没有请求可配，是 no-request，不含关键词不输出；之后的交互照常配对。
+func TestMidStreamRoleByStreamOrder(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.ServerSend(ms(0), []byte("HTTP/1.1 200 OK\r\nContent-Type: message/http\r\nContent-Length: 20\r\n\r\nTRACE / HTTP/1.1\r\n\r\n"))
+		c.ClientSend(ms(10), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(12), []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	})
+	check(t, out, "2026-09-28 15:30:12.355 10.0.0.1:52814 -> 10.0.0.2:80 complete 2.0ms\n"+
+		"GET /TOKEN HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok\n")
+	if st.Exchanges != 2 || st.NoRequest != 1 || st.Complete != 1 || st.Matched != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}

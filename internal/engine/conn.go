@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"net/netip"
 	"time"
 
@@ -225,16 +226,35 @@ func (c *conn) Data(side tcp.Side, off int64, b []byte, peerAck int64, ts time.T
 }
 
 // probeFeed 在角色未知时把字节喂给这个方向的两个解析器。
-// 请求解析器在喂的过程中定了角色时，同一方向的响应解析器已被丢弃，不再喂；
-// 响应解析器定了角色时，请求解析器已经喂过这些字节，它之后的事件被忽略。
-// 定角色之后剩下的字节由留下的解析器自己在同一次 Feed 里接着处理。
+// 角色要按字节流里先出现的起始行判定，所以按行交替喂入：每一行先喂请求解析器，
+// 再喂响应解析器。起始行的 Begin 只在收到这一行的 '\n' 时产生，一行之内不会有两个解析器
+// 先后定角色。定了角色之后，剩下的字节整段交给这个方向上留下的解析器：
+// 它就是刚刚定角色的那个解析器（喂过这一行），或者两个解析器都喂过这一行。
 func (c *conn) probeFeed(side tcp.Side, off int64, b []byte, peerAck int64, ts time.Time) {
-	c.probes[side][http1.Request].p.Feed(off, b, peerAck, ts)
-	if !c.known {
-		c.probes[side][http1.Response].p.Feed(off, b, peerAck, ts)
+	ps := &c.probes[side]
+	for len(b) > 0 && !c.known {
+		n := len(b)
+		if i := bytes.IndexByte(b, '\n'); i >= 0 {
+			n = i + 1
+		}
+		ps[http1.Request].p.Feed(off, b[:n], peerAck, ts)
+		if !c.known {
+			ps[http1.Response].p.Feed(off, b[:n], peerAck, ts)
+		}
+		off += int64(n)
+		b = b[n:]
 	}
-	if c.known {
-		c.probes = nil
+	if !c.known {
+		return
+	}
+	c.probes = nil
+	if len(b) == 0 {
+		return
+	}
+	if side == c.client {
+		c.req.Feed(off, b, peerAck, ts)
+	} else {
+		c.res.Feed(off, b, peerAck, ts)
 	}
 }
 
