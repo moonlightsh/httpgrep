@@ -6,8 +6,10 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
+	"time"
 
 	"httpgrep/internal/cli"
+	"httpgrep/internal/engine"
 	"httpgrep/internal/run"
 )
 
@@ -41,7 +43,11 @@ func httpgrep(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		}
 		defer f.Close()
 	}
-	matched, _, err := run.Run(run.Config{Input: f, Stdout: stdout, Stderr: stderr, Opts: opts})
+	start := time.Now()
+	matched, st, err := run.Run(run.Config{Input: f, Stdout: stdout, Stderr: stderr, Opts: opts})
+	if opts.Stats {
+		printStats(stderr, st, time.Since(start))
+	}
 	if err != nil {
 		return fail(stderr, err)
 	}
@@ -68,4 +74,52 @@ func versionString() string {
 		}
 	}
 	return s + "\n"
+}
+
+// printStats 按设计文档第 11 节把统计写到 stderr，每行一项。
+func printStats(w io.Writer, st engine.Stats, elapsed time.Duration) {
+	var capture time.Duration
+	if !st.FirstTS.IsZero() {
+		capture = st.LastTS.Sub(st.FirstTS)
+	}
+	mbps := 0.0
+	if sec := elapsed.Seconds(); sec > 0 {
+		mbps = float64(st.Bytes) / 1e6 / sec
+	}
+	fmt.Fprintf(w, "packets: %d\n", st.Packets)
+	fmt.Fprintf(w, "bytes: %d\n", st.Bytes)
+	fmt.Fprintf(w, "capture duration: %.3fs\n", capture.Seconds())
+	fmt.Fprintf(w, "elapsed: %.3fs\n", elapsed.Seconds())
+	fmt.Fprintf(w, "throughput: %.1f MB/s\n", mbps)
+	for _, kv := range []struct {
+		label string
+		n     int64
+	}{
+		{"connections", st.Connections},
+		{"mid-stream connections", st.MidStream},
+		{"exchanges", st.Exchanges},
+		{"matched", st.Matched},
+		{"complete", st.Complete},
+		{"no-request", st.NoRequest},
+		{"incomplete", st.Incomplete},
+		{"no-response(timeout)", st.NoResponseTimeout},
+		{"no-response(closed)", st.NoResponseClosed},
+		{"no-response(eof)", st.NoResponseEOF},
+		{"late responses", st.Late},
+		{"orphan messages", st.Orphans},
+		{"evicted", st.Evicted},
+		{"evicted matched", st.EvictedMatched},
+		{"truncated messages", st.Truncated},
+		{"gaps", st.Gaps},
+		{"gap bytes", st.GapBytes},
+		{"desyncs", st.Desyncs},
+		{"ip fragments", st.Fragments},
+		{"not tcp", st.NotTCP},
+		{"malformed", st.Malformed},
+	} {
+		fmt.Fprintf(w, "%s: %d\n", kv.label, kv.n)
+	}
+	fmt.Fprintf(w, "peak buffered: %d bytes\n", st.PeakBuffered)
+	fmt.Fprintf(w, "peak in-flight exchanges: %d\n", st.PeakInFlight)
+	fmt.Fprintf(w, "peak connections: %d\n", st.PeakConns)
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -285,4 +286,72 @@ func TestVersion(t *testing.T) {
 			t.Fatalf("stdout %q, err %v; want %q", stdout, err, "httpgrep 1.2.3\n")
 		}
 	})
+}
+
+// --stats 退出前把统计写到 stderr，每行一项 "标签: 值"，覆盖设计文档第 11 节的各项。
+// twoExchanges 有 10 个包：每条连接握手 3 个、请求 1 个、响应 1 个；
+// 每个包 54 字节头（以太网 14 + IPv4 20 + TCP 20），加上载荷 28+51+19+27，共 665 字节；
+// 包数、字节数和抓包时长 0.023s 都已用 capinfos 核对。
+func TestStats(t *testing.T) {
+	got := runBin(t, bytes.NewReader(twoExchanges(t)), "--stats", "TOKEN-42")
+	if got.code != 0 || got.stdout != block1 {
+		t.Fatalf("code %d, stdout %q", got.code, got.stdout)
+	}
+	lines := strings.Split(strings.TrimSuffix(got.stderr, "\n"), "\n")
+	stats := map[string]string{}
+	var labels []string
+	for _, l := range lines {
+		k, v, ok := strings.Cut(l, ": ")
+		if !ok {
+			t.Fatalf("bad stats line %q in\n%s", l, got.stderr)
+		}
+		stats[k] = v
+		labels = append(labels, k)
+	}
+	exact := [][2]string{
+		{"packets", "10"},
+		{"bytes", "665"},
+		{"capture duration", "0.023s"},
+		{"connections", "2"},
+		{"mid-stream connections", "0"},
+		{"exchanges", "2"},
+		{"matched", "1"},
+		{"complete", "2"},
+		{"no-request", "0"},
+		{"incomplete", "0"},
+		{"no-response(timeout)", "0"},
+		{"no-response(closed)", "0"},
+		{"no-response(eof)", "0"},
+		{"late responses", "0"},
+		{"orphan messages", "0"},
+		{"evicted", "0"},
+		{"evicted matched", "0"},
+		{"truncated messages", "0"},
+		{"gaps", "0"},
+		{"gap bytes", "0"},
+		{"desyncs", "0"},
+		{"ip fragments", "0"},
+		{"not tcp", "0"},
+		{"malformed", "0"},
+		{"peak in-flight exchanges", "1"},
+		{"peak connections", "2"},
+	}
+	for _, kv := range exact {
+		if stats[kv[0]] != kv[1] {
+			t.Errorf("%s = %q, want %q", kv[0], stats[kv[0]], kv[1])
+		}
+	}
+	pattern := [][2]string{
+		{"elapsed", `^[0-9]+\.[0-9]{3}s$`},
+		{"throughput", `^[0-9]+\.[0-9] MB/s$`},
+		{"peak buffered", `^[1-9][0-9]* bytes$`},
+	}
+	for _, kv := range pattern {
+		if !regexp.MustCompile(kv[1]).MatchString(stats[kv[0]]) {
+			t.Errorf("%s = %q, want match %s", kv[0], stats[kv[0]], kv[1])
+		}
+	}
+	if len(labels) != len(exact)+len(pattern) {
+		t.Errorf("got %d stats lines, want %d:\n%s", len(labels), len(exact)+len(pattern), got.stderr)
+	}
 }
