@@ -571,3 +571,45 @@ func TestClosedStdoutKilledBySIGPIPE(t *testing.T) {
 		t.Fatalf("exit %v, stderr %q; want killed by SIGPIPE", err, stderr.String())
 	}
 }
+
+// 终端检测：管道、/dev/null、普通文件都不是终端，伪终端是。
+func TestIsTerminal(t *testing.T) {
+	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer null.Close()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	file, err := os.Create(filepath.Join(t.TempDir(), "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	for _, tc := range []struct {
+		name string
+		f    *os.File
+		want bool
+	}{
+		{"devnull", null, false},
+		{"pipe", w, false},
+		{"file", file, false},
+	} {
+		if got := isTerminal(tc.f); got != tc.want {
+			t.Errorf("%s: isTerminal = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	master, slave, err := openPTY()
+	if err != nil {
+		t.Skip("no pty: ", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	if !isTerminal(slave) {
+		t.Error("pty: isTerminal = false, want true")
+	}
+}

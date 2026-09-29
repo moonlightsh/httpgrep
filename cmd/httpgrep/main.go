@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"httpgrep/internal/cli"
 	"httpgrep/internal/engine"
@@ -150,4 +151,20 @@ func watchSignals() <-chan struct{} {
 		}
 	}()
 	return stop
+}
+
+// isTerminal 报告 f 是不是终端：能读出终端属性（termios）就是。
+// 管道、普通文件和 /dev/null 上这个 ioctl 返回 ENOTTY。
+// 用 SyscallConn 而不是 Fd，免得把文件切成阻塞模式。
+func isTerminal(f *os.File) bool {
+	rc, err := f.SyscallConn()
+	if err != nil {
+		return false
+	}
+	var e syscall.Errno
+	err = rc.Control(func(fd uintptr) {
+		var t syscall.Termios
+		_, _, e = syscall.Syscall(syscall.SYS_IOCTL, fd, ioctlGetTermios, uintptr(unsafe.Pointer(&t)))
+	})
+	return err == nil && e == 0
 }
