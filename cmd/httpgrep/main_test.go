@@ -260,6 +260,7 @@ func TestHelp(t *testing.T) {
 		"--max-message SIZE", "(default 8M)", "--cpus N", "1 to 1024 (default 1)",
 		"--stats", "--help", "--version",
 		"K, M, G", "Exit status is 0 if an exchange matched, 1 if none matched, 2 on error.",
+		"tcpdump -i lo -U --immediate-mode -w - port 7010 | httpgrep PATTERN",
 	} {
 		if !strings.Contains(got.stdout, s) {
 			t.Errorf("help lacks %q", s)
@@ -595,6 +596,28 @@ func TestClosedStdoutKilledBySIGPIPE(t *testing.T) {
 	}
 	if ws, ok := ee.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGPIPE {
 		t.Fatalf("exit %v, stderr %q; want killed by SIGPIPE", err, stderr.String())
+	}
+}
+
+// 写标准输出出错（EPIPE 以外）：stdout 是只读打开的 /dev/null，写入得到 EBADF，
+// 报错并以退出码 2 结束；--cpus 4 时同样如此。
+func TestWriteErrorExits2(t *testing.T) {
+	for _, cpus := range []string{"1", "4"} {
+		t.Run("cpus="+cpus, func(t *testing.T) {
+			ro, err := os.Open(os.DevNull)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ro.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			cmd, _, stderr := command(ctx, bytes.NewReader(twoExchanges(t)), "--cpus", cpus, "TOKEN-42")
+			cmd.Stdout = ro
+			code := exitCode(t, cmd.Run())
+			if want := "httpgrep: write /dev/stdout: bad file descriptor\n"; code != 2 || stderr.String() != want {
+				t.Fatalf("code %d, stderr %q; want 2, %q", code, stderr.String(), want)
+			}
+		})
 	}
 }
 
