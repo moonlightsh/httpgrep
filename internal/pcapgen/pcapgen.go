@@ -40,6 +40,11 @@ func NewWriter(w io.Writer, link pcap.LinkType) *Writer {
 }
 
 // Record 写一条 pcap 记录。origLen 为 0 时取 len(frame)。
+//
+// 作为测试工具，Record 不校验参数，按原样写进 32 位字段：负的 origLen、
+// 超过 snaplen 的 frame、2106 年以后（或 1970 年以前）的 ts 都会被 uint32
+// 截断；origLen 小于 len(frame) 也照写。需要构造异常记录时可以利用这一点，
+// 正常用法请保证 0 <= len(frame) <= origLen、len(frame) <= 262144。
 func (w *Writer) Record(ts time.Time, frame []byte, origLen int) error {
 	if w.err != nil {
 		return w.err
@@ -337,13 +342,14 @@ func (c *Conn) ServerAck(ts time.Time) {
 }
 
 // SkipClient 只推进客户端序号，不写包，用来模拟丢包。
+// n 按 uint32 加到序号上（模 2^32），n 为负时序号往回退。
 func (c *Conn) SkipClient(n int) {
 	c.startClient()
 	c.clientSeq += uint32(n)
 	c.clientSent = c.clientSeq
 }
 
-// SkipServer 只推进服务端序号。
+// SkipServer 只推进服务端序号，n 的处理同 SkipClient。
 func (c *Conn) SkipServer(n int) {
 	c.startServer()
 	c.serverSeq += uint32(n)
