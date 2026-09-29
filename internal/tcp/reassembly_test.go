@@ -144,3 +144,30 @@ func TestSequenceWrap(t *testing.T) {
 		`data 1 off=0 "OK" ack=257`,
 	)
 }
+
+// 第 15 条：保活探测（序号等于下一个期望序号减 1，负载 0 或 1 字节）没有回调。
+func TestKeepAlive(t *testing.T) {
+	tests := []struct {
+		name string
+		p    pkt
+	}{
+		{"client empty", c2s(1004, 5003, ack, "")},
+		{"client one byte", c2s(1004, 5003, ack, "\x00")},
+		{"server empty", s2c(5002, 1005, ack, "")},
+		{"server one byte", s2c(5002, 1005, ack, "Z")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, defaultConfig())
+			h.handshake(at(0))
+			h.feed(at(1), c2s(1001, 5001, pshAck, "abcd"), s2c(5001, 1005, pshAck, "OK"))
+			h.expect(
+				"open A=10.0.0.1:40000 B=10.0.0.2:80 known=true",
+				`data 0 off=0 "abcd" ack=0`,
+				`data 1 off=0 "OK" ack=4`,
+			)
+			h.add(tt.p, at(2))
+			h.expect()
+		})
+	}
+}
