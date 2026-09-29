@@ -202,10 +202,11 @@ func decodeTCP(ip []byte, hl, total int, seg *Segment) Result {
 	seg.Seq = binary.BigEndian.Uint32(tcp[4:8])
 	seg.Ack = binary.BigEndian.Uint32(tcp[8:12])
 	seg.Flags = Flags(tcp[13])
-	seg.Payload = tcp[off:min(total, len(tcp))]
+	tcpEnd := min(total-hl, len(tcp))
+	seg.Payload = tcp[off:tcpEnd]
 	seg.Missing = 0
-	if total > len(ip) { // snaplen 截断
-		seg.Missing = total - len(ip)
+	if total-hl > len(tcp) { // snaplen 截断
+		seg.Missing = total - hl - len(tcp)
 	}
 	return OK
 }
