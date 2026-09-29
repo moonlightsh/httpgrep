@@ -5,7 +5,6 @@ package pcapgen
 import (
 	"encoding/binary"
 	"io"
-	"math/bits"
 	"net/netip"
 	"time"
 
@@ -97,13 +96,15 @@ func tcpIPv4(src, dst netip.AddrPort, seq, ack uint32, flags decode.Flags, paylo
 	copy(b[12:], srcIP[:])
 	copy(b[16:], dstIP[:])
 
-	// 头部校验和：按 16 位字求和再取反。
+	// 头部校验和：按 16 位字求和、折叠进位、取反，大端写入。
 	var sum uint32
 	for i := 0; i < ipv4HeaderLen; i += 2 {
 		sum += uint32(binary.BigEndian.Uint16(b[i:]))
 	}
-	sum = ^sum
-	binary.BigEndian.PutUint16(b[10:], uint16(bits.ReverseBytes16(uint16(sum))))
+	for sum>>16 != 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	binary.BigEndian.PutUint16(b[10:], ^uint16(sum))
 
 	writeTCP(b[ipv4HeaderLen:], src, dst, seq, ack, flags, payload)
 	return b

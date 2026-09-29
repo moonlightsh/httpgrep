@@ -87,17 +87,17 @@ func TestRecordTCPFields(t *testing.T) {
 		}
 	})
 
-	rows := tsharkFields(t, path, nil,
+	rows := tsharkFields(t, path, []string{"-o", "ip.check_checksum:TRUE"},
 		"frame.time_epoch", "ip.src", "ip.dst", "tcp.srcport", "tcp.dstport",
-		"tcp.seq_raw", "tcp.ack_raw", "tcp.flags", "tcp.len")
+		"tcp.seq_raw", "tcp.ack_raw", "tcp.flags", "tcp.len", "ip.checksum", "ip.checksum.status")
 	if len(rows) != 2 {
 		t.Fatalf("包数 = %d，想要 2", len(rows))
 	}
 	// 期望值逐字段手写：时间戳只核对到微秒（pcap 的精度）。
 	wantTime := []string{"1700000000.123456", "1700000001.623456"}
 	want := [][]string{
-		{"10.0.0.1", "10.0.0.2", "12345", "80", "1000", "0", "0x0002", "0"},
-		{"10.0.0.1", "10.0.0.2", "12345", "80", "1001", "2001", "0x0018", "5"},
+		{"10.0.0.1", "10.0.0.2", "12345", "80", "1000", "0", "0x0002", "0", "0x26ce", "1"},
+		{"10.0.0.1", "10.0.0.2", "12345", "80", "1001", "2001", "0x0018", "5", "0x26c9", "1"},
 	}
 	for i, row := range rows {
 		if !strings.HasPrefix(row[0], wantTime[i]) {
