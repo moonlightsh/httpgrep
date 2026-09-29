@@ -15,17 +15,20 @@ func main() {
 }
 
 // httpgrep 执行一次检索，返回退出码。
-func httpgrep(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+func httpgrep(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	opts, err := cli.Parse(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "httpgrep: %v\nTry 'httpgrep --help' for more information.\n", err)
 		return 2
 	}
-	f, err := os.Open(opts.File)
-	if err != nil {
-		return fail(stderr, err)
+	f := stdin
+	if opts.File != "" && opts.File != "-" {
+		f, err = os.Open(opts.File)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		defer f.Close()
 	}
-	defer f.Close()
 	matched, _, err := run.Run(run.Config{Input: f, Stdout: stdout, Stderr: stderr, Opts: opts})
 	if err != nil {
 		return fail(stderr, err)

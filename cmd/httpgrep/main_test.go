@@ -202,3 +202,12 @@ func TestInputErrorsExit2(t *testing.T) {
 		})
 	}
 }
+
+// 不给文件或文件写成 - 时读标准输入。
+func TestReadsStdin(t *testing.T) {
+	for _, args := range [][]string{{"TOKEN-42"}, {"TOKEN-42", "-"}, {"-e", "TOKEN-42", "-"}} {
+		t.Run(fmt.Sprint(args), func(t *testing.T) {
+			want(t, runBin(t, bytes.NewReader(twoExchanges(t)), args...), block1, "", 0)
+		})
+	}
+}
