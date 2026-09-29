@@ -18,7 +18,6 @@ func genJSON(n int) []byte {
 }
 
 // 4 KiB 分块写入不含命中的 JSON 文本，目标 1 GB/s 以上。
-// 4 KiB 分块写入不含命中的 JSON 文本。
 // 每轮都在同一个 Scanner 上接着写：块边界候选检查每轮都会执行，
 // 覆盖跨块边界的拼接路径。
 func BenchmarkScanFast4K(b *testing.B) {
@@ -40,6 +39,7 @@ func BenchmarkScanFast4K(b *testing.B) {
 }
 
 // 正则模式 4 KiB 分块，行缓存路径。
+// 数据不含命中：每轮都走完整的逐行匹配，而不是命中后的提前返回。
 func BenchmarkScanRegex4K(b *testing.B) {
 	m, err := match.Compile([]string{`"sn":"\d+"`, `(?i)error`}, true)
 	if err != nil {
@@ -52,6 +52,9 @@ func BenchmarkScanRegex4K(b *testing.B) {
 	s := m.NewScanner()
 	for i := 0; i < b.N; i++ {
 		s.Write(chunk)
+		if s.Matched() {
+			b.Fatal("unexpected match: benchmark would only measure the early return")
+		}
 	}
 }
 
