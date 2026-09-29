@@ -21,6 +21,9 @@ const (
 	recHeaderLen  = 16
 	// maxCaplen 是单条记录允许的最大 caplen，超过视为损坏数据。
 	maxCaplen = 16 << 20
+	// keepData 是复用的记录缓冲区的容量上限：更大的记录单独分配，用完交给 GC，
+	// 不让一条大记录把缓冲区永久撑大。
+	keepData = 1 << 20
 	// nanosPerMicro 是纳秒与微秒的换算系数。
 	nanosPerMicro = 1000
 )
@@ -106,10 +109,16 @@ func (r *Reader) Next() (Packet, error) {
 	if origlen < caplen {
 		origlen = caplen
 	}
-	if cap(r.data) < caplen {
+	var data []byte
+	switch {
+	case caplen > keepData:
+		data = make([]byte, caplen)
+	case cap(r.data) < caplen:
 		r.data = make([]byte, caplen)
+		fallthrough
+	default:
+		data = r.data[:caplen]
 	}
-	data := r.data[:caplen]
 	if _, err := io.ReadFull(r.r, data); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			return Packet{}, io.EOF
