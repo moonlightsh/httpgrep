@@ -518,3 +518,53 @@ func TestSlowPathZeroAllocPerLine(t *testing.T) {
 		t.Fatalf("\r-pattern line processing must not allocate, got %v allocs", allocsC)
 	}
 }
+
+// 快速路径 Write+Break 每轮零分配；正则路径 Write+Break 同样。
+func TestZeroAllocPerBreakCycle(t *testing.T) {
+	m, _ := match.Compile([]string{"zz"}, false)
+	s := m.NewScanner()
+	chunk := []byte("some line without zz\n")
+	s.Write(chunk) // 预热 fastTail
+	s.Break()
+	allocs := testing.AllocsPerRun(100, func() {
+		s.Write(chunk)
+		s.Break()
+	})
+	if allocs != 0 {
+		t.Fatalf("fast path Write+Break must not allocate, got %v allocs", allocs)
+	}
+
+	mr, _ := match.Compile([]string{"zz"}, true)
+	sr := mr.NewScanner()
+	sr.Write(chunk)
+	sr.Break()
+	allocsR := testing.AllocsPerRun(100, func() {
+		sr.Write(chunk)
+		sr.Break()
+	})
+	if allocsR != 0 {
+		t.Fatalf("regex Write+Break must not allocate, got %v allocs", allocsR)
+	}
+}
+
+// Write+Break 和 Reset 循环零内存增长（含 tiny 分配，用 TotalAlloc 观察）。
+func TestBreakResetNoMemoryGrowth(t *testing.T) {
+	m, _ := match.Compile([]string{"keyword"}, false) // maxLen=7，fastTail 候选 7 字节
+	s := m.NewScanner()
+	chunk := []byte("some line without keyword\n")
+	s.Write(chunk)
+	s.Break()
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < 1000; i++ {
+		s.Write(chunk)
+		s.Break()
+		s.Reset()
+	}
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	if grew := after.TotalAlloc - before.TotalAlloc; grew != 0 {
+		t.Fatalf("Write/Break/Reset cycle must not allocate anything, allocated %d bytes", grew)
+	}
+}
