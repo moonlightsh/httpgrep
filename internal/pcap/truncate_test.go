@@ -73,3 +73,21 @@ func TestNextCaplenAndOriglen(t *testing.T) {
 		}
 	})
 }
+
+// caplen 恰好 16 MiB（16777216 字节）时不算超限，记录正常返回。
+func TestNextCaplenAtLimit(t *testing.T) {
+	le := binary.LittleEndian
+	in := append([]byte{}, fileHeader(le, 0xa1b2c3d4, 1)...)
+	in = append(in, recBlock(le, 1, 0, make([]byte, 16777216), 16777216)...)
+	r, err := pcap.NewReader(bytes.NewReader(in))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	got, err := r.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if len(got.Data) != 16777216 || got.OrigLen != 16777216 {
+		t.Fatalf("len(Data) = %d, OrigLen = %d, want 16777216, 16777216", len(got.Data), got.OrigLen)
+	}
+}

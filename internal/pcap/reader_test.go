@@ -180,3 +180,14 @@ func TestNextWithOneByteReader(t *testing.T) {
 	t.Run("records", func(t *testing.T) { checkRecords(t, iotest.OneByteReader) })
 	t.Run("truncated tail", func(t *testing.T) { checkTruncatedTail(t, iotest.OneByteReader) })
 }
+
+// network 字段高 16 位带有其他信息时，LinkType 只取低 16 位：0x02a50071 → 113。
+func TestLinkTypeLow16Bits(t *testing.T) {
+	r, err := pcap.NewReader(bytes.NewReader(fileHeader(binary.BigEndian, 0xa1b2c3d4, 0x02a50071)))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	if got := r.LinkType(); got != pcap.LinkLinuxSLL {
+		t.Fatalf("LinkType() = %d, want 113", got)
+	}
+}
