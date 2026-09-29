@@ -454,3 +454,60 @@ func TestConnFinRstSeq(t *testing.T) {
 		}
 	}
 }
+
+// SkipServer 和 ServerFin 推进服务端序号：之后的服务端数据段序号、
+// 客户端 ACK 的确认号都跟着前进。
+func TestConnServerSkipFin(t *testing.T) {
+	client := netip.MustParseAddrPort("10.0.0.1:50004")
+	server := netip.MustParseAddrPort("10.0.0.2:80")
+	t0 := time.Unix(1700000000, 0)
+	cases := []struct {
+		name string
+		gen  func(c *pcapgen.Conn, ts time.Time)
+		want [][]string // 握手之后各包的 flags、seq、ack，手写，ISN 1000/2000
+	}{
+		{
+			name: "skip-server",
+			gen: func(c *pcapgen.Conn, ts time.Time) {
+				c.SkipServer(50) // 服务端 2001 → 2051
+				c.ServerSend(ts, []byte("ok"))
+				c.ClientAck(ts)
+			},
+			want: [][]string{
+				{"0x0018", "2051", "1001"}, // 数据 ok
+				{"0x0010", "1001", "2053"}, // ClientAck 确认 ok
+			},
+		},
+		{
+			name: "server-fin",
+			gen: func(c *pcapgen.Conn, ts time.Time) {
+				c.ServerFin(ts) // 占用 2001，之后 2002
+				c.ClientAck(ts)
+				c.ServerSend(ts, []byte("z"))
+			},
+			want: [][]string{
+				{"0x0011", "2001", "1001"}, // ServerFin
+				{"0x0010", "1001", "2002"}, // ClientAck 确认 FIN
+				{"0x0018", "2002", "1001"}, // 数据 z
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writePcap(t, tc.name+".pcap", pcap.LinkEthernet, func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, client, server)
+				c.Handshake(t0)
+				tc.gen(c, t0.Add(10*time.Millisecond))
+			})
+			rows := tsharkFields(t, path, nil, "tcp.flags", "tcp.seq_raw", "tcp.ack_raw")
+			if len(rows) != 3+len(tc.want) {
+				t.Fatalf("包数 = %d，想要 %d", len(rows), 3+len(tc.want))
+			}
+			for i, w := range tc.want {
+				if got := rows[3+i]; !reflect.DeepEqual(got, w) {
+					t.Errorf("握手后第 %d 个包 flags/seq/ack = %v，想要 %v", i+1, got, w)
+				}
+			}
+		})
+	}
+}
