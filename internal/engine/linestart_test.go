@@ -7,18 +7,11 @@ import (
 	"httpgrep/internal/pcapgen"
 )
 
-// skipLineStart 标记依赖 http1 行首定义变更的用例。现在 http1 失步后只把 '\n' 之后和缺口之后
-// 当作行首（计划第 322 行），失步前的字节没有以换行结尾时，下一个起始行认不出来。
-// 要让每个 TCP 段的开头也算行首候选，得改 http1 的契约（会打破它的切分不变性测试），
-// 由父会话决定之后再启用。
-func skipLineStart(t *testing.T) {
-	t.Skip("待 http1 扩展扫描状态的行首定义（每个段的开头也算行首候选）后启用")
-}
+// 失步前的字节不以换行结尾时，下一个段开头的起始行照样能重新对齐（http1 把每个段的开头当作行首候选）。
 
 // E2-2 的真实形态：半路连接的第一个包是 JSON body 的结尾，没有换行。
 // 之后两个交互照常配对，残余字节计入 Orphans。
 func TestMidStreamBodyTailWithoutNewline(t *testing.T) {
-	skipLineStart(t)
 	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
 		c := pcapgen.NewConn(w, cli1, srv)
 		c.ServerSend(ms(0), []byte(`"end":1}`))
@@ -42,7 +35,6 @@ func TestMidStreamBodyTailWithoutNewline(t *testing.T) {
 // E2-7 的真实形态：同 TestResponseHeadGapDesync，但失步期间的 body 是 "r1"，不以换行结尾。
 // 下一个响应在新的段开头，要能重新对齐，不被吞进 /a 的 Unparsed。
 func TestResponseDesyncTailWithoutNewline(t *testing.T) {
-	skipLineStart(t)
 	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
 		c := pcapgen.NewConn(w, cli1, srv)
 		c.Handshake(ms(-1))
