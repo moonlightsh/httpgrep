@@ -41,6 +41,10 @@ func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 	}
 	hasAck := seg.Flags&decode.ACK != 0
 	peerAck := peerAckOf(peer, seg.Ack, hasAck)
+	if peerAck > peer.next {
+		// 对端的数据已经送达，只是没抓到。
+		a.skipTo(c, 1-s, peerAck, ts)
+	}
 	if len(seg.Payload) == 0 {
 		return
 	}

@@ -65,3 +65,20 @@ func peerAckOf(peer *dir, ack uint32, hasAck bool) int64 {
 	}
 	return -1
 }
+
+// skipTo 把 side 方向 next 到 limit 之间没抓到的部分认定为缺口，
+// 并交付其间以及紧接其后的缓存数据。
+func (a *Assembler) skipTo(c *conn, s Side, limit int64, ts time.Time) {
+	d := &c.d[s]
+	for d.next < limit {
+		stop := limit
+		if len(d.buf) > 0 && d.buf[0].off < stop {
+			stop = d.buf[0].off
+		}
+		if stop > d.next {
+			c.h.Gap(s, d.next, stop-d.next, ts)
+			d.next = stop
+		}
+		a.drain(c, s, ts)
+	}
+}
