@@ -102,6 +102,7 @@ func TestRecordTCPFields(t *testing.T) {
 	t0 := time.Unix(1700000000, 123456000)
 	t1 := t0.Add(1500 * time.Millisecond)
 	t2 := t0.Add(2 * time.Second)
+	t3 := t0.Add(3 * time.Second)
 	// 192.168.1.1→192.168.1.2 的头部按 16 位字求和会产生进位，
 	// 用来覆盖校验和的进位折叠（python 独立算出 0xb77c）。
 	carrySrc := netip.MustParseAddrPort("192.168.1.1:1")
@@ -120,20 +121,29 @@ func TestRecordTCPFields(t *testing.T) {
 		if err := w.Record(t2, pcapgen.Frame(pcap.LinkEthernet, carry), 0); err != nil {
 			t.Fatal(err)
 		}
+		// 显式 origLen：抓到 54 字节、原始长度 1514，模拟 snaplen 截断。
+		ack := pcapgen.TCP(client, server, 1006, 2001, decode.ACK, nil)
+		if err := w.Record(t3, pcapgen.Frame(pcap.LinkEthernet, ack), 1514); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	rows := tsharkFields(t, path, []string{"-o", "ip.check_checksum:TRUE"},
 		"frame.time_epoch", "ip.src", "ip.dst", "tcp.srcport", "tcp.dstport",
-		"tcp.seq_raw", "tcp.ack_raw", "tcp.flags", "tcp.len", "ip.checksum", "ip.checksum.status")
-	if len(rows) != 3 {
-		t.Fatalf("包数 = %d，想要 3", len(rows))
+		"tcp.seq_raw", "tcp.ack_raw", "tcp.flags", "tcp.len", "ip.checksum", "ip.checksum.status",
+		"frame.len", "frame.cap_len")
+	if len(rows) != 4 {
+		t.Fatalf("包数 = %d，想要 4", len(rows))
 	}
 	// 期望值逐字段手写：时间戳只核对到微秒（pcap 的精度）。
-	wantTime := []string{"1700000000.123456", "1700000001.623456", "1700000002.123456"}
+	// frame.len 是记录头里的原始长度，frame.cap_len 是抓到的长度：
+	// origLen 为 0 时两者都等于帧长（14+20+20=54，带 5 字节载荷为 59）。
+	wantTime := []string{"1700000000.123456", "1700000001.623456", "1700000002.123456", "1700000003.123456"}
 	want := [][]string{
-		{"10.0.0.1", "10.0.0.2", "12345", "80", "1000", "0", "0x0002", "0", "0x26ce", "1"},
-		{"10.0.0.1", "10.0.0.2", "12345", "80", "1001", "2001", "0x0018", "5", "0x26c9", "1"},
-		{"192.168.1.1", "192.168.1.2", "1", "2", "7", "0", "0x0002", "0", "0xb77c", "1"},
+		{"10.0.0.1", "10.0.0.2", "12345", "80", "1000", "0", "0x0002", "0", "0x26ce", "1", "54", "54"},
+		{"10.0.0.1", "10.0.0.2", "12345", "80", "1001", "2001", "0x0018", "5", "0x26c9", "1", "59", "59"},
+		{"192.168.1.1", "192.168.1.2", "1", "2", "7", "0", "0x0002", "0", "0xb77c", "1", "54", "54"},
+		{"10.0.0.1", "10.0.0.2", "12345", "80", "1006", "2001", "0x0010", "0", "0x26ce", "1", "1514", "54"},
 	}
 	for i, row := range rows {
 		if !strings.HasPrefix(row[0], wantTime[i]) {
