@@ -52,3 +52,42 @@ func TestExchangeMatchInRequestHead(t *testing.T) {
 		"GET /a HTTP/1.1\r\nX-Id: TOKEN-42\r\n\r\n"+
 		"HTTP/1.1 204 No Content\r\n\r\n")
 }
+
+// 同一连接上的 3 个 keep-alive 交互，只有第 2 个命中，就只输出第 2 个。
+func TestKeepAliveOnlyMatchedOutput(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN-42")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /1 HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(1), []byte("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\none"))
+		c.ClientSend(ms(100), []byte("GET /2 HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(102), []byte("HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nTOKEN-42"))
+		c.ClientSend(ms(200), []byte("GET /3 HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(203), []byte("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nthree"))
+	})
+	check(t, out, "2026-09-28 15:30:12.445 10.0.0.1:52814 -> 10.0.0.2:80 complete 2.0ms\n"+
+		"GET /2 HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nTOKEN-42\n")
+	if st.Exchanges != 3 || st.Matched != 1 || st.Complete != 3 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 管道化：连发两个请求之后才依次收到两个响应，两块的请求和响应要配对正确。
+func TestPipelinedPairing(t *testing.T) {
+	out, _ := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /first HTTP/1.1\r\n\r\n"))
+		c.ClientSend(ms(1), []byte("GET /second HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(10), []byte("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-1"))
+		c.ServerSend(ms(12), []byte("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-2"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 10.0ms\n"+
+		"GET /first HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-1\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 complete 11.0ms\n"+
+		"GET /second HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-2\n")
+}
