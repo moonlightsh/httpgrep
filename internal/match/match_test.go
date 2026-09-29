@@ -2,6 +2,7 @@ package match_test
 
 import (
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -442,5 +443,37 @@ func TestRegexLineCapCompleteLine(t *testing.T) {
 	s2.Write(append(make([]byte, 9*miB), "past-the-cap\n"...))
 	if s2.Matched() {
 		t.Fatal("keyword past the 8 MiB cap must not match (single write)")
+	}
+}
+
+// 命中之后 Write 直接返回：不再缓存、零分配。
+func TestEarlyReturnZeroAlloc(t *testing.T) {
+	m, _ := match.Compile([]string{"hit"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("a hit b\n"))
+	if !s.Matched() {
+		t.Fatal("expected match")
+	}
+	// 慢路径（正则模式）去掉提前返回后会继续缓存数据：
+	// 命中后写入远超 8 MiB 的无换行数据，若仍在处理，
+	// 缓存会涨到 8 MiB；提前返回时内存零增长。用 MemStats 观察。
+	mr, _ := match.Compile([]string{"hit"}, true)
+	sr := mr.NewScanner()
+	sr.Write([]byte("a hit b\n"))
+	if !sr.Matched() {
+		t.Fatal("expected match (regex)")
+	}
+	flood := make([]byte, 1<<20)
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < 100; i++ {
+		sr.Write(flood)
+	}
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	// 命中后允许零星分配，但绝不应缓存近 8 MiB。
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
+		t.Fatalf("Write after match must not process data; allocated %d bytes", grew)
 	}
 }
