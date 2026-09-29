@@ -101,6 +101,13 @@ func (a *Assembler) segment(c *conn, s Side, seg *decode.Segment, ts time.Time) 
 
 // settle 回调已经生效的 FIN；两个方向都结束后关闭连接。
 func (a *Assembler) settle(c *conn, ts time.Time) {
+	if a.fins(c, ts) {
+		a.close(c, CloseFin, ts)
+	}
+}
+
+// fins 回调已经生效、还没回调过的 FIN。两个方向都已结束时返回 true。
+func (a *Assembler) fins(c *conn, ts time.Time) bool {
 	for s := range Side(2) {
 		d := &c.d[s]
 		if d.finSeen && !d.finDone && d.next >= d.finOff {
@@ -108,9 +115,7 @@ func (a *Assembler) settle(c *conn, ts time.Time) {
 			c.h.Fin(s, ts)
 		}
 	}
-	if c.d[0].finDone && c.d[1].finDone {
-		a.close(c, CloseFin, ts)
-	}
+	return c.d[0].finDone && c.d[1].finDone
 }
 
 // close 把连接移出连接表，再回调 Closed。
@@ -188,6 +193,12 @@ func (a *Assembler) Advance(now time.Time) {
 	a.scanned = now
 	for c := a.lru.oldest; c != nil; {
 		next := c.newer // 回调里可能关闭 c
+		if now.Sub(c.last) >= a.cfg.IdleTimeout {
+			a.flushHoles(c, now)
+			a.close(c, CloseIdle, now)
+			c = next
+			continue
+		}
 		a.expireReorder(c, 0, now)
 		a.expireReorder(c, 1, now)
 		a.settle(c, now)
@@ -196,7 +207,13 @@ func (a *Assembler) Advance(now time.Time) {
 }
 
 // Flush 在输入结束时调用：先把每条连接的空洞都认定为缺口，再依次 Closed(CloseEOF)。
-func (a *Assembler) Flush(now time.Time) {}
+func (a *Assembler) Flush(now time.Time) {
+	for a.lru.oldest != nil {
+		c := a.lru.oldest
+		a.flushHoles(c, now)
+		a.close(c, CloseEOF, now)
+	}
+}
 
 // Release 主动释放连接，回调 Closed(CloseEvicted)。连接不存在时返回 false。
 func (a *Assembler) Release(k Key, now time.Time) bool { return false }
