@@ -159,12 +159,12 @@ func Frame(link pcap.LinkType, ip []byte) []byte {
 		binary.BigEndian.PutUint16(b[0:], 0) // 包类型
 		binary.BigEndian.PutUint16(b[2:], 1) // ARPHRD_ETHER
 		binary.BigEndian.PutUint16(b[4:], 6) // 地址长度
-		binary.BigEndian.PutUint16(b[14:], ipv4EtherType(ip))
+		binary.BigEndian.PutUint16(b[14:], etherType(ip))
 		copy(b[16:], ip)
 		return b
 	case pcap.LinkLinuxSLL2:
 		b := make([]byte, 20+len(ip))
-		binary.BigEndian.PutUint16(b[0:], ipv4EtherType(ip)) // 协议类型
+		binary.BigEndian.PutUint16(b[0:], etherType(ip)) // 协议类型
 		// b[2:4] 保留；接口索引 4-7 写 1
 		binary.BigEndian.PutUint32(b[4:], 1)
 		binary.BigEndian.PutUint16(b[8:], 1) // ARPHRD_ETHER
@@ -194,7 +194,8 @@ func Frame(link pcap.LinkType, ip []byte) []byte {
 	panic("pcapgen: unsupported link type " + strconv.Itoa(int(link)))
 }
 
-func ipv4EtherType(ip []byte) uint16 {
+// etherType 按 IP 版本返回 EtherType：IPv6 为 0x86dd，否则为 0x0800。
+func etherType(ip []byte) uint16 {
 	if len(ip) >= 1 && ip[0]>>4 == 6 {
 		return 0x86dd
 	}

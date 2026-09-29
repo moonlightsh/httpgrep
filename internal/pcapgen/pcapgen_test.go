@@ -195,6 +195,44 @@ func TestFrameLinkTypes(t *testing.T) {
 	}
 }
 
+// IPv6 包在各链路层下的协议字段：EtherType 0x86dd，Null/Loop 为 AF_INET6（30）。
+// decode 按这些字段分发，所以不能只靠 tshark 按版本号猜。
+func TestFrameIPv6Protocol(t *testing.T) {
+	c6 := netip.MustParseAddrPort("[2001:db8::1]:12345")
+	s6 := netip.MustParseAddrPort("[2001:db8::2]:80")
+	ts := time.Unix(1700000000, 0)
+	cases := []struct {
+		name  string
+		link  pcap.LinkType
+		field string
+		want  string
+	}{
+		{"ethernet", pcap.LinkEthernet, "eth.type", "0x86dd"},
+		{"sll", pcap.LinkLinuxSLL, "sll.etype", "0x86dd"},
+		{"sll2", pcap.LinkLinuxSLL2, "sll.etype", "0x86dd"},
+		{"null", pcap.LinkNull, "null.family", "30"},
+		{"loop", pcap.LinkLoop, "null.family", "30"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writePcap(t, tc.name+"6.pcap", tc.link, func(w *pcapgen.Writer) {
+				ip := pcapgen.TCP(c6, s6, 1, 0, decode.SYN, nil)
+				if err := w.Record(ts, pcapgen.Frame(tc.link, ip), 0); err != nil {
+					t.Fatal(err)
+				}
+			})
+			rows := tsharkFields(t, path, nil, tc.field, "ipv6.src", "tcp.srcport")
+			if len(rows) != 1 {
+				t.Fatalf("包数 = %d，想要 1", len(rows))
+			}
+			want := []string{tc.want, "2001:db8::1", "12345"}
+			if !reflect.DeepEqual(rows[0], want) {
+				t.Errorf("%s/ipv6.src/tcp.srcport = %v，想要 %v", tc.field, rows[0], want)
+			}
+		})
+	}
+}
+
 // 行为 3：握手后 ClientSend 3000 字节切成 1460、1460、80 三段，
 // 序号连续，tshark follow 流还原的字节和写入的相同。
 func TestConnHandshakeSend(t *testing.T) {
