@@ -228,6 +228,8 @@ func TestStartLine(t *testing.T) {
 		{"trailing space", http1.Request, "GET / HTTP/1.1 \r\n\r\n", false, ""},
 		{"status reason", http1.Response, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", true, "head 200 HTTP/1.1"},
 		{"status no reason", http1.Response, "HTTP/1.0 404\nContent-Length: 0\n\n", true, "head 404 HTTP/1.0"},
+		{"status no reason crlf", http1.Response, "HTTP/1.1 204\r\n\r\n", true, "head 204 HTTP/1.1"},
+		{"status cr then text", http1.Response, "HTTP/1.1 204\rX\r\n\r\n", false, ""},
 		{"status empty reason", http1.Response, "HTTP/1.1 204 \r\n\r\n", true, "head 204 HTTP/1.1"},
 		{"status long reason", http1.Response, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n", true, "head 500 HTTP/1.1"},
 		{"status 2 digits", http1.Response, "HTTP/1.1 20 OK\r\n\r\n", false, ""},
@@ -240,20 +242,23 @@ func TestStartLine(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, c := range []int{0, 1} {
-				r := run(tt.kind, http1.Options{}, c, data(tt.in))
-				bs := nonOrphanBegins(r)
-				if !tt.valid {
-					if len(bs) != 0 {
-						t.Fatalf("chunk=%d: invalid start line began a message: %q", c, r.ev)
+			// 正常状态和 Resync（扫描）状态下，任意切分的判定都一样。
+			for _, resync := range []bool{false, true} {
+				for _, c := range []int{0, 1, 2, 3, 7} {
+					r := run(tt.kind, http1.Options{Resync: resync}, c, data(tt.in))
+					bs := nonOrphanBegins(r)
+					if !tt.valid {
+						if len(bs) != 0 {
+							t.Fatalf("resync=%v chunk=%d: invalid start line began a message: %q", resync, c, r.ev)
+						}
+						continue
 					}
-					continue
-				}
-				if len(bs) != 1 || bs[0].Off != 0 {
-					t.Fatalf("chunk=%d: begins = %+v, events %q", c, bs, r.ev)
-				}
-				if len(r.ev) < 3 || r.ev[2] != tt.head {
-					t.Fatalf("chunk=%d: events %q, want head %q", c, r.ev, tt.head)
+					if len(bs) != 1 || bs[0].Off != 0 {
+						t.Fatalf("resync=%v chunk=%d: begins = %+v, events %q", resync, c, bs, r.ev)
+					}
+					if len(r.ev) < 3 || r.ev[2] != tt.head {
+						t.Fatalf("resync=%v chunk=%d: events %q, want head %q", resync, c, r.ev, tt.head)
+					}
 				}
 			}
 		})
