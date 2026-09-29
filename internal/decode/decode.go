@@ -203,7 +203,7 @@ func decodeTCP(ip []byte, v4 bool, hl, total int, seg *Segment) Result {
 	}
 	tcp := ip[hl:]
 	off := int(tcp[12]>>4) * 4
-	if off < 20 || len(tcp) < off {
+	if off < 20 || len(tcp) < off || total-hl < off {
 		return Malformed
 	}
 	if v4 {

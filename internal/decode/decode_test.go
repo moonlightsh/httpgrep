@@ -461,3 +461,135 @@ func TestZeroLengthTSO(t *testing.T) {
 		t.Errorf("v6 TSO payload = %q, want %q", seg.Payload, payload)
 	}
 }
+
+// ---- 行为 12：Malformed 与 NotTCP ----
+
+func udpPacket(src, dst [4]byte) []byte {
+	b := make([]byte, 20+8)
+	b[0] = 0x45
+	binary.BigEndian.PutUint16(b[2:4], 28)
+	b[9] = 17 // UDP
+	copy(b[12:16], src[:])
+	copy(b[16:20], dst[:])
+	return b
+}
+
+func icmpPacket(src, dst [4]byte) []byte {
+	b := make([]byte, 20+8)
+	b[0] = 0x45
+	binary.BigEndian.PutUint16(b[2:4], 28)
+	b[9] = 1 // ICMP
+	copy(b[12:16], src[:])
+	copy(b[16:20], dst[:])
+	return b
+}
+
+func TestNotTCP(t *testing.T) {
+	a, b := addr4(1, 1, 1, 1), addr4(2, 2, 2, 2)
+	var seg decode.Segment
+
+	// ARP 以太网帧
+	arp := ethernet(0x0806, make([]byte, 28))
+	if got := decode.Decode(pcap.LinkEthernet, arp, len(arp), &seg); got != decode.NotTCP {
+		t.Errorf("ARP Decode = %v, want NotTCP", got)
+	}
+	// UDP、ICMP（RAW IP）
+	for name, pkt := range map[string][]byte{
+		"udp":  udpPacket(a, b),
+		"icmp": icmpPacket(a, b),
+	} {
+		if got := decode.Decode(pcap.LinkRaw, pkt, len(pkt), &seg); got != decode.NotTCP {
+			t.Errorf("%s Decode = %v, want NotTCP", name, got)
+		}
+	}
+}
+
+func TestMalformed(t *testing.T) {
+	tcp := tcpSegment(1, 2, 3, 4, 0x10, nil, []byte("hi"))
+	var seg decode.Segment
+
+	tests := []struct {
+		name string
+		// 构造帧并返回帧和 origLen
+		build func() ([]byte, int)
+	}{
+		{"以太网头不完整", func() ([]byte, int) {
+			f := ethernet(0x0800, tcp)[:10]
+			return f, len(f)
+		}},
+		{"IP 头不完整", func() ([]byte, int) {
+			ip := ipv4Packet(addr4(1, 1, 1, 1), addr4(2, 2, 2, 2), 0, nil, tcp)
+			return ethernet(0x0800, ip[:19]), 14 + 19
+		}},
+		{"TCP 头不完整", func() ([]byte, int) {
+			ip := ipv4Packet(addr4(1, 1, 1, 1), addr4(2, 2, 2, 2), 0, nil, tcp)
+			return ethernet(0x0800, ip[:20+15]), 14 + 35
+		}},
+		{"总长度比 IP 头短", func() ([]byte, int) {
+			ip := ipv4Packet(addr4(1, 1, 1, 1), addr4(2, 2, 2, 2), 0, nil, tcp)
+			binary.BigEndian.PutUint16(ip[2:4], 12) // < 20
+			return ethernet(0x0800, ip), 14 + len(ip)
+		}},
+		{"总长度比 TCP 头短", func() ([]byte, int) {
+			ip := ipv4Packet(addr4(1, 1, 1, 1), addr4(2, 2, 2, 2), 0, nil, tcp)
+			binary.BigEndian.PutUint16(ip[2:4], 30) // 20 IP + 10 TCP，TCP 头都不够
+			return ethernet(0x0800, ip), 14 + len(ip)
+		}},
+		{"IHL 太小", func() ([]byte, int) {
+			ip := ipv4Packet(addr4(1, 1, 1, 1), addr4(2, 2, 2, 2), 0, nil, tcp)
+			ip[0] = 0x43 // IHL=3
+			return ethernet(0x0800, ip), 14 + len(ip)
+		}},
+		{"TCP 数据偏移太小", func() ([]byte, int) {
+			t := tcpSegment(1, 2, 3, 4, 0x10, nil, []byte("hi"))
+			t[12] = 0x30 // 数据偏移 3
+			ip := ipv4Packet(addr4(1, 1, 1, 1), addr4(2, 2, 2, 2), 0, nil, t)
+			return ethernet(0x0800, ip), 14 + len(ip)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame, origLen := tt.build()
+			if got := decode.Decode(pcap.LinkEthernet, frame, origLen, &seg); got != decode.Malformed {
+				t.Errorf("Decode = %v, want Malformed", got)
+			}
+		})
+	}
+}
+
+// ---- 行为 13：零分配与基准测试 ----
+
+func TestAllocsPerRun(t *testing.T) {
+	tcp := tcpSegment(1234, 80, 1, 2, 0x18, nil, make([]byte, 512))
+	ip := ipv4Packet(addr4(10, 1, 2, 3), addr4(10, 1, 2, 4), 0, nil, tcp)
+	frame := ethernet(0x0800, ip)
+	var seg decode.Segment
+	decode.Decode(pcap.LinkEthernet, frame, len(frame), &seg) // 预热
+
+	n := testing.AllocsPerRun(100, func() {
+		decode.Decode(pcap.LinkEthernet, frame, len(frame), &seg)
+	})
+	if n != 0 {
+		t.Errorf("Decode 分配 %v 次/调用, want 0", n)
+	}
+}
+
+func BenchmarkDecodeEthernet(b *testing.B) {
+	tcp := tcpSegment(1234, 80, 1, 2, 0x18, nil, make([]byte, 1024))
+	ip := ipv4Packet(addr4(10, 1, 2, 3), addr4(10, 1, 2, 4), 0, nil, tcp)
+	frame := ethernet(0x0800, ip)
+	var seg decode.Segment
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		decode.Decode(pcap.LinkEthernet, frame, len(frame), &seg)
+	}
+}
+
+func BenchmarkDecodeIPv6(b *testing.B) {
+	ip6 := ipv6Packet(tcpSegment(1234, 80, 1, 2, 0x18, nil, make([]byte, 1024)))
+	var seg decode.Segment
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		decode.Decode(pcap.LinkRaw, ip6, len(ip6), &seg)
+	}
+}
