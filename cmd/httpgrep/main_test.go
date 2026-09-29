@@ -440,47 +440,52 @@ func (p *piped) wait(t *testing.T) int {
 	return exitCode(t, p.cmd.Wait())
 }
 
-// slowRequest 是只有一个请求、没有响应的抓包。
-func slowRequest(t testing.TB) []byte {
-	return capture(t, func(w *pcapgen.Writer) {
-		c := pcapgen.NewConn(w, cli1, srv)
-		c.Handshake(ms(-1))
-		c.ClientSend(ms(0), []byte("GET /slow HTTP/1.1\r\nHost: x\r\n\r\n"))
-	})
-}
-
 const slowReq = "GET /slow HTTP/1.1\r\nHost: x\r\n\r\n"
 
 // 标准输入是管道时，超过 1 秒没有新包，时钟按真实时间往前推：
 // 管道不关，请求也会在 --timeout 之后以 no-response(timeout) 输出。
+//   - 2s：计划里的参数，约 2 秒（不到 3 秒）输出。
+//   - 300ms：比 1 秒的阈值短，兜底要等 1 秒没有新包才开始推时钟，不能约 300ms 就输出。
+//
+// 输入用 slowInput（请求后面跟约 256 KiB 的纯 ACK）：Write 返回时进程已经读到了最后几批包，
+// 计时从这时算起，不受进程启动慢（macOS 首次执行要做签名检查）的影响。
+// 下界各留 100ms 余量给计时误差。上界多留约 1 秒：新编译的程序第一次运行时，
+// macOS 上偶尔观察到输出晚约 0.8 秒。
 func TestPipeRealTimeFallback(t *testing.T) {
-	p := startPiped(t, "--timeout", "1s", "slow")
-	if _, err := p.stdin.Write(slowRequest(t)); err != nil {
-		t.Fatal(err)
-	}
-	const block = "2026-09-28 07:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n" + slowReq
-	start := time.Now()
-	if !p.stdout.waitFor(10*time.Second, func(s string) bool { return s == block }) {
-		t.Fatalf("after %v stdout %q, want %q", time.Since(start), p.stdout.String(), block)
-	}
-	// 兜底要等 1 秒没有新包才开始推时钟，再过 --timeout 才超时；留 100ms 余量给计时误差。
-	if d := time.Since(start); d < 900*time.Millisecond {
-		t.Fatalf("block came after %v, want >= 1s", d)
-	}
-	p.stdin.Close()
-	if code := p.wait(t); code != 0 {
-		t.Fatalf("code %d, stderr %q", code, p.stderr.String())
+	for _, tc := range []struct {
+		timeout  string
+		min, max time.Duration
+	}{
+		{"2s", 1900 * time.Millisecond, 4 * time.Second},
+		{"300ms", 900 * time.Millisecond, 3 * time.Second},
+	} {
+		t.Run(tc.timeout, func(t *testing.T) {
+			t.Parallel()
+			p := startPiped(t, "--timeout", tc.timeout, "slow")
+			if _, err := p.stdin.Write(slowInput(t)); err != nil {
+				t.Fatal(err)
+			}
+			const block = "2026-09-28 07:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n" + slowReq
+			start := time.Now()
+			if !p.stdout.waitFor(10*time.Second, func(s string) bool { return s == block }) {
+				t.Fatalf("after %v stdout %q, want %q", time.Since(start), p.stdout.String(), block)
+			}
+			if d := time.Since(start); d < tc.min || d > tc.max {
+				t.Fatalf("block came after %v, want between %v and %v", d, tc.min, tc.max)
+			}
+			p.stdin.Close()
+			if code := p.wait(t); code != 0 {
+				t.Fatalf("code %d, stderr %q", code, p.stderr.String())
+			}
+		})
 	}
 }
 
-// startSlow 启动一个读管道的进程，写入一个没有响应的请求，管道不关。
-// 请求后面跟约 256 KiB 的纯 ACK，远大于管道缓冲（64 KiB）：Write 返回时进程一定已经在
-// run.Run 里读输入，信号也已经注册（注册在 run.Run 之前）。不用固定时长的 sleep，
-// 因为 macOS 首次执行新编译的程序可能要花几百毫秒做签名检查。
-func startSlow(t *testing.T) *piped {
-	t.Helper()
-	p := startPiped(t, "slow")
-	in := capture(t, func(w *pcapgen.Writer) {
+// slowInput 是一个没有响应的请求，后面跟约 256 KiB 的纯 ACK，远大于管道缓冲（64 KiB）：
+// 把它写进管道，Write 返回时进程一定已经在 run.Run 里读输入，信号也已经注册
+// （注册在 run.Run 之前）。所有包的时间戳相同，ACK 不影响交互。
+func slowInput(t testing.TB) []byte {
+	return capture(t, func(w *pcapgen.Writer) {
 		c := pcapgen.NewConn(w, cli1, srv)
 		c.Handshake(ms(-1))
 		c.ClientSend(ms(0), []byte(slowReq))
@@ -488,6 +493,14 @@ func startSlow(t *testing.T) *piped {
 			c.ClientAck(ms(0))
 		}
 	})
+}
+
+// startSlow 启动一个读管道的进程，写入 slowInput，管道不关。
+// 不用固定时长的 sleep 等进程就绪，因为 macOS 首次执行新编译的程序可能要花几百毫秒做签名检查。
+func startSlow(t *testing.T) *piped {
+	t.Helper()
+	p := startPiped(t, "slow")
+	in := slowInput(t)
 	done := make(chan error, 1)
 	go func() {
 		_, err := p.stdin.Write(in)

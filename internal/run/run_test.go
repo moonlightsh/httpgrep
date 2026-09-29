@@ -160,6 +160,45 @@ func TestRunPipeRealTimeFallback(t *testing.T) {
 	}
 }
 
+// 真实时间兜底要等超过 1 秒没有新包才启用：--timeout 300ms 时，只有请求的交互不能在
+// 300ms 之后就超时（管道输入短暂停顿不该让时钟按真实时间往前推），而是在第 1 秒之后的
+// 第一次检查（约 1.0–1.2 秒）才以 no-response(timeout) 输出。
+func TestRunPipeIdleThreshold(t *testing.T) {
+	in := capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nX: HIT\r\n\r\n"))
+	})
+	for _, cpus := range []string{"1", "4"} {
+		t.Run("cpus="+cpus, func(t *testing.T) {
+			t.Parallel()
+			pr, pw := io.Pipe()
+			defer pw.Close()
+			out := newNotifyWriter()
+			ch := goRun(run.Config{Input: pr, Pipe: true, Stdout: out, Opts: opts(t, "--cpus", cpus, "--timeout", "300ms", "HIT")})
+			start := time.Now()
+			if _, err := pw.Write(in); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-out.wrote:
+			case <-time.After(3 * time.Second):
+				t.Fatal("no output within 3s")
+			}
+			if el := time.Since(start); el < 900*time.Millisecond || el > 2*time.Second {
+				t.Fatalf("output after %v, want between 0.9s and 2s", el)
+			}
+			pw.Close()
+			r := wait(t, ch, 2*time.Second)
+			if r.err != nil || !r.matched || r.st.NoResponseTimeout != 1 {
+				t.Fatalf("matched %v err %v stats %+v", r.matched, r.err, r.st)
+			}
+			check(t, out.String(), "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(timeout)\n"+
+				"GET /a HTTP/1.1\r\nX: HIT\r\n\r\n")
+		})
+	}
+}
+
 // Stop 关闭后最多再读 1 秒：读取卡在阻塞的 read 上（管道一直不关）时不等它，
 // 约 1 秒后结束在途交互，只有请求的交互以 no-response(eof) 输出。
 func TestRunStopGivesUpBlockedRead(t *testing.T) {
