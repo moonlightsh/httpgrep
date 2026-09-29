@@ -59,3 +59,21 @@ func TestMidStreamResponseFirst(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 没看到 SYN，第一个包是请求 body 的中间部分：客户端方向的这些字节丢弃，计入 Orphans；
+// 它的响应随后到达，没有请求可配，输出为 no-request。之后的交互照常配对。
+func TestMidStreamRequestBodyFirst(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.ClientSend(ms(0), []byte("rest of a request body TOKEN-0\n"))
+		c.ServerSend(ms(2), []byte("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"))
+		c.ClientSend(ms(10), []byte("GET /TOKEN-1 HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(12), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+	check(t, out, "2026-09-28 15:30:12.355 10.0.0.1:52814 -> 10.0.0.2:80 complete 2.0ms\n"+
+		"GET /TOKEN-1 HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 204 No Content\r\n\r\n")
+	if st.Exchanges != 2 || st.NoRequest != 1 || st.Complete != 1 || st.Orphans != 1 || st.Matched != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
