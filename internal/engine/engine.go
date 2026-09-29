@@ -34,7 +34,7 @@ type Engine struct {
 	buffered int64 // 在途交互缓存的消息字节数
 	ghosts   int   // 队列里的占位数（超时或被丢弃的交互），按 ghostOverhead 计入内存
 
-	// oldest、newest 是按开始时间排序的在途交互链表的两端，超过内存上限时从 oldest 丢起。
+	// oldest、newest 是按开始先后排列的在途交互链表的两端（见 track），超过内存上限时从 oldest 丢起。
 	oldest, newest *exchange
 
 	// 内存告警：dropped、droppedMatched 是距上一次告警以来丢弃的交互数和其中已命中的；

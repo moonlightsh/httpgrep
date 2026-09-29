@@ -62,7 +62,7 @@ func (e *Engine) recycle(x *exchange) {
 	e.free = append(e.free, x)
 }
 
-// enforce 在超过内存上限时丢弃在途交互，从开始时间最早的起，直到不超限；
+// enforce 在超过内存上限时丢弃在途交互，从最早开始的起（见 track），直到不超限；
 // 在途交互都丢完了仍然超限，就释放最久没有收到包的连接。
 // 在 Assembler 的回调之外调用（回调里不能调用 Release），所以计量最多超出上限一个包的量。
 // 之后如果有没报告过的丢弃，并且距上一次告警已满 10 秒（抓包时钟），调用 Warn。
@@ -108,26 +108,18 @@ func (e *Engine) shrink(limit int64, now time.Time) {
 	}
 }
 
-// track 把刚开始的交互 x 按开始时间插入在途链表。交互大体按开始时间先后创建，
-// 从尾部往前找插入位置，通常一步就到。开始时间相同的排在后面。
+// track 把刚开始的交互 x 排到在途链表的末尾，O(1)。
+// 链表按引擎看到交互开始的先后排列，大体就是开始时间的先后。例外是 Upgrade 请求被拒后
+// 回放出的请求：它的开始时间（定位行时间）是缓存段的时间，更早，但它排在回放时刻。
+// 不按开始时间插入：回放可能一次放出几千个请求，每个都要往前越过全部在途交互。
 func (e *Engine) track(x *exchange) {
-	p := e.newest
-	for p != nil && p.start.After(x.start) {
-		p = p.prev
-	}
-	x.prev = p
-	if p == nil {
-		x.next = e.oldest
+	x.prev, x.next = e.newest, nil
+	if e.newest == nil {
 		e.oldest = x
 	} else {
-		x.next = p.next
-		p.next = x
+		e.newest.next = x
 	}
-	if x.next == nil {
-		e.newest = x
-	} else {
-		x.next.prev = x
-	}
+	e.newest = x
 	x.tracked = true
 }
 

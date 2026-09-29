@@ -669,3 +669,27 @@ func TestEvictedUpgradeGivesUpDecision(t *testing.T) {
 		})
 	}
 }
+
+// 丢弃按引擎看到交互开始的先后：Upgrade 请求 U 被拒后回放出的 GET /TOKEN，定位行时间是
+// 它所在包的时间 t=0，比 B（t=1）早，但它在 t=2 才开始，排在 B 后面。上限 5000。
+// 400 之后计量是 2048 + (512+19) + (512+23) = 3114；B 的响应第二个包之后是 6034，超限，
+// 先丢弃 B，得 6034 - 531 - 2920 + 384 = 2967，GET /TOKEN 照常收到响应、输出。
+func TestEvictOrderReplayedRequest(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 5000}, func(w *pcapgen.Writer) {
+		u := pcapgen.NewConn(w, cli1, srv)
+		b := pcapgen.NewConn(w, cli2, srv)
+		u.Handshake(ms(-1))
+		b.Handshake(ms(-1))
+		u.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\nGET /TOKEN HTTP/1.1\r\n\r\n"))
+		b.ClientSend(ms(1), []byte("GET /b HTTP/1.1\r\n\r\n"))
+		u.ServerSend(ms(2), []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"))
+		b.ServerSend(ms(3), []byte("HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n"+strings.Repeat("x", 5000)))
+		u.ServerSend(ms(5), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 5.0ms\n"+
+		"GET /TOKEN HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 204 No Content\r\n\r\n")
+	if st.Evicted != 1 || st.EvictedMatched != 0 || st.Exchanges != 3 {
+		t.Fatalf("stats: %+v", st)
+	}
+}

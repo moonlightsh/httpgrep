@@ -101,7 +101,7 @@ type exchange struct {
 	upgrade    bool // 请求是 CONNECT 或带 Upgrade 头
 	decided    bool // 已经就 Upgrade 请求调用过 Resume 或 Tunnel
 
-	// prev、next 把在途交互按开始时间串成链表（见 Engine.oldest），超过内存上限时从最早的丢起。
+	// prev、next 把在途交互按开始先后串成链表（见 Engine.track），超过内存上限时从最早的丢起。
 	prev, next *exchange
 	tracked    bool
 
