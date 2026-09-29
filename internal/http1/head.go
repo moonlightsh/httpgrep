@@ -70,6 +70,7 @@ func (p *Parser) finishHead(end int64, ts time.Time) {
 		// 请求的 body 长度无法确定。
 		p.desync(end)
 		p.bol = true
+		p.tunnelAfterDesync()
 		return
 	}
 	next := p.bodyState()

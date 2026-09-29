@@ -1168,3 +1168,45 @@ func TestTunnelWhileDesynced(t *testing.T) {
 		t.Errorf("end times = %v, want the time of the last data", r.ends)
 	}
 }
+
+// 请求还没结束时调用 Tunnel，之后才失步：引起失步的行或缺口照常交付给这个请求，
+// 随即以 End(false) 结束，后面的隧道字节不再交付，也不会再找起始行。
+// 事件和先失步、后调用 Tunnel 时相同。
+func TestDesyncAfterTunnel(t *testing.T) {
+	const upCL = "POST /ws HTTP/1.1\r\nUpgrade: websocket\r\nContent-Length: 4\r\n\r\n" // 60 字节
+	const upHead = "GET /ws HTTP/1.1\r\nUpgrade: websocket\r\n"                         // 38 字节，头部没收完
+	const ws = "\x81\x05hello-ws-frames\nGET / HTTP/1.1\r\n\r\n"
+	tests := []struct {
+		name  string
+		steps []step
+		want  []string
+	}{
+		{"gap past body end", []step{data(upCL + "ab"), tunnel(), gap(10).at(3), data(ws).at(4), closeFin()},
+			[]string{"begin off=0", "raw head " + upCL, "head POST /ws HTTP/1.1 upgrade",
+				"raw body ab", "body ab", "desync 62", "gap unparsed 10", "end false"}},
+		{"gap in head", []step{data(upHead), tunnel(), gap(10).at(3), data(ws).at(4), closeFin()},
+			[]string{"begin off=0", "raw head " + upHead, "desync 38", "gap unparsed 10", "end false"}},
+		{"gap in half line of head", []step{data(upHead + "Hos"), tunnel(), gap(10).at(3), data(ws).at(4), closeFin()},
+			[]string{"begin off=0", "raw head " + upHead + "Hos", "desync 41", "gap unparsed 10", "end false"}},
+		{"malformed head line", []step{data(upHead), tunnel(), data("bad\r\n" + ws).at(3), closeFin()},
+			[]string{"begin off=0", "raw head " + upHead, "desync 38", "raw unparsed bad\r\n", "end false"}},
+		{"head too long", []step{data(upHead), tunnel(), data(strings.Repeat("a", 64<<10) + ws).at(3), closeFin()},
+			// 头部上限 65536 字节，前面已有 38 字节，所以这一行收到 65498 字节时失步。
+			[]string{"begin off=0", "raw head " + upHead, "desync 38", "raw unparsed " + strings.Repeat("a", 65498), "end false"}},
+		{"request transfer-encoding not chunked", []step{data(upHead + "Transfer-Encoding: gzip\r\n"), tunnel(), data("\r\n" + ws).at(3), closeFin()},
+			// 头部结束的空行在偏移 63..65，body 长度无法确定，在 65 处失步。
+			[]string{"begin off=0", "raw head " + upHead + "Transfer-Encoding: gzip\r\n\r\n", "desync 65", "end false"}},
+		{"bad chunk size", []step{data("POST /ws HTTP/1.1\r\nUpgrade: websocket\r\nTransfer-Encoding: chunked\r\n\r\n"), tunnel(), data("zz\r\n" + ws).at(3), closeFin()},
+			[]string{"begin off=0", "raw head POST /ws HTTP/1.1\r\nUpgrade: websocket\r\nTransfer-Encoding: chunked\r\n\r\n",
+				"head POST /ws HTTP/1.1 upgrade", "desync 69", "raw unparsed zz\r\n", "end false"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checkAllChunkings(t, http1.Request, http1.Options{}, tt.want, tt.steps...)
+			r := run(http1.Request, http1.Options{}, 0, tt.steps...)
+			if len(r.ends) != 1 || !r.ends[0].Equal(t0.Add(3*time.Second)) {
+				t.Errorf("end times = %v, want the time of the desync", r.ends)
+			}
+		})
+	}
+}

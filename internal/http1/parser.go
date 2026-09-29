@@ -286,11 +286,6 @@ func (p *Parser) scan(off int64, b []byte, ack int64, ts time.Time) int {
 		if p.open {
 			p.sink.End(false, p.lnTS)
 			p.open = false
-			if p.dec == decTunnel {
-				p.dec = undecided
-				p.st = stDead
-				return n
-			}
 		}
 		p.begin(line)
 	} else {
@@ -312,6 +307,7 @@ func (p *Parser) overflow() {
 	p.desync(p.lnOff)
 	p.unparsedLine()
 	p.bol = false
+	p.tunnelAfterDesync()
 }
 
 // desyncAtLine 在一个完整但不合法的行处失步：这一行作为 SecUnparsed 交付，
@@ -320,6 +316,20 @@ func (p *Parser) desyncAtLine(line []byte) {
 	p.desync(p.lnOff)
 	p.unparsed(line, p.lnOff, p.lnTS, p.lnAck)
 	p.bol = true
+	p.tunnelAfterDesync()
+}
+
+// tunnelAfterDesync 在失步的那一行或缺口交付之后调用：请求还没结束时已经调用过 Tunnel，
+// 它不会再正常结束，立即以 End(false) 结束，此后不再产生事件，免得隧道字节作为它的 Unparsed 交付。
+func (p *Parser) tunnelAfterDesync() {
+	if !p.open || p.dec != decTunnel {
+		return
+	}
+	p.sink.End(false, p.lastTS)
+	p.open = false
+	p.dec = undecided
+	p.resetLine()
+	p.st = stDead
 }
 
 // unparsed 以 SecUnparsed 交付失步期间的字节；没有正在解析的消息时先开始一条 Orphan 消息。
@@ -427,6 +437,7 @@ func (p *Parser) Gap(off, n int64, ts time.Time) {
 	p.orphan(off, ts, -1)
 	p.sink.Gap(SecUnparsed, n)
 	p.bol = true
+	p.tunnelAfterDesync()
 }
 
 // Close 在流结束时调用。fin 为真表示正常 FIN，为假表示 RST 或输入结束。
@@ -524,7 +535,8 @@ func (p *Parser) Resume() {
 }
 
 // Tunnel 丢弃 Upgrade 请求之后缓存的字节，此后不再产生事件。只对请求解析器有效。
-// 请求还在正常解析时调用，请求结束（End）之后不再产生事件；
+// 请求还在正常解析时调用，请求结束（End）之后不再产生事件；之后请求失步的话，
+// 引起失步的那一行或缺口照常交付，随即以 End(false) 结束它。
 // 请求已经失步时调用，立即以 End(false) 结束它。
 // 注意：Upgrade 请求失步后不会进入缓存状态，后面的字节马上按 HTTP 扫描，
 // 这期间的字节会作为它的 SecUnparsed 交付，直到调用 Tunnel 或找到下一个起始行。
