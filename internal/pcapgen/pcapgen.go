@@ -159,12 +159,12 @@ func Frame(link pcap.LinkType, ip []byte) []byte {
 		return b
 	case pcap.LinkLinuxSLL2:
 		b := make([]byte, 20+len(ip))
-		b[0] = 0 // 协议类型在头两个字节
-		binary.BigEndian.PutUint16(b[0:], ipv4EtherType(ip))
-		b[2] = 0 // 接口索引
-		b[4] = 1 // ARPHRD_ETHER
-		b[6] = 0 // 包类型
-		b[14] = 6
+		binary.BigEndian.PutUint16(b[0:], ipv4EtherType(ip)) // 协议类型
+		// b[2:4] 保留；接口索引 4-7 写 1
+		binary.BigEndian.PutUint32(b[4:], 1)
+		binary.BigEndian.PutUint16(b[8:], 1) // ARPHRD_ETHER
+		b[10] = 0                            // 包类型：主机收到
+		b[11] = 6                            // 链路层地址长度
 		copy(b[20:], ip)
 		return b
 	case pcap.LinkNull:

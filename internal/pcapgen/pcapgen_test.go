@@ -68,6 +68,19 @@ func tsharkFields(t *testing.T, path string, extra []string, fields ...string) [
 	return rows
 }
 
+// tsharkOut 运行 tshark 并返回全部标准输出。
+func tsharkOut(t *testing.T, path string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(tshark(t), append([]string{"-r", path}, args...)...)
+	var out, errb strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("tshark 执行失败: %v\n%s", err, errb.String())
+	}
+	return out.String()
+}
+
 // 行为 1：生成的 pcap 能被 tshark 读出，包数、时间戳、地址、端口、
 // 序号、确认号和标志位都和写入的一致。
 func TestRecordTCPFields(t *testing.T) {
@@ -280,5 +293,32 @@ func TestConnSkipClient(t *testing.T) {
 	}
 	if seqNoSkip == seqSkip {
 		t.Fatal("对照值相同，测试无意义")
+	}
+}
+
+// SLL2 头部字段按 LINKTYPE_LINUX_SLL2 的布局写出：
+// 协议 0-1、保留 2-3、接口索引 4-7、ARPHRD 8-9、包类型 10、地址长度 11、地址 12-19。
+func TestFrameSLL2Layout(t *testing.T) {
+	client := netip.MustParseAddrPort("10.0.0.1:12345")
+	server := netip.MustParseAddrPort("10.0.0.2:80")
+	ts := time.Unix(1700000000, 0)
+	path := writePcap(t, "sll2layout.pcap", pcap.LinkLinuxSLL2, func(w *pcapgen.Writer) {
+		if err := w.Record(ts, pcapgen.Frame(pcap.LinkLinuxSLL2,
+			pcapgen.TCP(client, server, 1, 0, decode.SYN, nil)), 0); err != nil {
+			t.Fatal(err)
+		}
+	})
+	out := tsharkOut(t, path, "-V")
+	for _, want := range []string{
+		"Interface index: 1",
+		"Link-layer address type: Ethernet (1)",
+		"Link-layer address length: 6",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("tshark 输出缺少 %q", want)
+		}
+	}
+	if strings.Contains(out, "Interface index: 16777216") {
+		t.Errorf("接口索引被写成 16777216（ARPHRD 落到了 4-7 字节）")
 	}
 }
