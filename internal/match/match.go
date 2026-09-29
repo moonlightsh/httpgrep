@@ -80,12 +80,6 @@ func (e *CompileError) Error() string {
 // Highlight 返回一行里所有命中的 [起, 止) 区间，按起点排序、互不重叠。
 // line 不含 \n；行尾的 \r 由调用方去掉。
 func (m *Matcher) Highlight(line []byte) [][2]int {
-	if m.anyEmpty {
-		if len(line) == 0 {
-			return nil
-		}
-		return [][2]int{{0, len(line)}}
-	}
 	if m.re != nil {
 		var out [][2]int
 		for _, loc := range m.re.FindAllIndex(line, -1) {

@@ -209,14 +209,6 @@ func TestHighlightLiteral(t *testing.T) {
 		t.Fatalf("got %v want %v", got, want)
 	}
 
-	// 空关键词：整行都是命中区间。
-	m2, _ := match.Compile([]string{""}, false)
-	got2 := m2.Highlight([]byte("abc"))
-	want2 := [][2]int{{0, 3}}
-	if !reflect.DeepEqual(got2, want2) {
-		t.Fatalf("empty pattern: got %v want %v", got2, want2)
-	}
-
 	// 重叠的区间合并：关键词 ab 和 bc 在 abc 里重叠。
 	m3, _ := match.Compile([]string{"ab", "bc"}, false)
 	got3 := m3.Highlight([]byte("abc"))
@@ -236,13 +228,6 @@ func TestHighlightRegex(t *testing.T) {
 		t.Fatalf("got %v want %v", got, want)
 	}
 
-	// 空正则关键词：整行。
-	m2, _ := match.Compile([]string{""}, true)
-	got2 := m2.Highlight([]byte("abc"))
-	want2 := [][2]int{{0, 3}}
-	if !reflect.DeepEqual(got2, want2) {
-		t.Fatalf("empty regex: got %v want %v", got2, want2)
-	}
 }
 
 // 正则 c$ 命中 abc\r\n（\r 去掉后 c 在行尾）。
@@ -475,5 +460,32 @@ func TestEarlyReturnZeroAlloc(t *testing.T) {
 	// 命中后允许零星分配，但绝不应缓存近 8 MiB。
 	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
 		t.Fatalf("Write after match must not process data; allocated %d bytes", grew)
+	}
+}
+
+// Highlight 忽略空关键词：空关键词只影响命中判断，不产生区间；
+// 混用时非空关键词的真实位置不受影响。
+func TestHighlightIgnoresEmptyPattern(t *testing.T) {
+	m, _ := match.Compile([]string{"", "zz"}, false)
+	got := m.Highlight([]byte("axzzb"))
+	want := [][2]int{{2, 4}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mixed: got %v want %v", got, want)
+	}
+
+	// 只有空关键词：没有任何非空区间。
+	m2, _ := match.Compile([]string{""}, false)
+	if got2 := m2.Highlight([]byte("abc")); got2 != nil {
+		t.Fatalf("literal empty-only: got %v want nil", got2)
+	}
+	// 空行。
+	if got3 := m2.Highlight(nil); got3 != nil {
+		t.Fatalf("literal empty-only nil line: got %v want nil", got3)
+	}
+
+	// 正则模式同理：空正则只会产生长度 0 的匹配，丢弃后为空。
+	m4, _ := match.Compile([]string{""}, true)
+	if got4 := m4.Highlight([]byte("abc")); got4 != nil {
+		t.Fatalf("regex empty-only: got %v want nil", got4)
 	}
 }
