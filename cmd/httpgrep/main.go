@@ -164,8 +164,9 @@ func printStats(w io.Writer, st engine.Stats, elapsed time.Duration) {
 	fmt.Fprintf(w, "peak connections: %d\n", st.PeakConns)
 }
 
-// watchSignals 在第一次收到 SIGINT 或 SIGTERM 时关闭返回的通道；之后再收到 SIGINT
-// 立即以退出码 130 退出，再收到 SIGTERM 不处理（已经在收尾）。
+// watchSignals 在第一次收到 SIGINT 或 SIGTERM 时关闭返回的通道；之后再收到任意一个
+// 立即退出，退出码是 128 加信号值（SIGINT 130，SIGTERM 143）。进程卡在写标准输出上
+// （下游不读）时主循环观察不到第一次信号，第二次信号仍然能让它退出。
 // SIGPIPE 不注册，保持 Go 的默认行为：写标准输出遇到 EPIPE 时进程被 SIGPIPE 终止。
 func watchSignals() <-chan struct{} {
 	sigs := make(chan os.Signal, 2)
@@ -175,9 +176,7 @@ func watchSignals() <-chan struct{} {
 		<-sigs
 		close(stop)
 		for sig := range sigs {
-			if sig == syscall.SIGINT {
-				os.Exit(130)
-			}
+			os.Exit(128 + int(sig.(syscall.Signal)))
 		}
 	}()
 	return stop
