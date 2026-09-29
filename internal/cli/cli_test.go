@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -254,5 +255,60 @@ func TestParseSplitLines(t *testing.T) {
 	}
 	if opts.File != "f.pcap" {
 		t.Errorf("File = %q", opts.File)
+	}
+}
+
+// 第 8 条：--help / --version 不要求关键词。
+func TestParseHelpVersion(t *testing.T) {
+	opts, err := cli.Parse([]string{"--help"})
+	if err != nil {
+		t.Fatalf("Parse --help: %v", err)
+	}
+	if !opts.Help {
+		t.Error("Help 应为 true")
+	}
+	opts, err = cli.Parse([]string{"--version"})
+	if err != nil {
+		t.Fatalf("Parse --version: %v", err)
+	}
+	if !opts.Version {
+		t.Error("Version 应为 true")
+	}
+	// 没有关键词但带了 help 时也不报错；其他格式错误照常检查。
+	if _, err := cli.Parse([]string{"--help", "--foo"}); err == nil {
+		t.Error("未知选项仍应报错")
+	}
+	// 不提供 -h。
+	if _, err := cli.Parse([]string{"-h"}); err == nil {
+		t.Error("-h 不应存在")
+	}
+}
+
+// 第 9 条：未知选项与缺少选项值。
+func TestParseErrors(t *testing.T) {
+	_, err := cli.Parse([]string{"--foo", "kw"})
+	if err == nil || err.Error() != "unknown option: --foo" {
+		t.Fatalf("err = %v, want unknown option: --foo", err)
+	}
+	_, err = cli.Parse([]string{"-x", "kw"})
+	if err == nil || err.Error() != "unknown option: -x" {
+		t.Fatalf("err = %v, want unknown option: -x", err)
+	}
+	_, err = cli.Parse([]string{"--timeout"})
+	if err == nil || err.Error() != "option requires an argument: --timeout" {
+		t.Fatalf("err = %v, want option requires an argument: --timeout", err)
+	}
+	_, err = cli.Parse([]string{"-e"})
+	if err == nil || err.Error() != "option requires an argument: -e" {
+		t.Fatalf("err = %v, want option requires an argument: -e", err)
+	}
+}
+
+// Usage 覆盖设计文档第 2 节的全部选项。
+func TestUsageCoversOptions(t *testing.T) {
+	for _, opt := range []string{"-e", "-E", "--timeout", "--max-memory", "--max-message", "--cpus", "--stats", "--help", "--version"} {
+		if !strings.Contains(cli.Usage, opt) {
+			t.Errorf("Usage 缺少 %s", opt)
+		}
 	}
 }
