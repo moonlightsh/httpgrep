@@ -277,3 +277,26 @@ func TestAckCheckOrphan(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// 客户端丢了一整个请求（缺口正好落在两个请求之间）：连请求行都没抓到，缺口作为 Orphan 丢弃、计数。
+// 它的响应到达时，ACK 表明服务端还没收到下一个请求，不和下一个请求配对，按缺请求输出。
+// 缺口在 ms2 服务端响应的 ACK 越过时认定。
+func TestWholeRequestLost(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.SkipClient(len("GET /lost HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(2), []byte("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-a"))
+		c.ClientSend(ms(5), []byte("GET /b HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(7), []byte("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-b"))
+	})
+	check(t, out, "2026-09-28 15:30:12.347 10.0.0.1:52814 -> 10.0.0.2:80 no-request\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-a\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.350 10.0.0.1:52814 -> 10.0.0.2:80 complete 2.0ms\n"+
+		"GET /b HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-b\n")
+	if st.Exchanges != 2 || st.NoRequest != 1 || st.Complete != 1 || st.Orphans != 1 || st.Desyncs != 1 || st.GapBytes != 22 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
