@@ -81,6 +81,19 @@ func tsharkOut(t *testing.T, path string, args ...string) string {
 	return out.String()
 }
 
+// isHexLine 判断一行是否是纯十六进制（偶数个字符，只含 0-9a-f）。
+func isHexLine(s string) bool {
+	if len(s) == 0 || len(s)%2 != 0 {
+		return false
+	}
+	for _, c := range s {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return false
+		}
+	}
+	return true
+}
+
 // 行为 1：生成的 pcap 能被 tshark 读出，包数、时间戳、地址、端口、
 // 序号、确认号和标志位都和写入的一致。
 func TestRecordTCPFields(t *testing.T) {
@@ -199,11 +212,9 @@ func TestConnHandshakeSend(t *testing.T) {
 		if lens == "0" {
 			continue
 		}
-		n := 0
-		for _, ch := range lens {
-			if ch != ',' {
-				n = n*10 + int(ch-'0')
-			}
+		n, err := strconv.Atoi(strings.ReplaceAll(lens, ",", ""))
+		if err != nil {
+			t.Fatalf("tcp.len 字段 %q 无法解析: %v", lens, err)
 		}
 		dataLens = append(dataLens, n)
 		seq, _ := strconv.ParseUint(strings.Split(row[2], ",")[0], 10, 64)
@@ -221,25 +232,23 @@ func TestConnHandshakeSend(t *testing.T) {
 		}
 	}
 
-	// tshark follow 流还原客户端方向的字节。
-	cmd := exec.Command(tshark(t), "-r", path, "-q", "-z", "follow,tcp,raw,0")
-	var out, errb strings.Builder
-	cmd.Stdout = &out
-	cmd.Stderr = &errb
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("tshark follow 失败: %v\n%s", err, errb.String())
-	}
+	// tshark follow 流还原客户端方向的字节。raw 模式下：客户端方向的行
+	// 顶格写十六进制，服务端方向的行以制表符开头；表头（====、标题、
+	// Follow: 等）都不是纯十六进制，按格式精确区分。
+	out := tsharkOut(t, path, "-q", "-z", "follow,tcp,raw,0")
 	var follow [][]byte
-	for _, line := range strings.Split(out.String(), "\n") {
-		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "\t"))
-		if len(line) == 0 || strings.ContainsAny(line[:1], "Cc=\t") {
-			continue
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "\t"):
+			continue // 服务端方向
+		case !isHexLine(line):
+			continue // 表头或空行
 		}
-		// follow 输出里客户端方向的行不带前缀，服务端方向带制表符；
-		// 这里只收集十六进制行。
-		if b, err := hex.DecodeString(line); err == nil {
-			follow = append(follow, b)
+		b, err := hex.DecodeString(line)
+		if err != nil {
+			t.Fatalf("follow 行 %q 不是十六进制: %v", line, err)
 		}
+		follow = append(follow, b)
 	}
 	var got []byte
 	for _, b := range follow {
@@ -279,10 +288,9 @@ func TestConnSkipClient(t *testing.T) {
 	}
 	// 找到带 lost_segment 的段。
 	var lost []string
-	for i, row := range rows {
+	for _, row := range rows {
 		if strings.Contains(row[2], "1") && row[1] != "0" {
 			lost = append(lost, row[0])
-			_ = i
 		}
 	}
 	if len(lost) == 0 {

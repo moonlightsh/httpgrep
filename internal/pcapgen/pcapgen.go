@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net/netip"
+	"strconv"
 	"time"
 
 	"httpgrep/internal/decode"
@@ -65,6 +66,10 @@ func (w *Writer) Record(ts time.Time, frame []byte, origLen int) error {
 
 // Link 返回文件头里的链路层类型。
 func (w *Writer) Link() pcap.LinkType { return w.link }
+
+// Err 返回文件头或记录写出时遇到的第一个错误。
+// Conn 的各方法不返回错误，需要可靠写出的调用方在最后检查一次。
+func (w *Writer) Err() error { return w.err }
 
 // ipv4HeaderLen 和 tcpHeaderLen 是构造时使用的固定头长。
 const (
@@ -186,7 +191,7 @@ func Frame(link pcap.LinkType, ip []byte) []byte {
 	case pcap.LinkRaw:
 		return ip
 	}
-	return ip
+	panic("pcapgen: unsupported link type " + strconv.Itoa(int(link)))
 }
 
 func ipv4EtherType(ip []byte) uint16 {
@@ -252,6 +257,9 @@ func (c *Conn) mss() int {
 
 // write 从 from 端发出一个段。
 func (c *Conn) write(ts time.Time, fromClient bool, seq, ack uint32, flags decode.Flags, payload []byte) {
+	if c.w.err != nil {
+		return
+	}
 	var pkt []byte
 	if fromClient {
 		pkt = TCP(c.Client, c.Server, seq, ack, flags, payload)
