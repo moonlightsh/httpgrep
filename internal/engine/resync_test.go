@@ -257,3 +257,23 @@ func TestNoRequestInterimThenReset(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// Orphan 消息也做 ACK 校验：服务端在收到请求之前发出的非 HTTP 字节不归入这个请求的响应，
+// 丢弃并计入 Orphans；请求照常等自己的响应。
+func TestAckCheckOrphan(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /TOKEN-r HTTP/1.1\r\n\r\n"))
+		junk := []byte("garbage TOKEN-x\r\n")
+		c.Raw(ms(1), false, c.ServerISN+1, c.ClientISN+1, decode.ACK|decode.PSH, junk)
+		c.SkipServer(len(junk))
+		c.ServerSend(ms(3), []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 3.0ms\n"+
+		"GET /TOKEN-r HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok\n")
+	if st.Exchanges != 1 || st.Orphans != 1 || st.Complete != 1 || st.Desyncs != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
