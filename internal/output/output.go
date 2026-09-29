@@ -111,25 +111,29 @@ func (w *Writer) writeLocationLine(b *Block) {
 	w.buf = append(w.buf, " -> "...)
 	w.buf = appendAddr(w.buf, b.Server)
 	// 状态词
-	if !b.Status.NoRequest && !b.Status.Incomplete && b.Status.NoResponse == "" {
-		w.buf = append(w.buf, " complete"...)
+	var words [3]string
+	n := 0
+	if b.Status.NoRequest {
+		words[n] = "no-request"
+		n++
+	}
+	if b.Status.Incomplete {
+		words[n] = "incomplete"
+		n++
+	}
+	if b.Status.NoResponse != "" {
+		words[n] = "no-response(" + b.Status.NoResponse + ")"
+		n++
+	}
+	w.buf = append(w.buf, ' ')
+	if n == 0 {
+		w.buf = append(w.buf, "complete"...)
 	} else {
-		if b.Status.NoRequest {
-			w.buf = append(w.buf, " no-request"...)
-		}
-		if b.Status.Incomplete {
-			if len(w.buf) > 0 && w.buf[len(w.buf)-1] != ' ' {
+		for i := 0; i < n; i++ {
+			if i > 0 {
 				w.buf = append(w.buf, ',')
 			}
-			w.buf = append(w.buf, "incomplete"...)
-		}
-		if b.Status.NoResponse != "" {
-			if len(w.buf) > 0 && w.buf[len(w.buf)-1] != ' ' {
-				w.buf = append(w.buf, ',')
-			}
-			w.buf = append(w.buf, "no-response("...)
-			w.buf = append(w.buf, b.Status.NoResponse...)
-			w.buf = append(w.buf, ')')
+			w.buf = append(w.buf, words[i]...)
 		}
 	}
 	if b.HasDuration {
