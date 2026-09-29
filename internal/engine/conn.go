@@ -24,6 +24,8 @@ type conn struct {
 	rs       resSink
 
 	queue []*exchange // 按请求顺序排队、还没结束的交互；队首是正在等（或正在收）响应的
+	// noReq 是收完 1xx、还在等最终响应的缺请求交互。它不在队列里，最终响应先归它。
+	noReq *exchange
 
 	srvClosed bool // 服务端方向已结束（FIN），之后的请求不会再有响应
 
@@ -163,6 +165,12 @@ func (c *conn) close(why string, ts time.Time) {
 // all 为假时只结束请求已经发完的。all 为真时调用方已经关闭了请求解析器，
 // 没发完的请求都已经以 End(false) 结束并标为不完整。
 func (c *conn) closeQueue(why string, all bool) {
+	if x := c.noReq; x != nil {
+		// 只收到 1xx 的缺请求交互不会再有最终响应。
+		c.noReq = nil
+		x.noResp = why
+		c.finish(x)
+	}
 	for i := 0; i < len(c.queue); {
 		x := c.queue[i]
 		if !all && !x.reqDone {
@@ -217,6 +225,9 @@ func (c *conn) finish(x *exchange) {
 	if c.rs.cur == x {
 		c.rs.cur = nil
 	}
+	if c.noReq == x {
+		c.noReq = nil
+	}
 	c.e.finish(c, x)
 }
 
@@ -232,6 +243,7 @@ func (s *reqSink) Begin(b http1.Begin) {
 	x := c.e.newExchange()
 	x.hasReq = true
 	x.start, x.reqLast = b.TS, b.TS
+	x.reqOff = b.Off
 	x.reqMsg = x.addMessage(dirReq)
 	c.queue = append(c.queue, x)
 	s.cur = x
@@ -316,21 +328,38 @@ func (s *reqSink) Desync(off int64) { s.c.e.stats.Desyncs++ }
 // 通常就是队首；队首的请求还没发完、响应却已收完时，它还留在队列里。
 // 失步后没有正在解析的响应时，Orphan 消息（缺口和 Unparsed 字节）同样归入这个交互的响应，
 // 交互标为不完整，重新对齐时结束。
+//
+// ACK 校验：响应第一个字节所在包的 PeerAck 不大于请求的起始偏移，说明服务端当时还没收到
+// 这个请求，响应不属于它。这样的响应，以及没有请求可配的响应，作为缺请求的交互单独结束，
+// 不进队列；Orphan 消息没有状态行，不成交互，直接丢弃。PeerAck 为 -1（不知道）时不校验。
 func (s *resSink) Begin(b http1.Begin) {
 	s.cur = nil
-	var x *exchange
-	for _, q := range s.c.queue {
-		if !q.resDone {
-			x = q
-			break
+	c := s.c
+	x := c.noReq
+	if x != nil {
+		c.noReq = nil
+		if b.Orphan {
+			x.incomplete = true
+		}
+	} else {
+		for _, q := range c.queue {
+			if !q.resDone {
+				x = q
+				break
+			}
+		}
+		if x != nil && b.PeerAck >= 0 && b.PeerAck <= x.reqOff {
+			x = nil
 		}
 	}
 	if x == nil {
-		// 不属于任何交互的 Orphan 消息丢弃，只计数。
 		if b.Orphan {
-			s.c.e.stats.Orphans++
+			c.e.stats.Orphans++
+			return
 		}
-		return
+		x = c.e.newExchange()
+		x.noReq, x.reqDone = true, true
+		x.start = b.TS
 	}
 	x.hasRes = true
 	x.resOrphan = b.Orphan
@@ -407,6 +436,9 @@ func (s *resSink) End(complete bool, ts time.Time) {
 	if complete && x.msgs[x.resMsg].interim {
 		// 等最终响应；只有 1xx 的交互不算有响应，不输出耗时。
 		x.hasRes = false
+		if x.noReq {
+			s.c.noReq = x
+		}
 		return
 	}
 	x.resDone = true

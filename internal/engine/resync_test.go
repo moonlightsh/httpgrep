@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"httpgrep/internal/decode"
 	"httpgrep/internal/engine"
 	"httpgrep/internal/pcapgen"
 )
@@ -192,5 +193,67 @@ func TestNonHTTPNotBuffered(t *testing.T) {
 	_, large = replay(t, cfg, httpRes(100))
 	if d := large.PeakBuffered - small.PeakBuffered; d != 99*1000 {
 		t.Fatalf("HTTP PeakBuffered grows by %d, want %d", d, 99*1000)
+	}
+}
+
+// ACK 校验：响应所在包的 ACK 表明服务端当时还没收到队首请求 R 的第一个字节，
+// 这个响应不属于 R，按缺请求的交互输出（定位行时间是响应第一个包的时间，没有耗时），
+// R 继续等自己的响应。
+func TestAckCheckNoRequest(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /TOKEN-r HTTP/1.1\r\n\r\n"))
+		stray := []byte("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-x")
+		c.Raw(ms(1), false, c.ServerISN+1, c.ClientISN+1, decode.ACK|decode.PSH, stray)
+		c.SkipServer(len(stray))
+		c.ServerSend(ms(3), []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	})
+	check(t, out, "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 no-request\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-x\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 3.0ms\n"+
+		"GET /TOKEN-r HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok\n")
+	if st.Exchanges != 2 || st.NoRequest != 1 || st.Complete != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 缺请求的交互也可以先有 1xx：最终响应归入同一个交互，不去配队列里的请求。
+func TestNoRequestWithInterim(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /TOKEN-r HTTP/1.1\r\n\r\n"))
+		stray := []byte("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-x")
+		c.Raw(ms(1), false, c.ServerISN+1, c.ClientISN+1, decode.ACK|decode.PSH, stray)
+		c.SkipServer(len(stray))
+		c.ServerSend(ms(3), []byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+	})
+	check(t, out, "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 no-request\n"+
+		"HTTP/1.1 100 Continue\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-x\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 3.0ms\n"+
+		"GET /TOKEN-r HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok\n")
+	if st.Exchanges != 2 || st.NoRequest != 1 || st.Complete != 1 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 缺请求的交互只收到 1xx 连接就断了：没有最终响应，状态是 no-request,no-response(closed)。
+func TestNoRequestInterimThenReset(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ServerSend(ms(1), []byte("HTTP/1.1 100 TOKEN\r\n\r\n"))
+		c.ClientRst(ms(2))
+	})
+	check(t, out, "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 no-request,no-response(closed)\n"+
+		"HTTP/1.1 100 TOKEN\r\n\r\n")
+	if st.Exchanges != 1 || st.NoRequest != 1 || st.NoResponseClosed != 1 {
+		t.Fatalf("stats: %+v", st)
 	}
 }

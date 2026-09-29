@@ -67,7 +67,10 @@ type exchange struct {
 	reqLast time.Time // 请求最后一个包
 	resLast time.Time // 响应最后一个包
 
+	reqOff int64 // 请求第一个字节的流偏移，用于 ACK 校验
+
 	hasReq     bool
+	noReq      bool // 缺请求：响应配不上任何请求
 	hasRes     bool // 收到过最终响应（或没收完、还不知道是不是 1xx 的响应）
 	resOrphan  bool // 响应是失步后归入的 Orphan 消息，没有状态行，不输出耗时
 	reqDone    bool // 请求已结束
@@ -99,7 +102,7 @@ const (
 
 // status 返回交互结束时的状态。
 func (x *exchange) status() output.Status {
-	return output.Status{Incomplete: x.incomplete, NoResponse: x.noResp}
+	return output.Status{NoRequest: x.noReq, Incomplete: x.incomplete, NoResponse: x.noResp}
 }
 
 // reset 清空交互以便复用。
