@@ -162,3 +162,20 @@ func TestNoMatchExits1(t *testing.T) {
 	p := writeFile(t, twoExchanges(t))
 	want(t, runBin(t, nil, "NOPE", p), "", "", 1)
 }
+
+// 参数错误：stderr 写出错信息和提示行，退出码 2，不读输入。
+func TestBadArgumentsExit2(t *testing.T) {
+	const try = "Try 'httpgrep --help' for more information.\n"
+	for _, tc := range []struct {
+		args   []string
+		stderr string
+	}{
+		{nil, "httpgrep: no pattern given\n" + try},
+		{[]string{"--bogus", "x"}, "httpgrep: unknown option: --bogus\n" + try},
+		{[]string{"x", "a.pcap", "b.pcap"}, "httpgrep: only one input file is supported\n" + try},
+	} {
+		t.Run(fmt.Sprint(tc.args), func(t *testing.T) {
+			want(t, runBin(t, bytes.NewReader(twoExchanges(t)), tc.args...), "", tc.stderr, 2)
+		})
+	}
+}

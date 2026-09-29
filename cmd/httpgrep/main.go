@@ -2,6 +2,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 
@@ -15,7 +16,11 @@ func main() {
 
 // httpgrep 执行一次检索，返回退出码。
 func httpgrep(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	opts, _ := cli.Parse(args)
+	opts, err := cli.Parse(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "httpgrep: %v\nTry 'httpgrep --help' for more information.\n", err)
+		return 2
+	}
 	f, _ := os.Open(opts.File)
 	defer f.Close()
 	matched, _, _ := run.Run(run.Config{Input: f, Stdout: stdout, Stderr: stderr, Opts: opts})
