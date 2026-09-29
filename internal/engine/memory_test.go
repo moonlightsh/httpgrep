@@ -223,7 +223,7 @@ func TestEvictLeastRecentConnection(t *testing.T) {
 		"HTTP/1.1 204 No Content\r\n\r\n")
 	want := []int64{1024, 1024, 1024, 2048, 2048, 2048, 2048,
 		2048, 2048, 2048, // C3 握手：SYN 之后释放了 C2
-		2048,             // C2 四元组上的请求：丢弃交互，释放 C1
+		2048, // C2 四元组上的请求：丢弃交互，释放 C1
 		2048 + 512 + 23, 2048}
 	if !slices.Equal(mem, want) {
 		t.Fatalf("Memory after each packet = %v, want %v", mem, want)
