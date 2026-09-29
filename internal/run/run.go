@@ -104,8 +104,9 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 			if r.ts.After(clock) {
 				clock = r.ts
 			}
+			// 引擎要求时间单调不减：时间戳变小的包按当前时钟处理
 			if decode.Decode(h.link, b.buf[r.off:r.off+r.n], r.origLen, &seg) == decode.OK {
-				d.segment(b, &seg, r.ts)
+				d.segment(b, &seg, clock)
 			}
 		}
 		end := b.err

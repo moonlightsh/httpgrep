@@ -66,3 +66,30 @@ func TestRunLargeInputAcrossBatches(t *testing.T) {
 		t.Fatalf("matched %v, stats %+v", matched, st)
 	}
 }
+
+// 时钟不倒退：抓包里时间戳变小的包，按已经到达的最大时间戳交给引擎。
+// 连接 2 的包排在连接 1 之后，时间戳却早 2 秒，它的交互按 15:30:15.347 计，耗时 0。
+func TestRunClockNeverGoesBack(t *testing.T) {
+	in := capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(2999))
+		c.ClientSend(ms(3000), []byte("GET /a HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(3002), []byte("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nHIT"))
+		c2 := pcapgen.NewConn(w, cli2, srv)
+		c2.Handshake(ms(999))
+		c2.ClientSend(ms(1000), []byte("GET /b HTTP/1.1\r\n\r\n"))
+		c2.ServerSend(ms(1005), []byte("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nHIT"))
+	})
+	var out bytes.Buffer
+	_, st, err := run.Run(run.Config{Input: bytes.NewReader(in), Stdout: &out, Opts: opts(t, "HIT")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(t, out.String(), "2026-09-28 15:30:15.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 2.0ms\n"+
+		"GET /a HTTP/1.1\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nHIT\n--\n"+
+		"2026-09-28 15:30:15.347 10.0.0.1:52815 -> 10.0.0.2:80 complete 0.0ms\n"+
+		"GET /b HTTP/1.1\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nHIT\n")
+	if st.Complete != 2 {
+		t.Fatalf("stats %+v", st)
+	}
+}
