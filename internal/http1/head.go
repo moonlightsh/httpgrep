@@ -18,21 +18,28 @@ func (p *Parser) begin(line []byte) {
 	p.st = stHead
 }
 
-// headLine 处理一行头部（含行尾）。
-func (p *Parser) headLine(line []byte, ts time.Time) {
-	p.headLen += len(line)
+// headLine 处理一行头部（含行尾），格式不合法时返回 false。
+func (p *Parser) headLine(line []byte, ts time.Time) bool {
 	s := trimEOL(line)
 	if len(s) == 0 {
+		p.headLen += len(line)
 		p.sink.Raw(SecHead, line)
-		p.finishHead(ts)
-		return
+		p.finishHead(p.lnOff+int64(len(line)), ts)
+		return true
 	}
 	i := bytes.IndexByte(s, ':')
+	if i <= 0 {
+		return false
+	}
 	name, val := s[:i], trimSpace(s[i+1:])
-	if eqFold(name, "content-length") {
-		p.hasCL = true
-		p.cl, _ = parseCL(val)
-	} else if eqFold(name, "transfer-encoding") {
+	switch {
+	case eqFold(name, "content-length"):
+		v, ok := parseCL(val)
+		if !ok {
+			return false
+		}
+		p.hasCL, p.cl = true, v
+	case eqFold(name, "transfer-encoding"):
 		p.hasTE = true
 		last := val
 		if k := bytes.LastIndexByte(val, ','); k >= 0 {
@@ -40,11 +47,19 @@ func (p *Parser) headLine(line []byte, ts time.Time) {
 		}
 		p.chunked = eqFold(last, "chunked")
 	}
+	p.headLen += len(line)
 	p.sink.Raw(SecHead, line)
+	return true
 }
 
-// finishHead 在头部结束的空行之后决定 body 的长度（RFC 9112 第 6.3 节）。
-func (p *Parser) finishHead(ts time.Time) {
+// finishHead 在头部结束的空行之后决定 body 的长度。end 是空行之后的流偏移。
+func (p *Parser) finishHead(end int64, ts time.Time) {
+	if p.kind == Request && p.hasTE && !p.chunked {
+		// 请求的 body 长度无法确定。
+		p.desync(end)
+		p.bol = true
+		return
+	}
 	next := p.bodyState()
 	p.sink.Head(&p.h)
 	if next == stStart {
@@ -139,6 +154,51 @@ func validStart(kind Kind, line []byte) bool {
 	return len(s) == 12 || s[12] == ' '
 }
 
+// startPrefix 判断还没收完的一行 s 的开头是否还可能是合法的起始行，
+// 只看换行之前的前 probeLen 个字节。blank 为真时，一个单独的 '\r' 也算（可能是空行）。
+func startPrefix(kind Kind, s []byte, blank bool) bool {
+	if i := bytes.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > probeLen {
+		s = s[:probeLen]
+	}
+	if len(s) == 0 || blank && len(s) == 1 && s[0] == '\r' {
+		return true
+	}
+	if kind == Request {
+		i := methodLen(s)
+		switch {
+		case i == 0 && len(s) > 0:
+			return false
+		case i == len(s):
+			return true
+		}
+		return s[i] == ' ' && (i+1 == len(s) || s[i+1] != ' ')
+	}
+	const pat = "HTTP/1.x ddd"
+	for j, c := range s {
+		if j >= len(pat) {
+			return c == ' '
+		}
+		switch pat[j] {
+		case 'x':
+			if c != '0' && c != '1' {
+				return false
+			}
+		case 'd':
+			if c < '0' || c > '9' {
+				return false
+			}
+		default:
+			if c != pat[j] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // methodLen 返回 s 开头由大写字母和 '-' 组成的方法名长度；超过 20 个时返回 0。
 func methodLen(s []byte) int {
 	i := 0
@@ -200,10 +260,16 @@ func method(s []byte) string {
 	return string(s)
 }
 
-// parseCL 解析 Content-Length 的值：只允许十进制数字。
+// parseCL 解析 Content-Length 的值：1 到 18 位十进制数字。
 func parseCL(s []byte) (int64, bool) {
+	if len(s) == 0 || len(s) > 18 {
+		return 0, false
+	}
 	var v int64
 	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
 		v = v*10 + int64(c-'0')
 	}
 	return v, true
@@ -215,6 +281,15 @@ func parseChunkSize(s []byte) (int64, bool) {
 		s = s[:k]
 	}
 	s = trimSpace(s)
+	if len(s) == 0 {
+		return 0, false
+	}
+	for len(s) > 1 && s[0] == '0' {
+		s = s[1:]
+	}
+	if len(s) > 15 { // 超过 int64 能放下的范围
+		return 0, false
+	}
 	var v int64
 	for _, c := range s {
 		switch {
@@ -224,6 +299,8 @@ func parseChunkSize(s []byte) (int64, bool) {
 			c -= 'a' - 10
 		case 'A' <= c && c <= 'F':
 			c -= 'A' - 10
+		default:
+			return 0, false
 		}
 		v = v<<4 | int64(c)
 	}

@@ -613,3 +613,181 @@ func TestGapInBody(t *testing.T) {
 		t.Errorf("end times = %v, want gap time", r.ends)
 	}
 }
+
+func TestDesync(t *testing.T) {
+	const next = "GET /2 HTTP/1.1\r\n\r\n"
+	const chHead = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" // 47 字节
+	nextEv := func(off int) []string {
+		return []string{fmt.Sprintf("begin off=%d", off), "raw head " + next, "head GET /2 HTTP/1.1", "end true"}
+	}
+	tests := []struct {
+		name  string
+		kind  http1.Kind
+		steps []step
+		want  []string
+	}{
+		{
+			"gap in head", http1.Request,
+			[]step{data("GET / HTTP/1.1\r\nHo"), gap(3), data("t: a\r\n\r\n" + next)},
+			append([]string{"begin off=0", "raw head GET / HTTP/1.1\r\nHo", "desync 18", "gap unparsed 3",
+				"raw unparsed t: a\r\n\r\n", "end false"}, nextEv(29)...),
+		},
+		{
+			"gap in start line", http1.Request,
+			[]step{data("GET / HT"), gap(2), data("1.1\r\n\r\n" + next)},
+			append([]string{"desync 8", "begin off=0 orphan", "raw unparsed GET / HT", "gap unparsed 2",
+				"raw unparsed 1.1\r\n\r\n", "end false"}, nextEv(17)...),
+		},
+		{
+			"gap between messages", http1.Request,
+			[]step{data("GET / HTTP/1.1\r\n\r\n"), gap(30), data(next)},
+			append([]string{"begin off=0", "raw head GET / HTTP/1.1\r\n\r\n", "head GET / HTTP/1.1", "end true",
+				"desync 18", "begin off=18 orphan", "gap unparsed 30", "end false"}, nextEv(48)...),
+		},
+		{
+			"gap past content-length end", http1.Request,
+			[]step{data("POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\na"), gap(10), data(next)},
+			append([]string{"begin off=0", "raw head POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\n", "head POST / HTTP/1.1",
+				"raw body a", "body a", "desync 39", "gap unparsed 10", "end false"}, nextEv(49)...),
+		},
+		{
+			"gap past chunk data end", http1.Request,
+			[]step{data(chHead + "2\r\na"), gap(4), data("0\r\n\r\n" + next)},
+			append([]string{"begin off=0", "raw head " + chHead, "head POST / HTTP/1.1",
+				"raw body 2\r\na", "body a", "desync 51", "gap unparsed 4", "raw unparsed 0\r\n\r\n", "end false"}, nextEv(60)...),
+		},
+		{
+			"gap in chunk size line", http1.Request,
+			[]step{data(chHead + "5"), gap(2), data("\r\nhello\r\n0\r\n\r\n" + next)},
+			append([]string{"begin off=0", "raw head " + chHead, "head POST / HTTP/1.1",
+				"raw body 5", "desync 48", "gap unparsed 2", "raw unparsed \r\nhello\r\n0\r\n\r\n", "end false"}, nextEv(64)...),
+		},
+		{
+			"gap at chunk data crlf", http1.Request,
+			[]step{data(chHead + "1\r\nx"), gap(2), data("0\r\n\r\n" + next)},
+			append([]string{"begin off=0", "raw head " + chHead, "head POST / HTTP/1.1",
+				"raw body 1\r\nx", "body x", "desync 51", "gap unparsed 2", "raw unparsed 0\r\n\r\n", "end false"}, nextEv(58)...),
+		},
+		{
+			"gap in trailer", http1.Request,
+			[]step{data(chHead + "0\r\nX: 1"), gap(1), data("\r\n\r\n" + next)},
+			append([]string{"begin off=0", "raw head " + chHead, "head POST / HTTP/1.1",
+				"raw body 0\r\n", "raw trailer X: 1", "desync 54", "gap unparsed 1", "raw unparsed \r\n\r\n", "end false"}, nextEv(59)...),
+		},
+		{
+			"bad request line", http1.Request,
+			[]step{data("GET / HTTP/2.0\r\nHost: a\r\n\r\n" + next)},
+			append([]string{"desync 0", "begin off=0 orphan", "raw unparsed GET / HTTP/2.0\r\nHost: a\r\n\r\n", "end false"}, nextEv(27)...),
+		},
+		{
+			"bad status line", http1.Response,
+			[]step{data("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nHTTP/1.1 2 OK\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n")},
+			[]string{"begin off=0", "raw head HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", "head 200 HTTP/1.1", "end true",
+				"desync 38", "begin off=38 orphan", "raw unparsed HTTP/1.1 2 OK\r\n\r\n", "end false",
+				"begin off=55", "raw head HTTP/1.1 204 No Content\r\n\r\n", "head 204 HTTP/1.1", "end true"},
+		},
+		{
+			"header without colon", http1.Request,
+			[]step{data("GET / HTTP/1.1\r\nBadHeader\r\n\r\n" + next)},
+			append([]string{"begin off=0", "raw head GET / HTTP/1.1\r\n", "desync 16",
+				"raw unparsed BadHeader\r\n\r\n", "end false"}, nextEv(29)...),
+		},
+		{
+			"content-length not a number", http1.Request,
+			[]step{data("POST / HTTP/1.1\r\nContent-Length: 1x\r\n\r\n" + next)},
+			append([]string{"begin off=0", "raw head POST / HTTP/1.1\r\n", "desync 17",
+				"raw unparsed Content-Length: 1x\r\n\r\n", "end false"}, nextEv(39)...),
+		},
+		{
+			"content-length empty", http1.Request,
+			[]step{data("POST / HTTP/1.1\r\nContent-Length: \r\n\r\n" + next)},
+			append([]string{"begin off=0", "raw head POST / HTTP/1.1\r\n", "desync 17",
+				"raw unparsed Content-Length: \r\n\r\n", "end false"}, nextEv(37)...),
+		},
+		{
+			"content-length negative", http1.Request,
+			[]step{data("POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n" + next)},
+			append([]string{"begin off=0", "raw head POST / HTTP/1.1\r\n", "desync 17",
+				"raw unparsed Content-Length: -1\r\n\r\n", "end false"}, nextEv(39)...),
+		},
+		{
+			"request transfer-encoding not chunked", http1.Request,
+			[]step{data("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n" + next)},
+			append([]string{"begin off=0", "raw head POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n",
+				"desync 44", "end false"}, nextEv(44)...),
+		},
+		{
+			"bad chunk size", http1.Request,
+			[]step{data(chHead + "zz\r\nhello\r\n" + next)},
+			append([]string{"begin off=0", "raw head " + chHead, "head POST / HTTP/1.1",
+				"desync 47", "raw unparsed zz\r\nhello\r\n", "end false"}, nextEv(58)...),
+		},
+		{
+			"empty chunk size", http1.Request,
+			[]step{data(chHead + "\r\n" + next)},
+			append([]string{"begin off=0", "raw head " + chHead, "head POST / HTTP/1.1",
+				"desync 47", "raw unparsed \r\n", "end false"}, nextEv(49)...),
+		},
+		{
+			"chunk data not followed by crlf", http1.Request,
+			[]step{data(chHead + "1\r\nxy\r\n0\r\n\r\n" + next)},
+			append([]string{"begin off=0", "raw head " + chHead, "head POST / HTTP/1.1",
+				"raw body 1\r\nx", "body x", "desync 51", "raw unparsed y\r\n0\r\n\r\n", "end false"}, nextEv(59)...),
+		},
+		{
+			"trailer without colon", http1.Request,
+			[]step{data(chHead + "0\r\nbad\r\n\r\n" + next)},
+			append([]string{"begin off=0", "raw head " + chHead, "head POST / HTTP/1.1",
+				"raw body 0\r\n", "desync 50", "raw unparsed bad\r\n\r\n", "end false"}, nextEv(57)...),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checkAllChunkings(t, tt.kind, http1.Options{}, tt.want, tt.steps...)
+		})
+	}
+}
+
+func TestDesyncLimits(t *testing.T) {
+	const next = "GET /2 HTTP/1.1\r\n\r\n"
+	const chHead = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+	line := "X: " + strings.Repeat("a", 3997) + "\r\n" // 4002 字节
+	// 起始行 16 字节 + 16 行 = 64048 字节，加空行不到 64 KiB，可以接受。
+	okHead := "GET / HTTP/1.1\r\n" + strings.Repeat(line, 16) + "\r\n"
+	// 17 行时超过 64 KiB，在第 17 行（偏移 64048）处失步。
+	bigHead := "GET / HTTP/1.1\r\n" + strings.Repeat(line, 17) + "\r\n"
+	// 长度行正好 4096 字节（含 CRLF）可以接受，4097 字节时失步。
+	okSize := "5;" + strings.Repeat("e", 4092) + "\r\n"
+	bigSize := "5;" + strings.Repeat("e", 4093) + "\r\n"
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"head at limit", okHead + next, []string{
+			"begin off=0", "raw head " + okHead, "head GET / HTTP/1.1", "end true",
+			"begin off=64050", "raw head " + next, "head GET /2 HTTP/1.1", "end true"}},
+		{"head over limit", bigHead + next, []string{
+			"begin off=0", "raw head GET / HTTP/1.1\r\n" + strings.Repeat(line, 16), "desync 64048",
+			"raw unparsed " + line + "\r\n", "end false",
+			"begin off=68052", "raw head " + next, "head GET /2 HTTP/1.1", "end true"}},
+		{"chunk size line at limit", chHead + okSize + "hello\r\n0\r\n\r\n" + next, []string{
+			"begin off=0", "raw head " + chHead, "head POST / HTTP/1.1",
+			"raw body " + okSize + "hello\r\n0\r\n", "body hello", "raw trailer \r\n", "end true",
+			"begin off=4155", "raw head " + next, "head GET /2 HTTP/1.1", "end true"}},
+		{"chunk size line over limit", chHead + bigSize + "hello\r\n0\r\n\r\n" + next, []string{
+			"begin off=0", "raw head " + chHead, "head POST / HTTP/1.1", "desync 47",
+			"raw unparsed " + bigSize + "hello\r\n0\r\n\r\n", "end false",
+			"begin off=4156", "raw head " + next, "head GET /2 HTTP/1.1", "end true"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, c := range []int{0, 1, 1460} {
+				got := run(http1.Request, http1.Options{}, c, data(tt.in))
+				if strings.Join(got.ev, "\n") != strings.Join(tt.want, "\n") {
+					t.Errorf("chunk=%d events:\n  got:  %.300q\n  want: %.300q", c, got.ev, tt.want)
+				}
+			}
+		})
+	}
+}
