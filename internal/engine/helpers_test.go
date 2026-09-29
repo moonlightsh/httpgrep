@@ -57,6 +57,19 @@ func replay(t *testing.T, cfg engine.Config, build func(w *pcapgen.Writer)) (str
 // 最后以最后一个包和最后一个时刻里较晚的那个调用 Finish。ticks 要按时间先后排列。
 func replayTicks(t *testing.T, cfg engine.Config, build func(w *pcapgen.Writer), ticks ...time.Time) (snaps []string, final string, st engine.Stats) {
 	t.Helper()
+	return replayHook(t, cfg, build, nil, ticks...)
+}
+
+// replayEach 同 replay，另外在每个包的 Segment 和 Advance 之后调用 each，用来观察引擎的状态。
+func replayEach(t *testing.T, cfg engine.Config, build func(w *pcapgen.Writer), each func(e *engine.Engine, ts time.Time)) (string, engine.Stats) {
+	t.Helper()
+	_, out, st := replayHook(t, cfg, build, each, nil...)
+	return out, st
+}
+
+// replayHook 是 replayTicks 和 replayEach 的共同实现。each 可以为 nil。
+func replayHook(t *testing.T, cfg engine.Config, build func(w *pcapgen.Writer), each func(e *engine.Engine, ts time.Time), ticks ...time.Time) (snaps []string, final string, st engine.Stats) {
+	t.Helper()
 	var capture bytes.Buffer
 	w := pcapgen.NewWriter(&capture, pcap.LinkEthernet)
 	build(w)
@@ -109,6 +122,9 @@ func replayTicks(t *testing.T, cfg engine.Config, build func(w *pcapgen.Writer),
 		}
 		e.Segment(&seg, p.Timestamp)
 		e.Advance(p.Timestamp)
+		if each != nil {
+			each(e, p.Timestamp)
+		}
 		last = p.Timestamp
 		for len(ticks) > 0 && ticks[0].Equal(p.Timestamp) {
 			tick(ticks[0])

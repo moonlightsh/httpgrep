@@ -1,8 +1,10 @@
 package engine_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"httpgrep/internal/engine"
 	"httpgrep/internal/pcapgen"
@@ -80,5 +82,59 @@ func TestMaxMessageGapAfterTruncation(t *testing.T) {
 		"[truncated: 6144 bytes over --max-message]\n")
 	if st.Truncated != 1 || st.Gaps != 1 || st.GapBytes != 1000 || st.Incomplete != 1 {
 		t.Fatalf("stats: %+v", st)
+	}
+}
+
+// 内存计量：缓存的消息字节、乱序缓存、每条连接 1 KiB、每个在途交互 512 字节。
+// 响应是 150 字节（40 字节头部加 110 字节 body），后 50 字节先到、进乱序缓存，
+// 前 100 字节补上后整个响应交付，交互结束。之后再开一条连接。
+func TestMemoryAccounting(t *testing.T) {
+	res := "HTTP/1.1 200 OK\r\nContent-Length: 110\r\n\r\n" + strings.Repeat("b", 110)
+	var got []int64
+	replayEach(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(0)) // 3 个包
+		c.ClientSend(ms(1), []byte("GET / HTTP/1.1\r\n\r\n"))
+		c.SkipServer(100)
+		c.ServerSend(ms(2), []byte(res[100:]))
+		c.SkipServer(-150)
+		c.ServerSend(ms(3), []byte(res[:100]))
+		c.SkipServer(50)
+		pcapgen.NewConn(w, cli2, srv).Handshake(ms(4)) // 3 个包
+	}, func(e *engine.Engine, _ time.Time) { got = append(got, e.Memory()) })
+	want := []int64{
+		1024, 1024, 1024, // 握手：一条连接
+		1024 + 512 + 18,      // 请求 18 字节在途
+		1024 + 512 + 18 + 50, // 乱序缓存 50 字节
+		1024,                 // 响应收完，交互结束
+		2048, 2048, 2048,     // 第二条连接
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Memory after each packet = %v, want %v", got, want)
+	}
+}
+
+// 101 升级之后连接不再按 HTTP 解析，也不再缓存：隧道里两个方向各 100 KB 的数据
+// 不计入内存计量，计量只剩这条连接的固定开销。
+func TestTunnelNotBuffered(t *testing.T) {
+	var got []int64
+	replayEach(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(0))
+		c.ClientSend(ms(1), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+		c.ServerSend(ms(2), []byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n"))
+		for i := range 100 {
+			c.ClientSend(ms(float64(3+i)), []byte(strings.Repeat("c", 1000)))
+			c.ServerSend(ms(float64(3+i)), []byte(strings.Repeat("s", 1000)))
+		}
+	}, func(e *engine.Engine, _ time.Time) { got = append(got, e.Memory()) })
+	// 握手 3 个包、请求 1 个、101 响应 1 个，之后是 200 个隧道包。
+	if len(got) != 205 {
+		t.Fatalf("%d packets", len(got))
+	}
+	for i, m := range got[4:] {
+		if m != 1024 {
+			t.Fatalf("Memory after packet %d = %d, want 1024", 4+i, m)
+		}
 	}
 }
