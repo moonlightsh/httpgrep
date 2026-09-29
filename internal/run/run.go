@@ -3,6 +3,7 @@
 package run
 
 import (
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -104,6 +105,9 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 	if h.err != nil {
 		return false, st, h.err
 	}
+	if !decode.Supported(h.link) {
+		return false, st, fmt.Errorf("unsupported link type %d", h.link)
+	}
 
 	ecfg := engine.Config{
 		Matcher:    m,
@@ -140,7 +144,11 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 		}
 	}
 	st = d.finish(l.clock)
-	return out.matched, st, out.failed()
+	if err := out.failed(); err != nil {
+		return out.matched, st, err
+	}
+	// 读到一半出错：已经读到的交互照常结束和输出，再报错
+	return out.matched, st, l.readErr
 }
 
 const (
@@ -160,6 +168,7 @@ type loop struct {
 	clock   time.Time // 抓包时钟：所有包时间戳的最大值，管道输入时还会按真实时间往前推
 	lastTS  time.Time // 所有包时间戳的最大值
 	lastRcv time.Time // 收到最近一批包的真实时间；零值表示还没收到包
+	readErr error     // 读记录时的错误（不含 io.EOF）
 }
 
 // batch 处理一批包，返回输入是否已经结束。
@@ -180,6 +189,9 @@ func (l *loop) batch(b *batch) (end bool) {
 		l.lastRcv = time.Now()
 	}
 	end = b.err != nil
+	if end && b.err != io.EOF {
+		l.readErr = b.err
+	}
 	l.d.flush(b, l.clock)
 	return end
 }

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"httpgrep/internal/pcap"
 	"httpgrep/internal/pcapgen"
 	"httpgrep/internal/run"
 )
@@ -296,5 +297,49 @@ func TestRunShardsSameBlocks(t *testing.T) {
 	}
 	if !slices.Equal(blocks["1"], blocks["4"]) {
 		t.Fatalf("block sets differ\ncpus=1: %q\ncpus=4: %q", blocks["1"], blocks["4"])
+	}
+}
+
+// 输入错误：不支持的链路层类型报 unsupported link type N；文件头错误原样返回 pcap 的错误；
+// 读到一半记录损坏时，已经读到的交互照常结束并输出，然后返回 pcap.ErrCorrupt。
+func TestRunInputErrors(t *testing.T) {
+	var unsupported bytes.Buffer
+	pcapgen.NewWriter(&unsupported, pcap.LinkType(147))
+	good := capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nX: HIT\r\n\r\n"))
+	})
+	// 小端记录头：时间 0，caplen 0x7fffffff 超出上限
+	corrupt := append(slices.Clip(good), 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x7f)
+	for _, tc := range []struct {
+		name    string
+		in      []byte
+		err     error  // 原样返回，按值比较；为 nil 时比较 msg
+		msg     string // 错误文本
+		stdout  string
+		matched bool
+	}{
+		{name: "link", in: unsupported.Bytes(), msg: "unsupported link type 147"},
+		{name: "pcapng", in: []byte{0x0a, 0x0d, 0x0d, 0x0a, 0x1c, 0, 0, 0}, err: pcap.ErrPcapNG},
+		{name: "notpcap", in: []byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n"), err: pcap.ErrNotPcap},
+		{name: "empty", in: nil, err: pcap.ErrEmpty},
+		{name: "corrupt", in: corrupt, err: pcap.ErrCorrupt, matched: true,
+			stdout: "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 no-response(eof)\nGET /a HTTP/1.1\r\nX: HIT\r\n\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			matched, _, err := run.Run(run.Config{Input: bytes.NewReader(tc.in), Stdout: &out, Opts: opts(t, "HIT")})
+			switch {
+			case tc.err != nil && err != tc.err:
+				t.Fatalf("err = %v, want %v", err, tc.err)
+			case tc.err == nil && (err == nil || err.Error() != tc.msg):
+				t.Fatalf("err = %v, want %q", err, tc.msg)
+			}
+			if matched != tc.matched {
+				t.Fatalf("matched = %v, want %v", matched, tc.matched)
+			}
+			check(t, out.String(), tc.stdout)
+		})
 	}
 }
