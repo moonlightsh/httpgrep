@@ -101,6 +101,11 @@ func TestRecordTCPFields(t *testing.T) {
 	server := netip.MustParseAddrPort("10.0.0.2:80")
 	t0 := time.Unix(1700000000, 123456000)
 	t1 := t0.Add(1500 * time.Millisecond)
+	t2 := t0.Add(2 * time.Second)
+	// 192.168.1.1→192.168.1.2 的头部按 16 位字求和会产生进位，
+	// 用来覆盖校验和的进位折叠（python 独立算出 0xb77c）。
+	carrySrc := netip.MustParseAddrPort("192.168.1.1:1")
+	carryDst := netip.MustParseAddrPort("192.168.1.2:2")
 
 	path := writePcap(t, "basic.pcap", pcap.LinkEthernet, func(w *pcapgen.Writer) {
 		syn := pcapgen.TCP(client, server, 1000, 0, decode.SYN, nil)
@@ -111,19 +116,24 @@ func TestRecordTCPFields(t *testing.T) {
 		if err := w.Record(t1, pcapgen.Frame(pcap.LinkEthernet, data), 0); err != nil {
 			t.Fatal(err)
 		}
+		carry := pcapgen.TCP(carrySrc, carryDst, 7, 0, decode.SYN, nil)
+		if err := w.Record(t2, pcapgen.Frame(pcap.LinkEthernet, carry), 0); err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	rows := tsharkFields(t, path, []string{"-o", "ip.check_checksum:TRUE"},
 		"frame.time_epoch", "ip.src", "ip.dst", "tcp.srcport", "tcp.dstport",
 		"tcp.seq_raw", "tcp.ack_raw", "tcp.flags", "tcp.len", "ip.checksum", "ip.checksum.status")
-	if len(rows) != 2 {
-		t.Fatalf("包数 = %d，想要 2", len(rows))
+	if len(rows) != 3 {
+		t.Fatalf("包数 = %d，想要 3", len(rows))
 	}
 	// 期望值逐字段手写：时间戳只核对到微秒（pcap 的精度）。
-	wantTime := []string{"1700000000.123456", "1700000001.623456"}
+	wantTime := []string{"1700000000.123456", "1700000001.623456", "1700000002.123456"}
 	want := [][]string{
 		{"10.0.0.1", "10.0.0.2", "12345", "80", "1000", "0", "0x0002", "0", "0x26ce", "1"},
 		{"10.0.0.1", "10.0.0.2", "12345", "80", "1001", "2001", "0x0018", "5", "0x26c9", "1"},
+		{"192.168.1.1", "192.168.1.2", "1", "2", "7", "0", "0x0002", "0", "0xb77c", "1"},
 	}
 	for i, row := range rows {
 		if !strings.HasPrefix(row[0], wantTime[i]) {
