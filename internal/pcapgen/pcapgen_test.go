@@ -709,3 +709,36 @@ func TestWriterError(t *testing.T) {
 		})
 	}
 }
+
+// Null 的协议族按抓包机字节序写，这里固定为小端（02 00 00 00）；
+// Loop 固定为网络字节序（00 00 00 02）。tshark 两种都认，只能直接读字节核对。
+func TestFrameNullLoopFamilyBytes(t *testing.T) {
+	c4 := netip.MustParseAddrPort("10.0.0.1:1")
+	s4 := netip.MustParseAddrPort("10.0.0.2:2")
+	c6 := netip.MustParseAddrPort("[2001:db8::1]:1")
+	s6 := netip.MustParseAddrPort("[2001:db8::2]:2")
+	ip4 := pcapgen.TCP(c4, s4, 1, 0, decode.SYN, nil)
+	ip6 := pcapgen.TCP(c6, s6, 1, 0, decode.SYN, nil)
+	cases := []struct {
+		name string
+		link pcap.LinkType
+		ip   []byte
+		want []byte
+	}{
+		{"null-ipv4", pcap.LinkNull, ip4, []byte{0x02, 0, 0, 0}},
+		{"null-ipv6", pcap.LinkNull, ip6, []byte{0x1e, 0, 0, 0}},
+		{"loop-ipv4", pcap.LinkLoop, ip4, []byte{0, 0, 0, 0x02}},
+		{"loop-ipv6", pcap.LinkLoop, ip6, []byte{0, 0, 0, 0x1e}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pcapgen.Frame(tc.link, tc.ip)
+			if !bytes.Equal(got[:4], tc.want) {
+				t.Errorf("前 4 字节 = % x，想要 % x", got[:4], tc.want)
+			}
+			if !bytes.Equal(got[4:], tc.ip) {
+				t.Errorf("链路头之后不是原 IP 包")
+			}
+		})
+	}
+}
