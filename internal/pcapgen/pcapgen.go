@@ -194,3 +194,140 @@ func ipv4EtherType(ip []byte) uint16 {
 	}
 	return 0x0800
 }
+
+// Conn 模拟一条连接，自动维护双方的序号和确认号。
+type Conn struct {
+	Client, Server       netip.AddrPort
+	ClientISN, ServerISN uint32
+	MSS                  int // 发送时按它切段，默认 1460
+
+	w           *Writer
+	clientSeq   uint32 // 下一段要用的序号
+	serverSeq   uint32
+	clientSent  uint32 // 已发送的最后一个字节的下一个位置（SYN/FIN 计入）
+	serverSent  uint32
+	serverAcked uint32 // 客户端已确认到的位置
+	clientAcked uint32 // 服务端已确认到的位置
+}
+
+// NewConn 创建一条连接。序号从 ISN+1 起步（握手之后）。
+func NewConn(w *Writer, client, server netip.AddrPort) *Conn {
+	return &Conn{
+		Client:     client,
+		Server:     server,
+		ClientISN:  1000,
+		ServerISN:  2000,
+		MSS:        1460,
+		w:          w,
+		clientSeq:  1001,
+		serverSeq:  2001,
+		clientSent: 1001,
+		serverSent: 2001,
+	}
+}
+
+// mss 返回生效的 MSS。
+func (c *Conn) mss() int {
+	if c.MSS > 0 {
+		return c.MSS
+	}
+	return 1460
+}
+
+// write 从 from 端发出一个段。
+func (c *Conn) write(ts time.Time, fromClient bool, seq, ack uint32, flags decode.Flags, payload []byte) {
+	var pkt []byte
+	if fromClient {
+		pkt = TCP(c.Client, c.Server, seq, ack, flags, payload)
+	} else {
+		pkt = TCP(c.Server, c.Client, seq, ack, flags, payload)
+	}
+	_ = c.w.Record(ts, Frame(c.w.link, pkt), 0)
+}
+
+// Handshake 写出 SYN、SYN-ACK、ACK 三步。
+func (c *Conn) Handshake(ts time.Time) {
+	c.write(ts, true, c.ClientISN, 0, decode.SYN, nil)
+	c.write(ts, false, c.ServerISN, c.ClientISN+1, decode.SYN|decode.ACK, nil)
+	c.write(ts, true, c.ClientISN+1, c.ServerISN+1, decode.ACK, nil)
+	c.serverAcked = c.ClientISN + 1
+	c.clientAcked = c.ServerISN + 1
+}
+
+// ClientSend 从客户端发送数据，带 ACK|PSH，按 MSS 切段。
+func (c *Conn) ClientSend(ts time.Time, b []byte) {
+	mss := c.mss()
+	for len(b) > 0 {
+		n := mss
+		if n > len(b) {
+			n = len(b)
+		}
+		c.write(ts, true, c.clientSeq, c.clientAcked, decode.ACK|decode.PSH, b[:n])
+		c.clientSeq += uint32(n)
+		c.clientSent = c.clientSeq
+		b = b[n:]
+	}
+}
+
+// ServerSend 从服务端发送数据，带 ACK|PSH，按 MSS 切段。
+func (c *Conn) ServerSend(ts time.Time, b []byte) {
+	mss := c.mss()
+	for len(b) > 0 {
+		n := mss
+		if n > len(b) {
+			n = len(b)
+		}
+		c.write(ts, false, c.serverSeq, c.serverAcked, decode.ACK|decode.PSH, b[:n])
+		c.serverSeq += uint32(n)
+		c.serverSent = c.serverSeq
+		b = b[n:]
+	}
+}
+
+// ClientAck 写一个从客户端发出的纯 ACK，确认到服务端当前的序号。
+func (c *Conn) ClientAck(ts time.Time) {
+	c.write(ts, true, c.clientSeq, c.serverSent, decode.ACK, nil)
+	c.clientAcked = c.serverSent
+}
+
+// ServerAck 写一个从服务端发出的纯 ACK。
+func (c *Conn) ServerAck(ts time.Time) {
+	c.write(ts, false, c.serverSeq, c.clientSent, decode.ACK, nil)
+	c.serverAcked = c.clientSent
+}
+
+// SkipClient 只推进客户端序号，不写包，用来模拟丢包。
+func (c *Conn) SkipClient(n int) {
+	c.clientSeq += uint32(n)
+	c.clientSent = c.clientSeq
+}
+
+// SkipServer 只推进服务端序号。
+func (c *Conn) SkipServer(n int) {
+	c.serverSeq += uint32(n)
+	c.serverSent = c.serverSeq
+}
+
+// ClientFin 从客户端发 FIN。
+func (c *Conn) ClientFin(ts time.Time) {
+	c.write(ts, true, c.clientSeq, c.clientAcked, decode.FIN|decode.ACK, nil)
+	c.clientSeq++
+	c.clientSent = c.clientSeq
+}
+
+// ServerFin 从服务端发 FIN。
+func (c *Conn) ServerFin(ts time.Time) {
+	c.write(ts, false, c.serverSeq, c.serverAcked, decode.FIN|decode.ACK, nil)
+	c.serverSeq++
+	c.serverSent = c.serverSeq
+}
+
+// ClientRst 从客户端发 RST。
+func (c *Conn) ClientRst(ts time.Time) {
+	c.write(ts, true, c.clientSeq, c.clientAcked, decode.RST|decode.ACK, nil)
+}
+
+// Raw 写一个任意的段，用来构造重传、乱序、重叠等场景。
+func (c *Conn) Raw(ts time.Time, fromClient bool, seq, ack uint32, flags decode.Flags, payload []byte) {
+	c.write(ts, fromClient, seq, ack, flags, payload)
+}

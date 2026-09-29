@@ -1,10 +1,14 @@
 package pcapgen_test
 
 import (
+	"bytes"
+	"encoding/hex"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -151,5 +155,87 @@ func TestFrameLinkTypes(t *testing.T) {
 				t.Errorf("端口/标志 = %q/%q，想要 12345/0x0002", row[2], row[3])
 			}
 		})
+	}
+}
+
+// 行为 3：握手后 ClientSend 3000 字节切成 1460、1460、80 三段，
+// 序号连续，tshark follow 流还原的字节和写入的相同。
+func TestConnHandshakeSend(t *testing.T) {
+	client := netip.MustParseAddrPort("10.0.0.1:50000")
+	server := netip.MustParseAddrPort("10.0.0.2:80")
+	t0 := time.Unix(1700000000, 0)
+
+	path := writePcap(t, "conn.pcap", pcap.LinkEthernet, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, client, server)
+		c.Handshake(t0)
+		payload := make([]byte, 3000)
+		for i := range payload {
+			payload[i] = byte('A' + i%26)
+		}
+		c.ClientSend(t0.Add(10*time.Millisecond), payload)
+		c.ServerAck(t0.Add(20 * time.Millisecond))
+	})
+
+	// 数据段按写入顺序核对序号连续性。
+	rows := tsharkFields(t, path, nil, "tcp.flags", "tcp.len", "tcp.seq_raw", "tcp.ack_raw")
+	var dataLens []int
+	var seqs []uint64
+	for _, row := range rows {
+		lens := row[1]
+		if lens == "0" {
+			continue
+		}
+		n := 0
+		for _, ch := range lens {
+			if ch != ',' {
+				n = n*10 + int(ch-'0')
+			}
+		}
+		dataLens = append(dataLens, n)
+		seq, _ := strconv.ParseUint(strings.Split(row[2], ",")[0], 10, 64)
+		seqs = append(seqs, seq)
+	}
+	wantLens := []int{1460, 1460, 80}
+	if !reflect.DeepEqual(dataLens, wantLens) {
+		t.Fatalf("分段长度 = %v，想要 %v", dataLens, wantLens)
+	}
+	// ISN 是 1001 的话三段序号是 1001、2461、3921；这里直接验证连续性：
+	// 每段序号等于前一段序号加前一段长度。
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] != seqs[i-1]+uint64(dataLens[i-1]) {
+			t.Errorf("第 %d 段序号 = %d，想要 %d", i, seqs[i], seqs[i-1]+uint64(dataLens[i-1]))
+		}
+	}
+
+	// tshark follow 流还原客户端方向的字节。
+	cmd := exec.Command(tshark(t), "-r", path, "-q", "-z", "follow,tcp,raw,0")
+	var out, errb strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("tshark follow 失败: %v\n%s", err, errb.String())
+	}
+	var follow [][]byte
+	for _, line := range strings.Split(out.String(), "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "\t"))
+		if len(line) == 0 || strings.ContainsAny(line[:1], "Cc=\t") {
+			continue
+		}
+		// follow 输出里客户端方向的行不带前缀，服务端方向带制表符；
+		// 这里只收集十六进制行。
+		if b, err := hex.DecodeString(line); err == nil {
+			follow = append(follow, b)
+		}
+	}
+	var got []byte
+	for _, b := range follow {
+		got = append(got, b...)
+	}
+	want := make([]byte, 3000)
+	for i := range want {
+		want[i] = byte('A' + i%26)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("follow 还原 %d 字节，和写入的 %d 字节不同", len(got), len(want))
 	}
 }
