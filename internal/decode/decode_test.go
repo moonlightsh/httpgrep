@@ -181,3 +181,105 @@ func TestVLANQinQ(t *testing.T) {
 		})
 	}
 }
+
+// ---- 行为 4：SLL 与 SLL2 ----
+
+func TestSLL(t *testing.T) {
+	tcp := tcpSegment(22, 80, 1, 2, 0x18, nil, []byte("x"))
+	ip := ipv4Packet(addr4(10, 0, 0, 1), addr4(10, 0, 0, 2), 0, nil, tcp)
+
+	// SLL：16 字节头，协议号在偏移 14
+	sll := make([]byte, 16, 16+len(ip))
+	binary.BigEndian.PutUint16(sll[14:16], 0x0800)
+	sll = append(sll, ip...)
+
+	var seg decode.Segment
+	if got := decode.Decode(pcap.LinkLinuxSLL, sll, len(sll), &seg); got != decode.OK {
+		t.Fatalf("SLL Decode = %v, want OK", got)
+	}
+	if string(seg.Payload) != "x" || seg.Src.Port() != 22 {
+		t.Errorf("SLL payload=%q sport=%d", seg.Payload, seg.Src.Port())
+	}
+
+	// SLL2：20 字节头，协议号在偏移 0
+	sll2 := make([]byte, 20, 20+len(ip))
+	binary.BigEndian.PutUint16(sll2[0:2], 0x0800)
+	sll2 = append(sll2, ip...)
+
+	seg = decode.Segment{}
+	if got := decode.Decode(pcap.LinkLinuxSLL2, sll2, len(sll2), &seg); got != decode.OK {
+		t.Fatalf("SLL2 Decode = %v, want OK", got)
+	}
+	if string(seg.Payload) != "x" || seg.Src.Port() != 22 {
+		t.Errorf("SLL2 payload=%q sport=%d", seg.Payload, seg.Src.Port())
+	}
+
+	// SLL 协议号不是 IP 时返回 NotTCP
+	arpSLL := make([]byte, 16, 20)
+	binary.BigEndian.PutUint16(arpSLL[14:16], 0x0806)
+	arpSLL = append(arpSLL, 0, 0, 0, 0)
+	if got := decode.Decode(pcap.LinkLinuxSLL, arpSLL, len(arpSLL), &seg); got != decode.NotTCP {
+		t.Errorf("SLL ARP Decode = %v, want NotTCP", got)
+	}
+}
+
+// ---- 行为 5：NULL 与 LOOP ----
+
+func TestNullLoop(t *testing.T) {
+	tcp := tcpSegment(1, 2, 3, 4, 0x10, nil, []byte("ab"))
+	ip4 := ipv4Packet(addr4(1, 1, 1, 1), addr4(2, 2, 2, 2), 0, nil, tcp)
+	ip6 := ipv6Packet(tcp)
+
+	famBE := func(v uint32) []byte { b := make([]byte, 4); binary.BigEndian.PutUint32(b, v); return b }
+	famLE := func(v uint32) []byte { b := make([]byte, 4); binary.LittleEndian.PutUint32(b, v); return b }
+
+	tests := []struct {
+		name  string
+		link  pcap.LinkType
+		fam   []byte
+		ip    []byte
+		want  decode.Result
+		sport uint16
+	}{
+		// NULL：大端、小端都认；2=IPv4，24/28/30=IPv6
+		{"null/v4/be", pcap.LinkNull, famBE(2), ip4, decode.OK, 1},
+		{"null/v4/le", pcap.LinkNull, famLE(2), ip4, decode.OK, 1},
+		{"null/v6-24/be", pcap.LinkNull, famBE(24), ip6, decode.OK, 1},
+		{"null/v6-24/le", pcap.LinkNull, famLE(24), ip6, decode.OK, 1},
+		{"null/v6-28/be", pcap.LinkNull, famBE(28), ip6, decode.OK, 1},
+		{"null/v6-30/le", pcap.LinkNull, famLE(30), ip6, decode.OK, 1},
+		// LOOP：只按大端
+		{"loop/v4/be", pcap.LinkLoop, famBE(2), ip4, decode.OK, 1},
+		{"loop/v6/be", pcap.LinkLoop, famBE(24), ip6, decode.OK, 1},
+		// 不是 IP 协议族
+		{"null/af-unix", pcap.LinkNull, famBE(1), ip4, decode.NotTCP, 0},
+		{"null/af-unix/le", pcap.LinkNull, famLE(1), ip4, decode.NotTCP, 0},
+		// LOOP 只按大端读：小端字节序的家族号读不出来
+		{"loop/v4/le", pcap.LinkLoop, famLE(2), ip4, decode.NotTCP, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame := append(append([]byte{}, tt.fam...), tt.ip...)
+			var seg decode.Segment
+			got := decode.Decode(tt.link, frame, len(frame), &seg)
+			if got != tt.want {
+				t.Fatalf("Decode = %v, want %v", got, tt.want)
+			}
+			if tt.want == decode.OK && seg.Src.Port() != tt.sport {
+				t.Errorf("sport = %d, want %d", seg.Src.Port(), tt.sport)
+			}
+		})
+	}
+}
+
+// ipv6Packet 拼一个 IPv6 包（无扩展头）。
+func ipv6Packet(upper []byte) []byte {
+	b := make([]byte, 40+len(upper))
+	b[0] = 0x60
+	binary.BigEndian.PutUint16(b[4:6], uint16(len(upper)))
+	b[6] = 6                                                                           // TCP
+	copy(b[8:], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1})  // src
+	copy(b[24:], []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2}) // dst
+	copy(b[40:], upper)
+	return b
+}
