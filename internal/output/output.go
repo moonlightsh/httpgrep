@@ -183,20 +183,17 @@ func (w *Writer) writeBinaryMessage(m *Message) {
 	if len(w.buf) > 0 && w.buf[len(w.buf)-1] != '\n' {
 		w.buf = append(w.buf, '\n')
 	}
-	w.buf = append(w.buf, "[binary body omitted:"...)
-	if m.ContentEncoding != "" || m.ContentType != "" {
-		if m.ContentEncoding != "" {
-			w.buf = append(w.buf, ' ')
-			w.buf = append(w.buf, m.ContentEncoding...)
-		}
+	w.buf = append(w.buf, "[binary body omitted: "...)
+	if m.ContentEncoding != "" {
+		w.buf = append(w.buf, m.ContentEncoding...)
 		if m.ContentType != "" {
-			if m.ContentEncoding != "" {
-				w.buf = append(w.buf, ", "...)
-			} else {
-				w.buf = append(w.buf, ' ')
-			}
-			w.buf = append(w.buf, m.ContentType...)
+			w.buf = append(w.buf, ", "...)
 		}
+	}
+	if m.ContentType != "" {
+		w.buf = append(w.buf, m.ContentType...)
+		w.buf = append(w.buf, ", "...)
+	} else if m.ContentEncoding != "" {
 		w.buf = append(w.buf, ", "...)
 	}
 	w.buf = appendSize(w.buf, m.BodySize)
