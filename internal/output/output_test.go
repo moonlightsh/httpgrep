@@ -482,10 +482,48 @@ func benchBlock() *output.Block {
 	}
 }
 
+// zeroAllocBlock 构造覆盖各状态路径的块：no-response 状态、gap/truncated 标记、二进制占位。
+func zeroAllocBlock() *output.Block {
+	return &output.Block{
+		Time:   time.Unix(1790580612, 345000000),
+		Client: mustAddr("127.0.0.1:52814"), Server: mustAddr("127.0.0.1:7010"),
+		Status: output.Status{NoResponse: "timeout"},
+		Messages: []output.Message{
+			{Pieces: []output.Piece{
+				{Kind: output.PieceHead, Data: []byte("GET / HTTP/1.1\r\n\r\n")},
+				{Kind: output.PieceGap, N: 1460, InBody: true},
+			}},
+			{Binary: true, ContentType: "application/json", ContentEncoding: "gzip", BodySize: 3482, BodyMatched: true,
+				Pieces: []output.Piece{
+					{Kind: output.PieceHead, Data: []byte("HTTP/1.1 200 OK\r\n\r\n")},
+					{Kind: output.PieceBody, Data: []byte("\x1f\x8b abc")},
+					{Kind: output.PieceTruncated, N: 1048576},
+				}},
+		},
+	}
+}
+
+func TestWriteNonTTYZeroAlloc(t *testing.T) {
+	w := output.NewWriter(io.Discard, output.Options{Location: time.UTC})
+	blk := zeroAllocBlock()
+	if err := w.Write(blk); err != nil { // 预热，让缓冲区按最大块就位
+		t.Fatal(err)
+	}
+	allocs := testing.AllocsPerRun(100, func() {
+		if err := w.Write(blk); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if allocs != 0 {
+		t.Errorf("非 TTY 渲染应零分配，实际 %g 次/块", allocs)
+	}
+}
+
 func BenchmarkWriteNonTTY(b *testing.B) {
 	w := output.NewWriter(io.Discard, output.Options{Location: time.UTC})
 	blk := benchBlock()
 	b.SetBytes(int64(len(blk.Messages[0].Pieces[1].Data) * 2))
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if err := w.Write(blk); err != nil {
@@ -499,6 +537,7 @@ func BenchmarkWriteTTY(b *testing.B) {
 	w := output.NewWriter(io.Discard, output.Options{Location: time.UTC, TTY: true, Highlight: hl})
 	blk := benchBlock()
 	b.SetBytes(int64(len(blk.Messages[0].Pieces[1].Data) * 2))
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if err := w.Write(blk); err != nil {
