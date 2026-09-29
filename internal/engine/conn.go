@@ -27,6 +27,14 @@ type conn struct {
 
 	srvClosed bool // 服务端方向已结束（FIN），之后的请求不会再有响应
 
+	// held 表示请求解析器正缓存着 Upgrade 请求之后的字节，等 Resume 或 Tunnel。
+	// 这时不能直接关闭请求解析器，否则缓存里管道化的请求会被静默丢掉。
+	held bool
+	// cliFin 表示客户端 FIN 时请求解析器正在缓存，关闭推迟到 Resume 或 Tunnel 之后；
+	// cliFinTS 是 FIN 的时间。
+	cliFin   bool
+	cliFinTS time.Time
+
 	now       time.Time // 当前回调所属包的时间
 	replaying bool      // 请求解析器正在回放 Upgrade 请求之后缓存的字节，now 不是这些字节的时间
 }
@@ -105,6 +113,11 @@ func (c *conn) Fin(side tcp.Side, ts time.Time) {
 	c.now = ts
 	if side == c.client {
 		// 只有客户端 FIN 时照常等服务端，它还可能回响应。
+		if c.held {
+			// Upgrade 请求还在等决定：缓存里可能有管道化的请求，关闭推迟到决定之后。
+			c.cliFin, c.cliFinTS = true, ts
+			return
+		}
 		c.req.Close(true, ts)
 		return
 	}
@@ -155,6 +168,25 @@ func (c *conn) closeQueue(why string, all bool) {
 			x.noResp = why
 		}
 		c.finish(x)
+	}
+}
+
+// resumeHeld 把请求解析器缓存的、Upgrade 请求之后的字节按 HTTP 回放，
+// 然后补上推迟的客户端 FIN。Upgrade 请求得到普通响应、要关闭连接或超时之前调用。
+// 回放出的请求可能又是 Upgrade 请求而重新开始缓存，此时 held 仍为真。
+func (c *conn) resumeHeld() {
+	c.held = false
+	c.replaying = true
+	c.req.Resume()
+	c.replaying = false
+	c.closePendingFin()
+}
+
+// closePendingFin 在请求解析器不再缓存时补调推迟的客户端 FIN。
+func (c *conn) closePendingFin() {
+	if c.cliFin && !c.held {
+		c.cliFin = false
+		c.req.Close(true, c.cliFinTS)
 	}
 }
 
@@ -233,6 +265,8 @@ func (s *reqSink) End(complete bool, ts time.Time) {
 	x.reqDone = true
 	if complete {
 		x.reqLast = ts
+		// 请求解析器在 Upgrade 请求正常结束、还没有决定时开始缓存后面的字节。
+		s.c.held = x.upgrade && !x.decided
 	} else {
 		x.incomplete = true
 	}
@@ -294,12 +328,15 @@ func (s *resSink) Head(h *http1.Head) {
 		case h.Tunnel:
 			// 101 或 CONNECT 的 2xx：此后连接不再按 HTTP 解析，也不再缓存。
 			// 响应解析器自己已经停下。
+			x.decided = true
+			c.held = false
 			c.req.Tunnel()
+			c.closePendingFin()
 		case x.upgrade && !x.msgs[x.resMsg].interim:
 			// Upgrade 请求得到普通的最终响应：请求方向继续按 HTTP 解析。
-			c.replaying = true
-			c.req.Resume()
-			c.replaying = false
+			// 请求还没发完时 Resume 只记下决定，没有可回放的。
+			x.decided = true
+			c.resumeHeld()
 		}
 	}
 }

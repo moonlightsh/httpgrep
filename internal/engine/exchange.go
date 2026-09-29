@@ -75,6 +75,7 @@ type exchange struct {
 	noResp     string // 无响应的原因
 	method     uint8
 	upgrade    bool // 请求是 CONNECT 或带 Upgrade 头
+	decided    bool // 已经就 Upgrade 请求调用过 Resume 或 Tunnel
 
 	reqMsg, resMsg int // 正在接收的请求、响应消息的下标
 

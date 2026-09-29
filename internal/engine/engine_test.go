@@ -661,3 +661,38 @@ func TestInterleavedDirectionsMatch(t *testing.T) {
 			"[binary body omitted: 6 B, matched]\n")
 	})
 }
+
+// Upgrade 请求还没得到最终响应时连接就关闭（或一方 FIN）：请求解析器缓存着的、
+// 之后管道化的请求不能丢，要按 HTTP 回放。
+func TestUpgradeHeldBytesOnClose(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func(c *pcapgen.Conn)
+		want  string
+	}{
+		{
+			// 客户端 FIN 时先不关闭请求解析器，等 400 之后回放完再关。
+			name: "client FIN before refusal",
+			build: func(c *pcapgen.Conn) {
+				c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+				c.ClientSend(ms(1), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+				c.ClientFin(ms(2))
+				c.ServerSend(ms(3), []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"))
+				c.ServerSend(ms(4), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+			},
+			want: "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 complete 3.0ms\n" +
+				"GET /TOKEN HTTP/1.1\r\n\r\n" +
+				"HTTP/1.1 204 No Content\r\n\r\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _ := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+				c := pcapgen.NewConn(w, cli1, srv)
+				c.Handshake(ms(-1))
+				tc.build(c)
+			})
+			check(t, out, tc.want)
+		})
+	}
+}
