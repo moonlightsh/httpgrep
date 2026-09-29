@@ -243,3 +243,37 @@ func TestHighlightRegex(t *testing.T) {
 		t.Fatalf("empty regex: got %v want %v", got2, want2)
 	}
 }
+
+// 正则 c$ 命中 abc\r\n（\r 去掉后 c 在行尾）。
+func TestTrailingCRRegex(t *testing.T) {
+	m, _ := match.Compile([]string{`c$`}, true)
+	s := m.NewScanner()
+	s.Write([]byte("abc\r\n"))
+	if !s.Matched() {
+		t.Fatal("c$ should match abc with trailing CR stripped")
+	}
+}
+
+// 正则模式缓存没写完的行，上限 8 MiB，超出的部分不参与匹配。
+func TestRegexLineBufferCap(t *testing.T) {
+	const miB = 1 << 20
+	m, _ := match.Compile([]string{"near-start"}, true)
+	s := m.NewScanner()
+	head := make([]byte, 100)
+	copy(head, []byte("near-start"))
+	s.Write(head)
+	s.Write(make([]byte, 9*miB)) // 远超 8 MiB
+	s.Break()
+	if !s.Matched() {
+		t.Fatal("keyword within first 8 MiB should match")
+	}
+
+	m2, _ := match.Compile([]string{"past-the-cap"}, true)
+	s2 := m2.NewScanner()
+	s2.Write(make([]byte, 8*miB+1024)) // 先填满并溢出
+	s2.Write([]byte("past-the-cap"))   // 溢出之后的部分不参与匹配
+	s2.Break()
+	if s2.Matched() {
+		t.Fatal("keyword past the 8 MiB cap must not match")
+	}
+}
