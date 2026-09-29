@@ -19,7 +19,8 @@ func (e *Engine) Memory() int64 {
 }
 
 // 回收的交互不计入内存计量，所以限量：最多留 maxFree 个；它们留着的缓存容量之和
-// 不超过 MaxMemory 的 1/freeBufShare，放不下的交互只留对象和扫描器，缓存交给 GC。
+// 不超过 MaxMemory 的 1/freeBufShare（MaxMemory 不大于 0 表示不限，缓存容量也不限），
+// 放不下的交互只留对象和扫描器，缓存交给 GC。
 // 峰值过后，多出来的交互和缓存不会一直留着。
 const (
 	maxFree      = 256
@@ -32,7 +33,7 @@ func (e *Engine) recycle(x *exchange) {
 		return
 	}
 	if n := int64(cap(x.buf)); n > 0 {
-		if e.freeBuf+n > e.cfg.MaxMemory/freeBufShare {
+		if e.cfg.MaxMemory > 0 && e.freeBuf+n > e.cfg.MaxMemory/freeBufShare {
 			x.buf = nil
 		} else {
 			e.freeBuf += n
