@@ -592,6 +592,12 @@ func TestContentEncodingWithoutBody(t *testing.T) {
 			req:  "GET /TOKEN HTTP/1.1\r\n\r\n",
 			res:  "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 0\r\n\r\n",
 		},
+		{
+			// chunked 的空 body 只有最后的 "0\r\n"，解码后是 0 字节：原样输出。
+			name: "chunked empty",
+			req:  "GET /TOKEN HTTP/1.1\r\n\r\n",
+			res:  "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

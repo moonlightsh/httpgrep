@@ -132,14 +132,7 @@ func (x *exchange) addMessage(dir uint8) int {
 }
 
 // raw 缓存消息 mi 的一段线上字节，并按分类喂给扫描器。
-// 带 Content-Encoding 的消息真的有 body 字节时才算二进制 body：
-// HEAD 的响应、304 或 Content-Length: 0 没有 body，不输出占位行。
 func (x *exchange) raw(mi int, sec http1.Section, b []byte) {
-	if sec == http1.SecBody {
-		if m := &x.msgs[mi]; m.ce != "" {
-			m.binary = true
-		}
-	}
 	kind := pieceKind(sec)
 	lo := len(x.buf)
 	x.buf = append(x.buf, b...)
@@ -169,10 +162,13 @@ func (x *exchange) head(mi int, h *http1.Head) {
 }
 
 // body 喂入消息 mi 去掉 chunked 编码后的 body，顺带判断是不是二进制。
+// 带 Content-Encoding 的消息解码后真的有 body 字节时才算二进制：HEAD 的响应、304、
+// Content-Length: 0 和 chunked 的空 body（只有 "0\r\n\r\n"）原样输出，不加占位行。
+// body 里有缺口时也算二进制，由缺口处理负责标记。
 func (x *exchange) body(mi int, b []byte) {
 	m := &x.msgs[mi]
 	m.bodySize += int64(len(b))
-	if !m.binary && hasControl(b) {
+	if !m.binary && (m.ce != "" && len(b) > 0 || hasControl(b)) {
 		m.binary = true
 	}
 	x.feed(mi, feedBody, b)
