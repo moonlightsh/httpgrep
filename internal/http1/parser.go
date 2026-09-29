@@ -105,9 +105,16 @@ func NewParser(kind Kind, sink Sink, opt Options) *Parser {
 }
 
 // Feed 按序喂入从流偏移 off 开始的字节 b。b 只在调用期间使用，不保留。
+// 扫描状态下，b 的开头也算行首候选（调用方按 TCP 段喂入时就是段的开头）：
+// 失步前的字节常常不以换行结尾，比如 JSON body，下一个消息通常从新的段开始。
+// 所以扫描状态下，同一段流按不同方式切开喂入，对齐的位置可能不同。
 func (p *Parser) Feed(off int64, b []byte, peerAck int64, ts time.Time) {
 	if len(b) > 0 {
 		p.lastTS = ts
+	}
+	if p.st == stScan && len(p.lb) == 0 {
+		// 已经缓存着一个跨段的起始行候选时接着读它，不从这里重新开始。
+		p.bol = true
 	}
 	for len(b) > 0 && p.st != stDead {
 		n := p.step(off, b, peerAck, ts)
