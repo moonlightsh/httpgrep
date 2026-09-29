@@ -46,12 +46,12 @@ type Options struct {
 	Version    bool
 }
 
-// Error 是参数解析错误，消息用英文。
-type Error struct {
+// errBadArg 是参数解析错误，消息用英文。
+type errBadArg struct {
 	msg string
 }
 
-func (e *Error) Error() string { return e.msg }
+func (e *errBadArg) Error() string { return e.msg }
 
 // Parse 解析命令行参数（args 不含程序名）。
 func Parse(args []string) (Options, error) {
@@ -121,21 +121,21 @@ func Parse(args []string) (Options, error) {
 				}
 			case "stats":
 				if hasVal {
-					return opts, &Error{"option --stats does not take an argument"}
+					return opts, &errBadArg{"option --stats does not take an argument"}
 				}
 				opts.Stats = true
 			case "help":
 				if hasVal {
-					return opts, &Error{"option --help does not take an argument"}
+					return opts, &errBadArg{"option --help does not take an argument"}
 				}
 				opts.Help = true
 			case "version":
 				if hasVal {
-					return opts, &Error{"option --version does not take an argument"}
+					return opts, &errBadArg{"option --version does not take an argument"}
 				}
 				opts.Version = true
 			default:
-				return opts, &Error{"unknown option: --" + name}
+				return opts, &errBadArg{"unknown option: --" + name}
 			}
 		case len(arg) >= 2 && arg[0] == '-':
 			// 短选项串，可合并，取值时剩余部分或下一个参数充当选项值。
@@ -157,7 +157,7 @@ func Parse(args []string) (Options, error) {
 				case 'E':
 					opts.Regex = true
 				default:
-					return opts, &Error{"unknown option: -" + string(c)}
+					return opts, &errBadArg{"unknown option: -" + string(c)}
 				}
 			}
 		default:
@@ -172,16 +172,16 @@ done:
 		}
 	}
 	if len(positional) > 1 {
-		return opts, &Error{"only one input file is supported"}
+		return opts, &errBadArg{"only one input file is supported"}
 	}
 	if len(positional) == 1 {
 		opts.File = positional[0]
 	}
 	if !opts.Help && !opts.Version && len(opts.Patterns) == 0 {
-		return opts, &Error{"no pattern given"}
+		return opts, &errBadArg{"no pattern given"}
 	}
 	if opts.MaxMessage > opts.MaxMemory {
-		return opts, &Error{"--max-message cannot exceed --max-memory"}
+		return opts, &errBadArg{"--max-message cannot exceed --max-memory"}
 	}
 	return opts, nil
 }
@@ -189,7 +189,7 @@ done:
 // takeArg 取选项值：优先用下一个参数。
 func takeArg(args []string, i int, name string) (int, string, error) {
 	if i+1 >= len(args) {
-		return i, "", &Error{"option requires an argument: " + name}
+		return i, "", &errBadArg{"option requires an argument: " + name}
 	}
 	return i + 1, args[i+1], nil
 }
@@ -220,7 +220,7 @@ func splitLines(s string) []string {
 func parseSize(name, orig string) (int64, error) {
 	s := orig
 	if s == "" {
-		return 0, &Error{"invalid size for " + name + ": " + orig}
+		return 0, &errBadArg{"invalid size for " + name + ": " + orig}
 	}
 	mult := int64(1)
 	switch s[len(s)-1] {
@@ -232,11 +232,11 @@ func parseSize(name, orig string) (int64, error) {
 		mult, s = 1<<30, s[:len(s)-1]
 	}
 	if !isDigits(s) {
-		return 0, &Error{"invalid size for " + name + ": " + orig}
+		return 0, &errBadArg{"invalid size for " + name + ": " + orig}
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || n <= 0 || n > (1<<63-1)/mult {
-		return 0, &Error{"invalid size for " + name + ": " + orig}
+		return 0, &errBadArg{"invalid size for " + name + ": " + orig}
 	}
 	return n * mult, nil
 }
@@ -257,11 +257,11 @@ func isDigits(s string) bool {
 // parseInt 解析不小于 1 的纯数字整数。
 func parseInt(name, s string) (int, error) {
 	if !isDigits(s) {
-		return 0, &Error{"invalid value for " + name + ": " + s}
+		return 0, &errBadArg{"invalid value for " + name + ": " + s}
 	}
 	n, err := strconv.Atoi(s)
 	if err != nil || n < 1 {
-		return 0, &Error{"invalid value for " + name + ": " + s}
+		return 0, &errBadArg{"invalid value for " + name + ": " + s}
 	}
 	return n, nil
 }
@@ -270,7 +270,7 @@ func parseInt(name, s string) (int, error) {
 func parseDuration(name, s string) (time.Duration, error) {
 	d, err := time.ParseDuration(s)
 	if err != nil || d <= 0 {
-		return 0, &Error{"invalid duration for " + name + ": " + s}
+		return 0, &errBadArg{"invalid duration for " + name + ": " + s}
 	}
 	return d, nil
 }
