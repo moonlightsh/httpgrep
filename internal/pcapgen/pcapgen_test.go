@@ -322,3 +322,75 @@ func TestFrameSLL2Layout(t *testing.T) {
 		t.Errorf("接口索引被写成 16777216（ARPHRD 落到了 4-7 字节）")
 	}
 }
+
+// ISN 可以在 NewConn 之后设置（包括接近 2^32 的值），
+// 握手和数据段的序号都要从 ISN+1 起步；发送数据时确认号自动维护。
+func TestConnCustomISN(t *testing.T) {
+	client := netip.MustParseAddrPort("10.0.0.1:50002")
+	server := netip.MustParseAddrPort("10.0.0.2:80")
+	t0 := time.Unix(1700000000, 0)
+	path := writePcap(t, "isn.pcap", pcap.LinkEthernet, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, client, server)
+		c.ClientISN = 0xFFFFFF00 // 接近回绕点
+		c.ServerISN = 9000
+		c.Handshake(t0)
+		c.ClientSend(t0.Add(10*time.Millisecond), []byte("GET / HTTP/1.1\r\n\r\n")) // 18 字节
+		c.ServerSend(t0.Add(20*time.Millisecond), []byte("ok"))                     // 2 字节
+		c.ClientSend(t0.Add(30*time.Millisecond), []byte("again"))                  // 5 字节
+	})
+	rows := tsharkFields(t, path, nil, "tcp.srcport", "tcp.seq_raw", "tcp.ack_raw", "tcp.len", "tcp.flags")
+	if len(rows) != 6 {
+		t.Fatalf("包数 = %d，想要 6（3 握手 + 3 数据）", len(rows))
+	}
+	// 期望值全部手写：客户端 ISN 0xFFFFFF00，服务端 ISN 9000。
+	want := [][]string{
+		// src, seq, ack, len, flags
+		{"50002", "4294967040", "0", "0", "0x0002"},     // SYN
+		{"80", "9000", "4294967041", "0", "0x0012"},     // SYN-ACK
+		{"50002", "4294967041", "9001", "0", "0x0010"},  // ACK
+		{"50002", "4294967041", "9001", "18", "0x0018"}, // 请求数据
+		{"80", "9001", "4294967059", "2", "0x0018"},     // 响应数据，ack 确认 18 字节请求
+		{"50002", "4294967059", "9003", "5", "0x0018"},  // 后续数据，ack 确认响应
+	}
+	for i, w := range want {
+		got := []string{rows[i][0], rows[i][1], rows[i][2], rows[i][3], rows[i][4]}
+		for j := range w {
+			if got[j] != w[j] {
+				t.Errorf("第 %d 个包字段 %d = %q，想要 %q", i+1, j, got[j], w[j])
+			}
+		}
+	}
+}
+
+// 行为 3 的补充：数据段绝对序号紧接握手之后（ISN+1 = 1001、2461、3921），
+// 并核对 ack。
+func TestConnSendAbsoluteSeq(t *testing.T) {
+	client := netip.MustParseAddrPort("10.0.0.1:50000")
+	server := netip.MustParseAddrPort("10.0.0.2:80")
+	t0 := time.Unix(1700000000, 0)
+	path := writePcap(t, "abs.pcap", pcap.LinkEthernet, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, client, server)
+		c.Handshake(t0)
+		c.ClientSend(t0.Add(10*time.Millisecond), make([]byte, 3000))
+	})
+	rows := tsharkFields(t, path, nil, "tcp.len", "tcp.seq_raw", "tcp.ack_raw")
+	var seqs []uint64
+	var acks []string
+	for _, row := range rows {
+		if row[0] == "0" {
+			continue
+		}
+		seq, _ := strconv.ParseUint(row[1], 10, 64)
+		seqs = append(seqs, seq)
+		acks = append(acks, row[2])
+	}
+	wantSeqs := []uint64{1001, 2461, 3921} // ISN+1，每段加前段长度
+	if !reflect.DeepEqual(seqs, wantSeqs) {
+		t.Errorf("数据段序号 = %v，想要 %v", seqs, wantSeqs)
+	}
+	for _, ack := range acks {
+		if ack != "2001" { // 服务端 ISN+1
+			t.Errorf("数据段 ack = %q，想要 2001", ack)
+		}
+	}
+}
