@@ -1008,3 +1008,49 @@ func TestResumeTunnelIgnoredOnResponse(t *testing.T) {
 		"begin off=27", "raw head " + ok, "head 204 HTTP/1.1", "end true"}
 	checkAllChunkings(t, http1.Response, http1.Options{}, want, data(ok), tunnel(), resume(), data(ok))
 }
+
+func TestHeaderNamesAndDuplicates(t *testing.T) {
+	const next = "GET /2 HTTP/1.1\r\n\r\n"
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"mixed case content-length", "POST / HTTP/1.1\r\ncOnTeNt-LeNgTh: 2\r\n\r\nhi",
+			[]string{"begin off=0", "raw head POST / HTTP/1.1\r\ncOnTeNt-LeNgTh: 2\r\n\r\n", "head POST / HTTP/1.1", "raw body hi", "body hi", "end true"}},
+		{"upper case transfer-encoding", "POST / HTTP/1.1\r\nTRANSFER-ENCODING: CHUNKED\r\n\r\n2\r\nhi\r\n0\r\n\r\n",
+			[]string{"begin off=0", "raw head POST / HTTP/1.1\r\nTRANSFER-ENCODING: CHUNKED\r\n\r\n", "head POST / HTTP/1.1",
+				"raw body 2\r\nhi\r\n0\r\n", "body hi", "raw trailer \r\n", "end true"}},
+		{"duplicate content-length same value", "POST / HTTP/1.1\r\nContent-Length: 2\r\ncontent-length:2 \r\n\r\nhi",
+			[]string{"begin off=0", "raw head POST / HTTP/1.1\r\nContent-Length: 2\r\ncontent-length:2 \r\n\r\n", "head POST / HTTP/1.1",
+				"raw body hi", "body hi", "end true"}},
+		{"duplicate content-length different value", "POST / HTTP/1.1\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\nhi\r\n" + next,
+			[]string{"begin off=0", "raw head POST / HTTP/1.1\r\nContent-Length: 2\r\n", "desync 36",
+				"raw unparsed Content-Length: 3\r\n\r\nhi\r\n", "end false",
+				"begin off=61", "raw head " + next, "head GET /2 HTTP/1.1", "end true"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checkAllChunkings(t, http1.Request, http1.Options{}, tt.want, data(tt.in))
+		})
+	}
+}
+
+func TestHeadFields(t *testing.T) {
+	in := "HTTP/1.1 200 OK\r\n" +
+		"content-type:  text/html; charset=utf-8 \r\n" +
+		"Content-Type: application/json\r\n" +
+		"CONTENT-ENCODING:\tgzip\r\n" +
+		"Content-Encoding: br\r\n" +
+		"Content-Length: 0\r\n\r\n"
+	r := run(http1.Response, http1.Options{}, 1, data(in))
+	want := http1.Head{Status: 200, Proto: "HTTP/1.1", ContentType: "text/html; charset=utf-8", ContentEncoding: "gzip"}
+	if len(r.heads) != 1 || r.heads[0] != want {
+		t.Errorf("heads = %+v, want %+v", r.heads, want)
+	}
+	r = run(http1.Request, http1.Options{}, 0, data("PUT /x HTTP/1.0\r\nContent-Type: text/plain\r\n\r\n"))
+	wantReq := http1.Head{Method: "PUT", Target: "/x", Proto: "HTTP/1.0", ContentType: "text/plain"}
+	if len(r.heads) != 1 || r.heads[0] != wantReq {
+		t.Errorf("heads = %+v, want %+v", r.heads, wantReq)
+	}
+}

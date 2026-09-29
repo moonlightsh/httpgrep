@@ -36,7 +36,7 @@ func (p *Parser) headLine(line []byte, ts time.Time) bool {
 	switch {
 	case eqFold(name, "content-length"):
 		v, ok := parseCL(val)
-		if !ok {
+		if !ok || p.hasCL && v != p.cl {
 			return false
 		}
 		p.hasCL, p.cl = true, v
@@ -47,6 +47,14 @@ func (p *Parser) headLine(line []byte, ts time.Time) bool {
 			last = trimSpace(val[k+1:])
 		}
 		p.chunked = eqFold(last, "chunked")
+	case eqFold(name, "content-type"):
+		if p.h.ContentType == "" {
+			p.h.ContentType = string(val)
+		}
+	case eqFold(name, "content-encoding"):
+		if p.h.ContentEncoding == "" {
+			p.h.ContentEncoding = string(val)
+		}
 	case p.kind == Request && eqFold(name, "upgrade"):
 		p.h.Upgrade = true
 	}
