@@ -100,7 +100,7 @@ func TestRunClockNeverGoesBack(t *testing.T) {
 
 // 流量停下来、输入没有结束：Pipe 为真时超过 1 秒没有新包，时钟从最后一个包起按真实时间往前推，
 // 只有请求的交互在 --timeout 2s 之后（约 2 秒，200ms 检查一次）以 no-response(timeout) 输出；
-// Pipe 为假时时钟不动，3 秒内没有输出，输入结束后以 no-response(eof) 输出。
+// --cpus 4 时同样如此。Pipe 为假时时钟不动，3 秒内没有输出，输入结束后以 no-response(eof) 输出。
 func TestRunPipeRealTimeFallback(t *testing.T) {
 	in := capture(t, func(w *pcapgen.Writer) {
 		c := pcapgen.NewConn(w, cli1, srv)
@@ -112,17 +112,19 @@ func TestRunPipeRealTimeFallback(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		pipe bool
+		cpus string
 		want string
 	}{
-		{"pipe", true, head + "no-response(timeout)\n" + req},
-		{"file", false, head + "no-response(eof)\n" + req},
+		{"pipe", true, "1", head + "no-response(timeout)\n" + req},
+		{"pipe-cpus4", true, "4", head + "no-response(timeout)\n" + req}, // 时钟推进广播给所有分片
+		{"file", false, "1", head + "no-response(eof)\n" + req},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			pr, pw := io.Pipe()
 			defer pw.Close()
 			out := newNotifyWriter()
-			ch := goRun(run.Config{Input: pr, Pipe: tc.pipe, Stdout: out, Opts: opts(t, "--timeout", "2s", "HIT")})
+			ch := goRun(run.Config{Input: pr, Pipe: tc.pipe, Stdout: out, Opts: opts(t, "--cpus", tc.cpus, "--timeout", "2s", "HIT")})
 			if _, err := pw.Write(in); err != nil {
 				t.Fatal(err)
 			}
