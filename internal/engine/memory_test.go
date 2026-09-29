@@ -540,3 +540,29 @@ func TestFreeListDropsLargeScanners(t *testing.T) {
 		t.Fatalf("engine retains %d bytes after all exchanges ended", retained)
 	}
 }
+
+// 缺请求的交互同样按开始时间参与丢弃：半路连接（没有握手）上先收到一个没有请求的大响应，
+// body 里有关键词。上限 3000：第二个包之后计量是 1024 + 512 + 2920 = 4456，超限，
+// 丢弃这个交互（已命中，不输出），回到 1024，连接本身不释放；剩下的响应由占位收下。
+// 之后同一连接上的请求和响应照常配对输出。
+func TestEvictNoRequestExchange(t *testing.T) {
+	var mem []int64
+	out, st := replayEach(t, engine.Config{Matcher: matcher(t, "TOKEN"), MaxMemory: 3000}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.ServerSend(ms(0), []byte("HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\nTOKEN"+strings.Repeat("x", 4995)))
+		c.ClientSend(ms(10), []byte("GET /TOKEN HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(11), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	}, func(e *engine.Engine, _ time.Time) { mem = append(mem, e.Memory()) })
+	check(t, out, "2026-09-28 15:30:12.355 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\n"+
+		"GET /TOKEN HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 204 No Content\r\n\r\n")
+	// 响应 5042 字节分 4 段（1460×3 + 662），之后是请求和 204。
+	want := []int64{1024 + 512 + 1460, 1024, 1024, 1024, 1024 + 512 + 23, 1024}
+	if !slices.Equal(mem, want) {
+		t.Fatalf("Memory after each packet = %v, want %v", mem, want)
+	}
+	if st.Connections != 1 || st.MidStream != 1 || st.Evicted != 1 || st.EvictedMatched != 1 ||
+		st.Exchanges != 2 || st.Complete != 1 || st.NoRequest != 0 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
