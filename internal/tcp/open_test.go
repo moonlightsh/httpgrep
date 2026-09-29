@@ -99,3 +99,76 @@ func TestNoConnForBarePackets(t *testing.T) {
 		})
 	}
 }
+
+// 第 16 条：同一四元组上出现新的 SYN 时替换旧连接，SYN 重传忽略。
+func TestSynReplaces(t *testing.T) {
+	const opened = "open A=10.0.0.1:40000 B=10.0.0.2:80 known=true"
+	tests := []struct {
+		name  string
+		setup []pkt
+		syn   pkt
+		want  []string
+	}{
+		{
+			name:  "new isn",
+			setup: []pkt{c2s(cISN, 0, syn, ""), s2c(sISN, cISN+1, synAck, "")},
+			syn:   c2s(9000, 0, syn, ""),
+			want:  []string{"closed replaced", opened},
+		},
+		{
+			name:  "syn retransmit",
+			setup: []pkt{c2s(cISN, 0, syn, ""), s2c(sISN, cISN+1, synAck, "")},
+			syn:   c2s(cISN, 0, syn, ""),
+			want:  nil,
+		},
+		{
+			name:  "original started without syn",
+			setup: []pkt{c2s(cISN+1, sISN+1, pshAck, "ab")},
+			syn:   c2s(cISN, 0, syn, ""),
+			want:  []string{"closed replaced", opened},
+		},
+		{
+			name:  "original started with syn-ack",
+			setup: []pkt{s2c(sISN, cISN+1, synAck, "")},
+			syn:   c2s(9000, 0, syn, ""),
+			want:  []string{"closed replaced", opened},
+		},
+		{
+			name:  "syn from the other side",
+			setup: []pkt{c2s(cISN, 0, syn, ""), s2c(sISN, cISN+1, synAck, "")},
+			syn:   s2c(7000, 0, syn, ""),
+			want:  []string{"closed replaced", "open A=10.0.0.2:80 B=10.0.0.1:40000 known=true"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, defaultConfig())
+			h.feed(at(0), tt.setup...)
+			h.log = nil
+			h.add(tt.syn, at(1))
+			h.expect(tt.want...)
+		})
+	}
+}
+
+// 替换之后，新连接从新的 ISN 起算偏移。
+func TestSynReplacesThenData(t *testing.T) {
+	h := newHarness(t, defaultConfig())
+	h.handshake(at(0))
+	h.add(c2s(cISN+1, sISN+1, pshAck, "old"), at(1))
+	h.feed(at(2),
+		c2s(9000, 0, syn, ""),
+		s2c(3000, 9001, synAck, ""),
+		c2s(9001, 3001, pshAck, "new"),
+	)
+	h.expect(
+		"open A=10.0.0.1:40000 B=10.0.0.2:80 known=true",
+		`data 0 off=0 "old" ack=0`,
+		"closed replaced",
+		"open A=10.0.0.1:40000 B=10.0.0.2:80 known=true",
+		`data 0 off=0 "new" ack=0`,
+	)
+	if n := h.a.Len(); n != 1 {
+		t.Fatalf("Len() = %d, want 1", n)
+	}
+}

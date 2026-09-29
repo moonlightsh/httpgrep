@@ -47,6 +47,9 @@ type conn struct {
 	d    [2]dir
 	last time.Time // 最后一个包的时间
 
+	synSeen bool   // 看到过 side 0 发的 SYN
+	isn     uint32 // 这个 SYN 的序号
+
 	// 按最后一个包的时间排成双向链表，older 一侧是更早的连接。
 	older, newer *conn
 }

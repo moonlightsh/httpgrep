@@ -29,6 +29,18 @@ func NewAssembler(cfg Config, open func(ConnInfo) Handler) *Assembler {
 // Add 处理一个 TCP 段。ts 是抓包时间，单调不减。
 func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 	c := a.conns[Key{seg.Src, seg.Dst}]
+	if c != nil && seg.Flags&(decode.SYN|decode.ACK) == decode.SYN {
+		if c.synSeen && seg.Src == c.key.A && seg.Seq == c.isn {
+			// SYN 重传。
+			c.last = ts
+			a.lru.touch(c)
+			return
+		}
+		// 同一四元组上的新连接。
+		a.flushHoles(c, ts)
+		a.close(c, CloseReplaced, ts)
+		c = nil
+	}
 	if c == nil {
 		c = a.create(seg, ts)
 		if c == nil {
@@ -142,6 +154,7 @@ func (a *Assembler) create(seg *decode.Segment, ts time.Time) *conn {
 	case seg.Flags&(decode.SYN|decode.ACK) == decode.SYN:
 		info.Key = Key{seg.Src, seg.Dst}
 		info.RolesKnown = true
+		c.synSeen, c.isn = true, seg.Seq
 		c.d[0].start(seg.Seq + 1)
 	case seg.Flags&(decode.SYN|decode.ACK) == decode.SYN|decode.ACK:
 		// 没看到 SYN：SYN-ACK 的目的方是客户端。
