@@ -13,6 +13,8 @@ type Assembler struct {
 	conns map[Key]*conn // 两个方向的四元组都指向同一条连接
 	lru   lru
 
+	buffered int64 // 所有连接乱序缓存的字节数
+
 	scanned time.Time // 上次扫描全部连接的时间
 }
 
@@ -58,6 +60,7 @@ func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 	off := d.offset(seg.Seq)
 	if off > d.next {
 		a.buffer(d, off, seg.Payload, seg.Ack, hasAck, ts)
+		a.limitReorder(c, s, ts)
 		return
 	}
 	a.deliver(c, s, off, seg.Payload, peerAck, ts)

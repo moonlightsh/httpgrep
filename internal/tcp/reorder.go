@@ -35,8 +35,19 @@ func (a *Assembler) buffer(d *dir, off int64, b []byte, ack uint32, hasAck bool,
 		d.buf = append(d.buf, chunk{})
 		copy(d.buf[i+1:], d.buf[i:])
 		d.buf[i] = k
+		d.bufLen += int64(len(k.data))
+		a.buffered += int64(len(k.data))
 		i++
 		cur = stop
+	}
+}
+
+// limitReorder 在 side 方向乱序缓存超过 MaxReorderBytes 时，
+// 从最前面的空洞起逐个认定缺口，直到不超限。
+func (a *Assembler) limitReorder(c *conn, s Side, ts time.Time) {
+	d := &c.d[s]
+	for d.bufLen > a.cfg.MaxReorderBytes && len(d.buf) > 0 {
+		a.skipTo(c, s, d.buf[0].off, ts)
 	}
 }
 
@@ -47,6 +58,8 @@ func (a *Assembler) drain(c *conn, s Side, ts time.Time) {
 		k := d.buf[0]
 		d.buf[0] = chunk{}
 		d.buf = d.buf[1:]
+		d.bufLen -= int64(len(k.data))
+		a.buffered -= int64(len(k.data))
 		if k.end() <= d.next {
 			continue
 		}

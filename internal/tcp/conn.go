@@ -11,6 +11,7 @@ type dir struct {
 	base    uint32 // 偏移 0 对应的序号
 	next    int64  // 下一个期望交付的偏移
 	buf     []chunk
+	bufLen  int64 // buf 里的字节数
 }
 
 // start 以 seq 作为偏移 0 的序号。
