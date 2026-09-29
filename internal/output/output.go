@@ -59,10 +59,11 @@ type Block struct {
 
 // Options 配置 Writer 的行为。
 type Options struct {
-	TTY       bool
-	Location  *time.Location             // 为 nil 时用 time.Local
-	Highlight func(line []byte) [][2]int // 只在 TTY 模式下使用，可以为 nil。
-	// Highlight 返回的区间应按起点排序、互不重叠；否则重叠部分并入前一个区间，乱序区间跳过，不会 panic
+	TTY      bool
+	Location *time.Location // 为 nil 时用 time.Local
+	// Highlight 只在 TTY 模式下使用，可以为 nil。返回的区间应按起点排序、互不重叠；
+	// 否则重叠部分并入前一个区间，乱序区间跳过，不会 panic。
+	Highlight func(line []byte) [][2]int
 }
 
 // Writer 把 Block 渲染后写给底层 writer。

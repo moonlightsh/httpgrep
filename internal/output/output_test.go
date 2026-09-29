@@ -549,6 +549,26 @@ func TestWriteNonTTYZeroAlloc(t *testing.T) {
 	}
 }
 
+func TestWriteTTYZeroAlloc(t *testing.T) {
+	// TTY 模式（含转义、高亮、颜色码）在缓冲区就位后也应零分配。
+	ranges := [][2]int{{0, 3}, {10, 14}}
+	hl := func([]byte) [][2]int { return ranges }
+	w := output.NewWriter(io.Discard, output.Options{Location: time.UTC, TTY: true, Highlight: hl})
+	blk := zeroAllocBlock()
+	blk.Messages[0].Pieces = append([]output.Piece{{Data: []byte("hit \x01\xc2\x85 more hit\r\n")}}, blk.Messages[0].Pieces...)
+	if err := w.Write(blk); err != nil { // 预热
+		t.Fatal(err)
+	}
+	allocs := testing.AllocsPerRun(100, func() {
+		if err := w.Write(blk); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if allocs != 0 {
+		t.Errorf("TTY 渲染应零分配，实际 %g 次/块", allocs)
+	}
+}
+
 func BenchmarkWriteNonTTY(b *testing.B) {
 	w := output.NewWriter(io.Discard, output.Options{Location: time.UTC})
 	blk := benchBlock()
@@ -624,8 +644,8 @@ func TestTTYHighlightOnRawBytes(t *testing.T) {
 	b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
 		Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte("xx a\x01b yy\n")}}}}}
 	got := string(render(t, output.Options{Location: tz, TTY: true, Highlight: hl}, b))
-	// 期望：命中区间 [3,6) 对应原始 "a\x01b"，转义后 a\x01b 变成 a\x01b（4 字节
-	// 0x01 转成 \x01 4 个字符），红色包住转义后的这一段。
+	// 期望：命中区间 [3,6) 对应原始 3 字节 a 0x01 b，转义后是 6 个字符 `a\x01b`，
+	// 红色包住转义后的这一段。
 	want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
 		"xx \x1b[01;31ma\\x01b\x1b[m yy\n"
 	if got != want {
@@ -633,18 +653,23 @@ func TestTTYHighlightOnRawBytes(t *testing.T) {
 	}
 }
 
-// BenchmarkWriteTTYManyHits 验证多命中行的渲染是线性的：一行 80 KB、每 4 字节一个命中。
+// BenchmarkWriteTTYManyHits 验证多命中长行的渲染是线性的：单行 80 KB、每 4 字节一个命中，
+// 共 2 万个区间。区间在闭包外预先算好，每次返回同一个切片，实现侧应为 0 allocs。
 func BenchmarkWriteTTYManyHits(b *testing.B) {
-	line := bytes.Repeat([]byte("aaaa\n"), 16384) // 80 KB，16384 行
-	hl := func(line []byte) [][2]int {
-		return [][2]int{{0, len(line)}}
+	const hits = 20000
+	line := append(bytes.Repeat([]byte("aaaa"), hits), '\n') // 80 KB 单行
+	ranges := make([][2]int, hits)
+	for i := range ranges {
+		ranges[i] = [2]int{i * 4, i*4 + 2}
 	}
+	hl := func([]byte) [][2]int { return ranges }
 	w := output.NewWriter(io.Discard, output.Options{Location: time.UTC, TTY: true, Highlight: hl})
 	blk := &output.Block{
 		Time: time.Unix(0, 0), Client: mustAddr("127.0.0.1:1"), Server: mustAddr("127.0.0.1:2"),
 		Messages: []output.Message{{Pieces: []output.Piece{{Kind: output.PieceBody, Data: line}}}},
 	}
 	b.SetBytes(int64(len(line)))
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if err := w.Write(blk); err != nil {
