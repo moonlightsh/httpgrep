@@ -315,12 +315,8 @@ func TestFastPathNoCrossLine(t *testing.T) {
 
 // 关键词含 \r 时不走快速路径（按行处理）。
 func TestPatternWithCRSlowPath(t *testing.T) {
-	m, _ := match.Compile([]string{"a\r\nb"}, false)
-	s := m.NewScanner()
-	s.Write([]byte("xxa\r"))
-	s.Write([]byte("\nb\n"))
-	if s.Matched() {
-		t.Fatal("keyword containing \\r\\n must not match (CR not part of line)")
+	if _, err := match.Compile([]string{"a\r\nb"}, false); err == nil {
+		t.Fatal("pattern containing \\n should be rejected by Compile")
 	}
 	// 关键词含 \r 但确实在某行内容里出现：\r 在行中间时算行内容。
 	m2, _ := match.Compile([]string{"a\rb"}, false)
@@ -599,5 +595,28 @@ func TestSlowPathNoUnboundedBuffer(t *testing.T) {
 	// 阈值取 64 MiB 区分两者。
 	if grew := int64(after.TotalAlloc) - int64(before.TotalAlloc); grew > 64*miB {
 		t.Fatalf("\\r-pattern must not buffer past 8 MiB, allocated %d bytes", grew)
+	}
+}
+
+// 关键词含 \n 时 Compile 报错（契约要求调用方已按换行拆好）。
+func TestCompileRejectsNewlinePattern(t *testing.T) {
+	for _, regex := range []bool{false, true} {
+		_, err := match.Compile([]string{"a\nb"}, regex)
+		if err == nil {
+			t.Fatalf("regex=%v: expected error for pattern with newline", regex)
+		}
+		if !strings.Contains(err.Error(), "a\nb") && !strings.Contains(err.Error(), `a\nb`) {
+			t.Fatalf("error should contain the pattern: %v", err)
+		}
+	}
+}
+
+// Highlight 不去掉行尾 \r：关键词 "c\r" 命中 "abc\r" 的 [2,4)。
+func TestHighlightKeepsCRInLine(t *testing.T) {
+	m, _ := match.Compile([]string{"c\r"}, false)
+	got := m.Highlight([]byte("abc\r"))
+	want := [][2]int{{2, 4}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
 	}
 }

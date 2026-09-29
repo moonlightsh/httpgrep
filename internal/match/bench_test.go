@@ -18,7 +18,9 @@ func genJSON(n int) []byte {
 }
 
 // 4 KiB 分块写入不含命中的 JSON 文本，目标 1 GB/s 以上。
-// 逐块扫一次即可（跳过续接的行首边界）
+// 4 KiB 分块写入不含命中的 JSON 文本。
+// 每轮都在同一个 Scanner 上接着写：块边界候选检查每轮都会执行，
+// 覆盖跨块边界的拼接路径。
 func BenchmarkScanFast4K(b *testing.B) {
 	m, err := match.Compile([]string{"490419C6", "miss-me"}, false)
 	if err != nil {

@@ -4,7 +4,7 @@ package match
 import (
 	"bytes"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -24,6 +24,11 @@ type Matcher struct {
 // Compile 编译关键词。patterns 已经按换行拆好；regex 为真时按 RE2 解释。
 // 多个正则合并成 (?:a)|(?:b) 编译；正则不合法时返回的错误里包含该关键词。
 func Compile(patterns []string, regex bool) (*Matcher, error) {
+	for _, p := range patterns {
+		if strings.ContainsRune(p, '\n') {
+			return nil, &CompileError{Pattern: p, Err: "pattern contains newline"}
+		}
+	}
 	m := &Matcher{}
 	if regex {
 		var parts []string
@@ -39,9 +44,10 @@ func Compile(patterns []string, regex bool) (*Matcher, error) {
 		}
 		if len(parts) > 0 {
 			// 逐行匹配：每行单独传入，^、$ 自然锚定行首行尾。
-			re, err := regexp.Compile(strings.Join(parts, "|"))
+			joined := strings.Join(parts, "|")
+			re, err := regexp.Compile(joined)
 			if err != nil {
-				return nil, &CompileError{Pattern: parts[0], Err: err.Error()}
+				return nil, &CompileError{Pattern: joined, Err: err.Error()}
 			}
 			m.re = re
 		}
@@ -101,7 +107,7 @@ func (m *Matcher) Highlight(line []byte) [][2]int {
 			i += j + 1
 		}
 	}
-	sort.Slice(ranges, func(a, b int) bool { return ranges[a][0] < ranges[b][0] })
+	slices.SortFunc(ranges, func(a, b [2]int) int { return a[0] - b[0] })
 	var out [][2]int
 	for _, r := range ranges {
 		if n := len(out); n > 0 && r[0] < out[n-1][1] {
