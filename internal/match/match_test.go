@@ -277,3 +277,82 @@ func TestRegexLineBufferCap(t *testing.T) {
 		t.Fatal("keyword past the 8 MiB cap must not match")
 	}
 }
+
+// 快速路径：关键词跨任意切分点写入都能命中（穷举切分位置）。
+func TestFastPathSplitExhaustive(t *testing.T) {
+	line := []byte("xx490419C6117A0087747906yy")
+	pats := []string{"490419C6", "11A", "zz"}
+	for split := 0; split <= len(line); split++ {
+		m, _ := match.Compile(pats, false)
+		s := m.NewScanner()
+		s.Write(line[:split])
+		s.Write(line[split:])
+		if !s.Matched() {
+			t.Fatalf("split at %d: fast path missed match", split)
+		}
+	}
+	// 不含命中时绝不误报：跨块边界拼接不出关键词。
+	miss := []byte("4904xx19C6")
+	for split := 0; split <= len(miss); split++ {
+		m, _ := match.Compile([]string{"490419C6"}, false)
+		s := m.NewScanner()
+		s.Write(miss[:split])
+		s.Write(miss[split:])
+		s.Break()
+		if s.Matched() {
+			t.Fatalf("split at %d: fast path false positive", split)
+		}
+	}
+}
+
+// 快速路径不跨 Break：跨 Break 的候选字节要作废。
+func TestFastPathBreakInvalidatesTail(t *testing.T) {
+	m, _ := match.Compile([]string{"490419C6"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("xx4904"))
+	s.Break()
+	s.Write([]byte("19C6yy\n"))
+	if s.Matched() {
+		t.Fatal("fast path must not match across Break")
+	}
+}
+
+// 快速路径不跨行：行内不完整的关键词不命中。
+func TestFastPathNoCrossLine(t *testing.T) {
+	m, _ := match.Compile([]string{"490419C6"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("4904xx\r\n19C6\n"))
+	if s.Matched() {
+		t.Fatal("fast path must not match across lines")
+	}
+}
+
+// 关键词含 \r 时不走快速路径（按行处理）。
+func TestPatternWithCRSlowPath(t *testing.T) {
+	m, _ := match.Compile([]string{"a\r\nb"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("xxa\r"))
+	s.Write([]byte("\nb\n"))
+	if s.Matched() {
+		t.Fatal("keyword containing \\r\\n must not match (CR not part of line)")
+	}
+	// 关键词含 \r 但确实在某行内容里出现：\r 在行中间时算行内容。
+	m2, _ := match.Compile([]string{"a\rb"}, false)
+	s2 := m2.NewScanner()
+	s2.Write([]byte("xxa\r"))
+	s2.Write([]byte("byy\n"))
+	if !s2.Matched() {
+		t.Fatal("mid-line \\r is part of line content")
+	}
+}
+
+// 空关键词不走快速路径，空行也命中。
+func TestEmptyPatternFastPathDisabled(t *testing.T) {
+	m, _ := match.Compile([]string{"", "zz"}, false)
+	s := m.NewScanner()
+	s.Write([]byte("whatever"))
+	s.Break()
+	if !s.Matched() {
+		t.Fatal("empty pattern should match any line")
+	}
+}
