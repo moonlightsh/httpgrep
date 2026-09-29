@@ -704,6 +704,17 @@ func TestUpgradeHeldBytesOnClose(t *testing.T) {
 				"GET /TOKEN HTTP/1.1\r\n\r\n",
 		},
 		{
+			// 回放出的请求又是 Upgrade 请求，重新开始缓存：关闭前要一直回放到不再缓存。
+			name: "nested upgrade, finish before decision",
+			build: func(c *pcapgen.Conn) {
+				c.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+				c.ClientSend(ms(1), []byte("GET /chat2 HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"+
+					"GET /TOKEN HTTP/1.1\r\n\r\n"))
+			},
+			want: "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 no-response(eof)\n" +
+				"GET /TOKEN HTTP/1.1\r\n\r\n",
+		},
+		{
 			// RST 时还没有决定：同样先回放，再以 no-response(closed) 结束。
 			name: "RST before decision",
 			build: func(c *pcapgen.Conn) {
@@ -820,6 +831,31 @@ func TestUpgradeAfterServerFin(t *testing.T) {
 	})
 	check(t, out, "2026-09-28 15:30:12.347 10.0.0.1:52814 -> 10.0.0.2:80 no-response(closed)\n"+
 		"GET /TOKEN-A HTTP/1.1\r\n\r\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.351 10.0.0.1:52815 -> 10.0.0.2:80 complete 1.0ms\n"+
+		"GET /TOKEN-B HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 204 No Content\r\n\r\n")
+}
+
+// 客户端 FIN 时 Upgrade 请求还在等决定，缓存里的请求没发完：400 之后回放完，
+// 补上推迟的 FIN，这个请求立即以不完整结束，收到自己的响应时就输出，不等到输入结束。
+func TestUpgradeClientFinClosesReplayedRequest(t *testing.T) {
+	out, _ := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		a := pcapgen.NewConn(w, cli1, srv)
+		a.Handshake(ms(-1))
+		a.ClientSend(ms(0), []byte("GET /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n"))
+		a.ClientSend(ms(1), []byte("POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc"))
+		a.ClientFin(ms(2))
+		a.ServerSend(ms(3), []byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"))
+		a.ServerSend(ms(4), []byte("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"))
+		b := pcapgen.NewConn(w, cli2, srv)
+		b.Handshake(ms(5))
+		b.ClientSend(ms(6), []byte("GET /TOKEN-B HTTP/1.1\r\n\r\n"))
+		b.ServerSend(ms(7), []byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	})
+	check(t, out, "2026-09-28 15:30:12.346 10.0.0.1:52814 -> 10.0.0.2:80 incomplete 3.0ms\n"+
+		"POST /TOKEN HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc\n"+
+		"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n"+
 		"--\n"+
 		"2026-09-28 15:30:12.351 10.0.0.1:52815 -> 10.0.0.2:80 complete 1.0ms\n"+
 		"GET /TOKEN-B HTTP/1.1\r\n\r\n"+
