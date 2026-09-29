@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime"
 	"runtime/debug"
 	"syscall"
 	"time"
@@ -53,6 +54,10 @@ func httpgrep(args []string, stdin, stdout *os.File, stderr io.Writer) int {
 	}
 	pipe := !fi.Mode().IsRegular()
 	tty := isTerminal(stdout)
+	// 默认只用 1 个核，--cpus N 时用 N 个（run 按连接分给 N 个分片）。
+	runtime.GOMAXPROCS(opts.CPUs)
+	// Go 运行时的软内存上限是 --max-memory 的 1.5 倍（设计文档第 8 节）。
+	debug.SetMemoryLimit(opts.MaxMemory / 2 * 3)
 	stop := watchSignals()
 	start := time.Now()
 	matched, st, err := run.Run(run.Config{Input: f, Pipe: pipe, Stop: stop, Stdout: stdout, Stderr: stderr, TTY: tty, Opts: opts})

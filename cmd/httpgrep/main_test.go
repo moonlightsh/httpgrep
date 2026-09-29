@@ -700,3 +700,64 @@ func TestTerminalOutputIsEscaped(t *testing.T) {
 		t.Errorf("terminal output has raw \\x01: %q", got)
 	}
 }
+
+// bigCapture 是一条连接上 400 个交互的抓包，每个响应 4000 字节 body，共约 1.7 MB；
+// 只有第 7 个含 row-007。
+func bigCapture(t testing.TB) []byte {
+	return capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		for i := range 400 {
+			body := fmt.Sprintf("row-%03d:", i) + strings.Repeat("a", 3992)
+			c.ClientSend(ms(float64(i*10)), fmt.Appendf(nil, "GET /%d HTTP/1.1\r\n\r\n", i))
+			c.ServerSend(ms(float64(i*10+1)), []byte("HTTP/1.1 200 OK\r\nContent-Length: 4000\r\n\r\n"+body))
+		}
+	})
+}
+
+// gcLine 匹配 GODEBUG=gctrace=1 每次 GC 写到 stderr 的一行，取出 P 的个数（GOMAXPROCS）。
+var gcLine = regexp.MustCompile(`(?m)^gc \d+ @.* (\d+) P( \(forced\))?$`)
+
+// 运行时参数：GOMAXPROCS 取 --cpus（默认 1），软内存上限按 --max-memory 设置（1.5 倍）。
+// 从外部观察：GOGC=off 时只有内存上限会触发 GC，gctrace 的每一行写明 P 的个数。
+// --max-memory 1M 时上限是 1.5 MiB，处理约 1.7 MB 的输入必然触发 GC；
+// 默认 256M 时上限是 384 MiB，这么小的输入不会触发 GC。
+// 环境变量 GOMAXPROCS=2 用来确认 P 的个数来自 --cpus，而不是环境或 CPU 核数。
+func TestRuntimeLimits(t *testing.T) {
+	in := writeFile(t, bigCapture(t))
+	for _, tc := range []struct {
+		args []string
+		p    string // 空串表示不应该发生 GC
+	}{
+		{[]string{"--max-memory", "1M", "--max-message", "64K"}, "1"},
+		{[]string{"--max-memory", "1M", "--max-message", "64K", "--cpus", "3"}, "3"},
+		{nil, ""},
+	} {
+		t.Run(fmt.Sprint(tc.args), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			cmd, stdout, stderr := command(ctx, nil, append(tc.args, "row-007:", in)...)
+			cmd.Env = append(cmd.Env, "GOGC=off", "GODEBUG=gctrace=1", "GOMAXPROCS=2")
+			if code := exitCode(t, cmd.Run()); code != 0 {
+				t.Fatalf("code %d, stderr %s", code, stderr)
+			}
+			if !strings.Contains(stdout.String(), "row-007:") {
+				t.Fatalf("stdout %q", stdout)
+			}
+			ms := gcLine.FindAllStringSubmatch(stderr.String(), -1)
+			switch {
+			case tc.p == "" && len(ms) > 0:
+				t.Fatalf("GC with GOGC=off and a 384 MiB limit: %s", ms[0][0])
+			case tc.p == "":
+			case len(ms) == 0:
+				t.Fatalf("no GC with GOGC=off: memory limit not set; stderr:\n%s", stderr)
+			default:
+				for _, m := range ms {
+					if m[1] != tc.p {
+						t.Fatalf("GOMAXPROCS %s, want %s: %s", m[1], tc.p, m[0])
+					}
+				}
+			}
+		})
+	}
+}
