@@ -645,19 +645,21 @@ func TestNotTCP(t *testing.T) {
 	a, b := addr4(1, 1, 1, 1), addr4(2, 2, 2, 2)
 	var seg decode.Segment
 
-	// ARP 以太网帧
-	arp := ethernet(0x0806, make([]byte, 28))
-	if got := decode.Decode(pcap.LinkEthernet, arp, len(arp), &seg); got != decode.NotTCP {
-		t.Errorf("ARP Decode = %v, want NotTCP", got)
-	}
-	// UDP、ICMP（RAW IP）
-	for name, pkt := range map[string][]byte{
-		"udp":  udpPacket(a, b),
-		"icmp": icmpPacket(a, b),
+	// ARP 以太网帧、UDP、ICMP（RAW IP）
+	for _, tt := range []struct {
+		name  string
+		link  pcap.LinkType
+		frame []byte
+	}{
+		{"ethernet/arp", pcap.LinkEthernet, ethernet(0x0806, make([]byte, 28))},
+		{"raw/udp", pcap.LinkRaw, udpPacket(a, b)},
+		{"raw/icmp", pcap.LinkRaw, icmpPacket(a, b)},
 	} {
-		if got := decode.Decode(pcap.LinkRaw, pkt, len(pkt), &seg); got != decode.NotTCP {
-			t.Errorf("%s Decode = %v, want NotTCP", name, got)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			if got := decode.Decode(tt.link, tt.frame, len(tt.frame), &seg); got != decode.NotTCP {
+				t.Errorf("Decode = %v, want NotTCP", got)
+			}
+		})
 	}
 }
 
@@ -769,6 +771,8 @@ func BenchmarkDecodeEthernet(b *testing.B) {
 	ip := ipv4Packet(addr4(10, 1, 2, 3), addr4(10, 1, 2, 4), 0, nil, tcp)
 	frame := ethernet(0x0800, ip)
 	var seg decode.Segment
+	b.SetBytes(int64(len(frame)))
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		decode.Decode(pcap.LinkEthernet, frame, len(frame), &seg)
@@ -778,6 +782,8 @@ func BenchmarkDecodeEthernet(b *testing.B) {
 func BenchmarkDecodeIPv6(b *testing.B) {
 	ip6 := ipv6Packet(tcpSegment(1234, 80, 1, 2, 0x18, nil, make([]byte, 1024)))
 	var seg decode.Segment
+	b.SetBytes(int64(len(ip6)))
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		decode.Decode(pcap.LinkRaw, ip6, len(ip6), &seg)

@@ -19,6 +19,9 @@ func Supported(link pcap.LinkType) bool {
 
 // Decode 把 data（抓到的字节）按链路层类型 link 解码到 seg。
 // origLen 是线上原始长度。seg.Payload 引用 data，不拷贝。
+// link 不在 Supported 支持之列时返回 NotTCP。
+// IP 版本以首字节高 4 位为权威：链路层协议号（EtherType、BSD 协议族）
+// 只用来区分“是否 IP”，不校验它与版本位一致。
 func Decode(link pcap.LinkType, data []byte, origLen int, seg *Segment) Result {
 	ip, res := stripLink(link, data)
 	if res != OK {
@@ -35,7 +38,7 @@ func stripLink(link pcap.LinkType, data []byte) ([]byte, Result) {
 		return stripEthernet(data)
 	case pcap.LinkNull, pcap.LinkLoop:
 		return stripNullLoop(link, data)
-	case 12, 14, pcap.LinkRaw:
+	case 12, 14, pcap.LinkRaw: // 12/14 是旧写法的 RAW IP
 		return data, OK
 	case pcap.LinkLinuxSLL:
 		if len(data) < 16 {
@@ -66,12 +69,25 @@ const (
 	ethTypeVLAN = 0x8100
 	ethTypeQinQ = 0x88A8
 	afInet      = 2  // BSD 协议族：IPv4
-	afInet6     = 24 // BSD 协议族：IPv6；28/30 是部分系统的 IPv6 取值
+	afInet6     = 24 // BSD 协议族：IPv6
+	afInet6Alt1 = 28 // 部分系统（如 Haiku/旧 Darwin）的 IPv6 取值
+	afInet6Alt2 = 30 // 部分系统的 IPv6 取值
+)
+
+// IPv6 扩展头类型取值。
+const (
+	extHopByHop  = 0  // 逐跳选项
+	extRouting   = 43 // 路由
+	extFragment  = 44 // 分片
+	extDestOpts  = 60 // 目的选项
+	ipv6HeaderLn = 40 // IPv6 基本头长度
 )
 
 // stripEthernet 去掉以太网头，跳过 VLAN（802.1Q）和 QinQ 标签。
+const ethHeaderLen = 14
+
 func stripEthernet(data []byte) ([]byte, Result) {
-	if len(data) < 14 {
+	if len(data) < ethHeaderLen {
 		return nil, Malformed
 	}
 	off := 12 // EtherType 在帧头里的偏移
@@ -107,7 +123,7 @@ func stripNullLoop(link pcap.LinkType, data []byte) ([]byte, Result) {
 }
 
 func isIPFamily(fam uint32) bool {
-	return fam == afInet || fam == afInet6 || fam == 28 || fam == 30
+	return fam == afInet || fam == afInet6 || fam == afInet6Alt1 || fam == afInet6Alt2
 }
 
 // decodeIP 解码 IP 包，按首字节高 4 位区分 IPv4 和 IPv6。
@@ -157,12 +173,12 @@ func decodeIPv4(ip []byte, origLen int, seg *Segment) Result {
 
 // decodeIPv6 解码 IPv6 包，跳过逐跳选项、路由、目的选项扩展头。
 func decodeIPv6(ip []byte, origLen int, seg *Segment) Result {
-	if len(ip) < 40 {
+	if len(ip) < ipv6HeaderLn {
 		return Malformed
 	}
-	hl := 40
+	hl := ipv6HeaderLn
 	next := ip[6]
-	for next == 0 || next == 43 || next == 60 {
+	for next == extHopByHop || next == extRouting || next == extDestOpts {
 		if len(ip) < hl+2 {
 			return Malformed
 		}
@@ -172,7 +188,7 @@ func decodeIPv6(ip []byte, origLen int, seg *Segment) Result {
 			return Malformed
 		}
 	}
-	if next == 44 {
+	if next == extFragment {
 		return Fragment // 分片头，不重组
 	}
 	if next != protoTCP {
@@ -180,7 +196,7 @@ func decodeIPv6(ip []byte, origLen int, seg *Segment) Result {
 	}
 	plen := int(binary.BigEndian.Uint16(ip[4:6]))
 	// Payload Length 字段已包含扩展头：报文总长 = 40 + plen
-	total := 40 + plen
+	total := ipv6HeaderLn + plen
 	if plen == 0 {
 		// 网卡 TSO 抓包：负载长度为 0，用线上长度推算
 		total = origLen
