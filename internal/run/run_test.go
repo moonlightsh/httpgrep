@@ -298,6 +298,69 @@ func TestRunShardMemoryLimit(t *testing.T) {
 	}
 }
 
+// 内存告警由所有分片共用、按抓包时钟统一限频：同一批包里各分片的丢弃合成一行；
+// 距上一次告警不到 10 秒的丢弃累计到下一次，满 10 秒的一批报一次，输入结束时补报剩下的。
+// 输入分四段写进管道，每段各成一批：0 秒丢 3 个（告警），5 秒丢 3 个（累计），
+// 12 秒丢 2 个（告警 5 个），15 秒丢 3 个（输入结束时告警）。每个交互缓存约 70 KB，
+// 单核 64K、四核每个分片 16K 的上限都放不下，所以每个都被丢弃；
+// 每段的连接落在不止一个分片上（--cpus 4 时分片各自告警就会多出几行）。
+func TestRunShardWarnsRateLimited(t *testing.T) {
+	var capture bytes.Buffer
+	w := pcapgen.NewWriter(&capture, pcap.LinkEthernet)
+	port := uint16(41000)
+	var cuts []int // 每段结束时的字节偏移
+	for _, ph := range []struct {
+		at    float64 // 毫秒
+		conns int
+	}{{0, 3}, {5000, 3}, {12000, 2}, {15000, 3}} {
+		for k := range ph.conns {
+			c := pcapgen.NewConn(w, netip.AddrPortFrom(cli1.Addr(), port), srv)
+			port++
+			at := ph.at + float64(k*10)
+			c.Handshake(ms(at))
+			c.ClientSend(ms(at+1), []byte("POST /up HTTP/1.1\r\nX: HIT\r\nContent-Length: 200000\r\n\r\n"))
+			c.ClientSend(ms(at+2), bytes.Repeat([]byte("b"), 70000))
+		}
+		cuts = append(cuts, capture.Len())
+	}
+	if err := w.Err(); err != nil {
+		t.Fatal(err)
+	}
+	in := capture.Bytes()
+	for i, c := range cuts {
+		if i > 0 && c-cuts[i-1] > 256<<10 || c > 256<<10 && i == 0 { // 一批是 256 KiB
+			t.Fatalf("phase %d too large for one batch: %v", i, cuts)
+		}
+	}
+	const want = "httpgrep: dropped 3 in-flight exchanges (3 matched) to stay under --max-memory\n" +
+		"httpgrep: dropped 5 in-flight exchanges (5 matched) to stay under --max-memory\n" +
+		"httpgrep: dropped 3 in-flight exchanges (3 matched) to stay under --max-memory\n"
+	for _, cpus := range []string{"1", "4"} {
+		t.Run("cpus="+cpus, func(t *testing.T) {
+			pr, pw := io.Pipe()
+			defer pw.Close()
+			var out, errOut bytes.Buffer
+			ch := goRun(run.Config{Input: pr, Stdout: &out, Stderr: &errOut,
+				Opts: opts(t, "--cpus", cpus, "--max-memory", "64K", "--max-message", "64K", "HIT")})
+			prev := 0
+			for _, c := range cuts {
+				// io.Pipe 的一次 Write 由读端一次读完；读下一段之前，读取协程先交出已经读到的包，
+				// 所以每段各成一批。
+				if _, err := pw.Write(in[prev:c]); err != nil {
+					t.Fatal(err)
+				}
+				prev = c
+			}
+			pw.Close()
+			r := wait(t, ch, 5*time.Second)
+			if r.err != nil || r.matched || r.st.Evicted != 11 || r.st.EvictedMatched != 11 {
+				t.Fatalf("matched %v err %v stats %+v", r.matched, r.err, r.st)
+			}
+			check(t, errOut.String(), want)
+		})
+	}
+}
+
 // 200 个命中的交互交错在 50 条连接上：--cpus 1 和 --cpus 4 输出的块集合相同（排序后比较），
 // 合并后的统计也相同。
 func TestRunShardsSameBlocks(t *testing.T) {

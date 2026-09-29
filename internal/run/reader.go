@@ -41,6 +41,9 @@ type batch struct {
 	work [][]item // 按分片分好的段，只在多分片时使用
 	// pending 是还在处理这一批的分片数，减到 0 时批次放回空闲池。
 	pending atomic.Int32
+	// dropped、droppedMatched 是各分片处理这一批时因内存上限丢弃的交互数之和和其中已命中的，
+	// 只在多分片时使用（见 multi.release）。
+	dropped, droppedMatched atomic.Int64
 }
 
 // reset 清空批次以便复用，保留已分配的容量。
@@ -48,6 +51,8 @@ func (b *batch) reset() {
 	b.buf = b.buf[:0]
 	b.recs = b.recs[:0]
 	b.err = nil
+	b.dropped.Store(0)
+	b.droppedMatched.Store(0)
 	for i := range b.work {
 		clear(b.work[i]) // 不留对旧数据的引用
 		b.work[i] = b.work[i][:0]

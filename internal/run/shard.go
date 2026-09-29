@@ -14,11 +14,13 @@ import (
 type dispatcher interface {
 	// segment 处理批次 b 里的一个段；seg 只在调用期间有效。
 	segment(b *batch, seg *decode.Segment, ts time.Time)
-	// flush 在一批包处理完后调用：把时钟推进到 now，然后释放批次。
+	// flush 在一批包处理完后调用：把时钟推进到 now，把这批包里因内存上限丢弃的交互数
+	// 报给 sink（各分片的合成一次），然后释放批次。
 	flush(b *batch, now time.Time)
-	// advance 在没有新包时推进时钟。
+	// advance 在没有新包时推进时钟，丢弃数照样报给 sink。
 	advance(now time.Time)
-	// finish 结束输入并等所有分片停下，返回合并后的引擎统计。
+	// finish 结束输入并等所有分片停下，返回合并后的引擎统计。丢弃数报给 sink，
+	// 补报剩下的累计数由调用方（sink.flushWarn）负责。
 	finish(now time.Time) engine.Stats
 	// abort 不结束在途交互，直接停下所有分片，返回合并后的引擎统计。
 	abort() engine.Stats
@@ -28,21 +30,33 @@ type dispatcher interface {
 type single struct {
 	e    *engine.Engine
 	free chan<- *batch
+	out  *sink
+	seen seen
 }
 
 func (s *single) segment(_ *batch, seg *decode.Segment, ts time.Time) { s.e.Segment(seg, ts) }
 
 func (s *single) flush(b *batch, now time.Time) {
-	s.e.Advance(now)
+	s.advance(now)
 	b.reset()
 	s.free <- b
 }
 
-func (s *single) advance(now time.Time) { s.e.Advance(now) }
+func (s *single) advance(now time.Time) {
+	s.e.Advance(now)
+	s.report(now)
+}
 
 func (s *single) finish(now time.Time) engine.Stats {
 	s.e.Finish(now)
+	s.report(now)
 	return s.e.Stats()
+}
+
+// report 把还没报告过的丢弃数报给 sink。
+func (s *single) report(now time.Time) {
+	n, m := s.seen.delta(s.e.Stats())
+	s.out.drop(n, m, now)
 }
 
 func (s *single) abort() engine.Stats { return s.e.Stats() }
@@ -51,18 +65,21 @@ func (s *single) abort() engine.Stats { return s.e.Stats() }
 //
 // 输出顺序：同一分片内按交互结束的先后排列；不同分片的块按各分片写出的先后交错，
 // 同一批包里在不同分片结束的交互，先后不保证与单核时一致。
-// 内存告警由各分片的引擎各自限频、各自计数，--cpus N 时最多有 N 路告警。
+// 内存告警：各分片处理完一批包后把丢弃数加到批次上，最后一个处理完的分片把合计报给 sink，
+// 由 sink 统一限频，--cpus N 时也只有一路告警。
 type multi struct {
 	shards []*shard
 	free   chan<- *batch
+	out    *sink
 	wg     sync.WaitGroup
 }
 
 // shard 是一个分片。
 type shard struct {
-	idx int
-	e   *engine.Engine
-	in  chan work
+	idx  int
+	e    *engine.Engine
+	in   chan work
+	seen seen // 分片协程独占
 }
 
 // work 是交给分片的一项工作：先处理批次 b 里分给它的段（b 可以为 nil），
@@ -74,9 +91,9 @@ type work struct {
 }
 
 // newMulti 创建 n 个分片，内存上限平均分给各分片。
-func newMulti(n int, cfg engine.Config, free chan<- *batch) *multi {
+func newMulti(n int, cfg engine.Config, free chan<- *batch, out *sink) *multi {
 	cfg.MaxMemory /= int64(n)
-	m := &multi{free: free}
+	m := &multi{free: free, out: out}
 	for i := range n {
 		s := &shard{idx: i, e: engine.New(cfg), in: make(chan work, poolSize)}
 		m.shards = append(m.shards, s)
@@ -95,20 +112,29 @@ func (m *multi) run(s *shard) {
 			for i := range items {
 				s.e.Segment(&items[i].seg, items[i].ts)
 			}
-			m.release(w.b)
 		}
 		if w.fin {
 			s.e.Finish(w.now)
 		} else {
 			s.e.Advance(w.now)
 		}
+		n, k := s.seen.delta(s.e.Stats())
+		if w.b != nil {
+			w.b.dropped.Add(n)
+			w.b.droppedMatched.Add(k)
+			m.release(w.b, w.now)
+		} else {
+			m.out.drop(n, k, w.now)
+		}
 	}
 }
 
-// release 在一个分片处理完批次后调用，最后一个分片把批次放回空闲池。
+// release 在一个分片处理完批次（包括随后的 Advance）后调用，最后一个分片把各分片的丢弃数
+// 合计报给 sink，再把批次放回空闲池。
 // 放回时不会阻塞：批次总数等于 free 的容量（poolSize），空闲池总放得下所有批次。
-func (m *multi) release(b *batch) {
+func (m *multi) release(b *batch, now time.Time) {
 	if b.pending.Add(-1) == 0 {
+		m.out.drop(b.dropped.Load(), b.droppedMatched.Load(), now)
 		b.reset()
 		m.free <- b
 	}
