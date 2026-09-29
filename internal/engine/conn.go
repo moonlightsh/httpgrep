@@ -360,11 +360,15 @@ func (c *conn) closeQueue(why string, all bool) {
 	}
 }
 
-// timeout 在 at 结束超时的交互 x：没收到响应的标为 no-response(timeout)。
+// timeout 在 at 结束超时的交互 x：没收到响应的标为 no-response(timeout)，
+// 请求或响应没收完的标为不完整。
 func (c *conn) timeout(x *exchange, at time.Time) {
 	c.now = at
 	if !x.hasRes {
 		x.noResp = noRespTimeout
+	}
+	if !x.reqDone || x.hasRes && !x.resDone {
+		x.incomplete = true
 	}
 	c.finish(x)
 }
