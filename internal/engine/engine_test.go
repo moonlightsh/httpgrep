@@ -156,3 +156,25 @@ func TestContinueThenFinal(t *testing.T) {
 		t.Fatalf("stats: %+v", st)
 	}
 }
+
+// HEAD 请求的响应带 Content-Length: 1000 但没有 body；下一个交互照常解析。
+func TestHeadResponseHasNoBody(t *testing.T) {
+	out, st := replay(t, engine.Config{Matcher: matcher(t, "TOKEN")}, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("HEAD /a HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(1), []byte("HTTP/1.1 200 OK\r\nX-Id: TOKEN-1\r\nContent-Length: 1000\r\n\r\n"))
+		c.ClientSend(ms(10), []byte("GET /b HTTP/1.1\r\n\r\n"))
+		c.ServerSend(ms(12), []byte("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-2"))
+	})
+	check(t, out, "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 complete 1.0ms\n"+
+		"HEAD /a HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nX-Id: TOKEN-1\r\nContent-Length: 1000\r\n\r\n"+
+		"--\n"+
+		"2026-09-28 15:30:12.355 10.0.0.1:52814 -> 10.0.0.2:80 complete 2.0ms\n"+
+		"GET /b HTTP/1.1\r\n\r\n"+
+		"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nTOKEN-2\n")
+	if st.Complete != 2 {
+		t.Fatalf("stats: %+v", st)
+	}
+}
