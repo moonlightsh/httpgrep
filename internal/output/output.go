@@ -199,7 +199,6 @@ func (w *Writer) writeBinaryMessage(m *Message) {
 		}
 		w.buf = append(w.buf, ", "...)
 	}
-	w.buf = append(w.buf, ' ')
 	w.buf = appendSize(w.buf, m.BodySize)
 	if m.BodyMatched {
 		w.buf = append(w.buf, ", matched"...)
