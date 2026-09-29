@@ -168,3 +168,91 @@ func TestParseOptionForms(t *testing.T) {
 		})
 	}
 }
+
+// 第 5 条：大小解析。
+func TestParseSizes(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		{"100", 100},
+		{"512K", 524288},
+		{"512k", 524288},
+		{"1M", 1 << 20},
+		{"1m", 1 << 20},
+		{"2G", 2 << 30},
+	}
+	for _, c := range cases {
+		opts, err := cli.Parse([]string{"--max-memory=" + c.in, "--max-message=1", "kw"})
+		if err != nil {
+			t.Fatalf("--max-memory %s: %v", c.in, err)
+		}
+		if opts.MaxMemory != c.want {
+			t.Errorf("--max-memory %s = %d, want %d", c.in, opts.MaxMemory, c.want)
+		}
+	}
+	for _, bad := range []string{"0", "-5", "abc", "", "1Q", "1Kx"} {
+		_, err := cli.Parse([]string{"--max-memory=" + bad, "kw"})
+		if err == nil {
+			t.Errorf("--max-memory %q 应报错", bad)
+		}
+	}
+	// MaxMessage 大于 MaxMemory 时报错。
+	_, err := cli.Parse([]string{"--max-memory=1M", "--max-message=2M", "kw"})
+	if err == nil {
+		t.Error("max-message > max-memory 应报错")
+	}
+	// 负数形式会被当成选项串处理，必须报错而不是被当成文件。
+	_, err = cli.Parse([]string{"--max-memory", "-5", "kw"})
+	if err == nil {
+		t.Error("--max-memory -5 应报错")
+	}
+}
+
+// 第 6 条：时长与 CPU 数。
+func TestParseDurationAndCPUs(t *testing.T) {
+	opts, err := cli.Parse([]string{"--timeout", "2m", "--cpus", "8", "kw"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if opts.Timeout != 2*time.Minute {
+		t.Errorf("Timeout = %v, want 2m", opts.Timeout)
+	}
+	if opts.CPUs != 8 {
+		t.Errorf("CPUs = %d, want 8", opts.CPUs)
+	}
+	for _, bad := range []string{"0s", "-1s", "abc", "0"} {
+		_, err := cli.Parse([]string{"--timeout=" + bad, "kw"})
+		if err == nil {
+			t.Errorf("--timeout %q 应报错", bad)
+		}
+	}
+	for _, bad := range []string{"0", "-1", "x"} {
+		_, err := cli.Parse([]string{"--cpus=" + bad, "kw"})
+		if err == nil {
+			t.Errorf("--cpus %q 应报错", bad)
+		}
+	}
+}
+
+// 第 7 条：关键词里的换行拆成多个。
+func TestParseSplitLines(t *testing.T) {
+	opts, err := cli.Parse([]string{"-e", "a\nb"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(opts.Patterns) != 2 || opts.Patterns[0] != "a" || opts.Patterns[1] != "b" {
+		t.Errorf("Patterns = %v, want [a b]", opts.Patterns)
+	}
+	// 位置参数形式同样拆分；首尾空段也应产生。
+	opts, err = cli.Parse([]string{"x\ny\n", "f.pcap"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(opts.Patterns) != 3 || opts.Patterns[0] != "x" || opts.Patterns[1] != "y" || opts.Patterns[2] != "" {
+		t.Errorf("Patterns = %v, want [x y ]", opts.Patterns)
+	}
+	if opts.File != "f.pcap" {
+		t.Errorf("File = %q", opts.File)
+	}
+}
