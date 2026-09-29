@@ -92,7 +92,24 @@ func (w *Writer) Write(b *Block) error {
 
 func (w *Writer) writeMessage(m *Message) {
 	for i := range m.Pieces {
-		w.buf = append(w.buf, m.Pieces[i].Data...)
+		p := &m.Pieces[i]
+		switch p.Kind {
+		case PieceGap, PieceTruncated:
+			if len(w.buf) > 0 && w.buf[len(w.buf)-1] != '\n' {
+				w.buf = append(w.buf, '\n')
+			}
+			if p.Kind == PieceGap {
+				w.buf = append(w.buf, "[gap: "...)
+				w.buf = strconv.AppendInt(w.buf, p.N, 10)
+				w.buf = append(w.buf, " bytes missing]\n"...)
+			} else {
+				w.buf = append(w.buf, "[truncated: "...)
+				w.buf = strconv.AppendInt(w.buf, p.N, 10)
+				w.buf = append(w.buf, " bytes over --max-message]\n"...)
+			}
+		default:
+			w.buf = append(w.buf, p.Data...)
+		}
 	}
 	if n := len(w.buf); n > 0 && w.buf[n-1] != '\n' {
 		w.buf = append(w.buf, '\n')

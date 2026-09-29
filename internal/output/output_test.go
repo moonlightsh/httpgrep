@@ -169,3 +169,55 @@ func TestSeparatorAndNoTransform(t *testing.T) {
 		t.Errorf("-- 分隔与补换行不正确\n得到: %q\n期望: %q", got, want)
 	}
 }
+
+func TestMarkerLines(t *testing.T) {
+	tests := []struct {
+		name   string
+		pieces []output.Piece
+		want   string
+	}{
+		{
+			name: "gap 前面有换行",
+			pieces: []output.Piece{
+				{Kind: output.PieceBody, Data: []byte("abc\r\n")},
+				{Kind: output.PieceGap, N: 1460, InBody: true},
+			},
+			want: "abc\r\n[gap: 1460 bytes missing]\n",
+		},
+		{
+			name: "gap 前面没有换行，先补一个",
+			pieces: []output.Piece{
+				{Kind: output.PieceHead, Data: []byte("GET / HTTP/1.1\r\n\r")},
+				{Kind: output.PieceGap, N: 1460, InBody: false},
+			},
+			want: "GET / HTTP/1.1\r\n\r\n[gap: 1460 bytes missing]\n",
+		},
+		{
+			name: "truncated 前面没有换行",
+			pieces: []output.Piece{
+				{Kind: output.PieceBody, Data: []byte("xyz")},
+				{Kind: output.PieceTruncated, N: 1048576},
+			},
+			want: "xyz\n[truncated: 1048576 bytes over --max-message]\n",
+		},
+		{
+			name: "gap 在最开头",
+			pieces: []output.Piece{
+				{Kind: output.PieceGap, N: 1},
+				{Kind: output.PieceBody, Data: []byte("rest")},
+			},
+			want: "[gap: 1 bytes missing]\nrest\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := &output.Block{Time: time.Unix(0, 0), Client: mustAddr("1.1.1.1:1"), Server: mustAddr("2.2.2.2:2"),
+				Messages: []output.Message{{Pieces: tt.pieces}}}
+			got := string(render(t, output.Options{Location: tz}, b))
+			want := "1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 incomplete\n" + tt.want
+			if got != want {
+				t.Errorf("标记行不正确\n得到: %q\n期望: %q", got, want)
+			}
+		})
+	}
+}
