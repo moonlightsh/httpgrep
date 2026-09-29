@@ -32,6 +32,9 @@ type conn struct {
 	h    Handler
 	d    [2]dir
 	last time.Time // 最后一个包的时间
+
+	// 按最后一个包的时间排成双向链表，older 一侧是更早的连接。
+	older, newer *conn
 }
 
 // side 返回从 src 发出的段属于哪个方向。
@@ -40,4 +43,44 @@ func (c *conn) side(src netip.AddrPort) Side {
 		return 0
 	}
 	return 1
+}
+
+// lru 是按最后一个包的时间排序的连接链表，oldest 最早。
+type lru struct {
+	oldest, newest *conn
+}
+
+// pushNewest 把 c 放到链表末尾。c 不能已经在链表里。
+func (l *lru) pushNewest(c *conn) {
+	c.older, c.newer = l.newest, nil
+	if l.newest != nil {
+		l.newest.newer = c
+	} else {
+		l.oldest = c
+	}
+	l.newest = c
+}
+
+// remove 把 c 从链表里摘掉。
+func (l *lru) remove(c *conn) {
+	if c.older != nil {
+		c.older.newer = c.newer
+	} else {
+		l.oldest = c.newer
+	}
+	if c.newer != nil {
+		c.newer.older = c.older
+	} else {
+		l.newest = c.older
+	}
+	c.older, c.newer = nil, nil
+}
+
+// touch 把 c 移到链表末尾。
+func (l *lru) touch(c *conn) {
+	if l.newest == c {
+		return
+	}
+	l.remove(c)
+	l.pushNewest(c)
 }

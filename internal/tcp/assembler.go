@@ -11,7 +11,13 @@ type Assembler struct {
 	cfg   Config
 	open  func(ConnInfo) Handler
 	conns map[Key]*conn // 两个方向的四元组都指向同一条连接
+	lru   lru
+
+	scanned time.Time // 上次扫描全部连接的时间
 }
+
+// scanInterval 是 Advance 扫描全部连接的最小间隔（抓包时间）。
+const scanInterval = 100 * time.Millisecond
 
 // NewAssembler 创建重组器。open 在新建连接时调用，返回这条连接的 Handler。
 func NewAssembler(cfg Config, open func(ConnInfo) Handler) *Assembler {
@@ -28,6 +34,7 @@ func (a *Assembler) Add(seg *decode.Segment, ts time.Time) {
 		}
 	}
 	c.last = ts
+	a.lru.touch(c)
 	s := c.side(seg.Src)
 	d, peer := &c.d[s], &c.d[1-s]
 	if seg.Flags&decode.SYN != 0 {
@@ -106,11 +113,23 @@ func (a *Assembler) create(seg *decode.Segment, ts time.Time) *conn {
 	c.h = a.open(info)
 	a.conns[info.Key] = c
 	a.conns[Key{info.Key.B, info.Key.A}] = c
+	a.lru.pushNewest(c)
 	return c
 }
 
 // Advance 处理乱序超时和空闲释放。now 单调不减。
-func (a *Assembler) Advance(now time.Time) {}
+func (a *Assembler) Advance(now time.Time) {
+	if !a.scanned.IsZero() && now.Sub(a.scanned) < scanInterval {
+		return
+	}
+	a.scanned = now
+	for c := a.lru.oldest; c != nil; {
+		next := c.newer // 回调里可能关闭 c
+		a.expireReorder(c, 0, now)
+		a.expireReorder(c, 1, now)
+		c = next
+	}
+}
 
 // Flush 在输入结束时调用：先把每条连接的空洞都认定为缺口，再依次 Closed(CloseEOF)。
 func (a *Assembler) Flush(now time.Time) {}

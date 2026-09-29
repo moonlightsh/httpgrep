@@ -60,3 +60,22 @@ func TestGapByPeerAck(t *testing.T) {
 		})
 	}
 }
+
+// 第 9 条：乱序超时。空洞一直没补上，最早的缓存段到达 2 秒后认定缺口。
+func TestReorderTimeout(t *testing.T) {
+	h := newHarness(t, defaultConfig())
+	h.handshake(at(0))
+	h.expect("open A=10.0.0.1:40000 B=10.0.0.2:80 known=true")
+	h.add(c2s(1005, 5001, pshAck, "efgh"), at(1000)) // 空洞 [0,4)
+	h.add(c2s(1011, 5001, pshAck, "kl"), at(1500))   // 空洞 [8,10)
+	h.expect()
+
+	h.a.Advance(at(2900)) // 最早的段到达后 1.9 秒
+	h.expect()
+	h.a.Advance(at(3000)) // 到达后 2 秒
+	h.expect("gap 0 off=0 n=4", `data 0 off=4 "efgh" ack=0`)
+	h.a.Advance(at(3400))
+	h.expect()
+	h.a.Advance(at(3500)) // 第二段到达后 2 秒
+	h.expect("gap 0 off=8 n=2", `data 0 off=10 "kl" ack=0`)
+}

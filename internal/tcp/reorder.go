@@ -82,3 +82,21 @@ func (a *Assembler) skipTo(c *conn, s Side, limit int64, ts time.Time) {
 		a.drain(c, s, ts)
 	}
 }
+
+// expireReorder 处理 side 方向的乱序超时：最早到达的缓存段等满 ReorderTimeout
+// 仍没补上时，把它之前的空洞认定为缺口。
+func (a *Assembler) expireReorder(c *conn, s Side, now time.Time) {
+	d := &c.d[s]
+	for len(d.buf) > 0 {
+		oldest := 0
+		for i := range d.buf {
+			if d.buf[i].ts.Before(d.buf[oldest].ts) {
+				oldest = i
+			}
+		}
+		if now.Sub(d.buf[oldest].ts) < a.cfg.ReorderTimeout {
+			return
+		}
+		a.skipTo(c, s, d.buf[oldest].off, now)
+	}
+}
