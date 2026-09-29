@@ -3,8 +3,10 @@ package run_test
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"httpgrep/internal/pcapgen"
 	"httpgrep/internal/run"
@@ -91,5 +93,61 @@ func TestRunClockNeverGoesBack(t *testing.T) {
 		"GET /b HTTP/1.1\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nHIT\n")
 	if st.Complete != 2 {
 		t.Fatalf("stats %+v", st)
+	}
+}
+
+// 流量停下来、输入没有结束：Pipe 为真时超过 1 秒没有新包，时钟从最后一个包起按真实时间往前推，
+// 只有请求的交互在 --timeout 2s 之后（约 2 秒，200ms 检查一次）以 no-response(timeout) 输出；
+// Pipe 为假时时钟不动，3 秒内没有输出，输入结束后以 no-response(eof) 输出。
+func TestRunPipeRealTimeFallback(t *testing.T) {
+	in := capture(t, func(w *pcapgen.Writer) {
+		c := pcapgen.NewConn(w, cli1, srv)
+		c.Handshake(ms(-1))
+		c.ClientSend(ms(0), []byte("GET /a HTTP/1.1\r\nX: HIT\r\n\r\n"))
+	})
+	head := "2026-09-28 15:30:12.345 10.0.0.1:52814 -> 10.0.0.2:80 "
+	req := "GET /a HTTP/1.1\r\nX: HIT\r\n\r\n"
+	for _, tc := range []struct {
+		name string
+		pipe bool
+		want string
+	}{
+		{"pipe", true, head + "no-response(timeout)\n" + req},
+		{"file", false, head + "no-response(eof)\n" + req},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pr, pw := io.Pipe()
+			defer pw.Close()
+			out := newNotifyWriter()
+			ch := goRun(run.Config{Input: pr, Pipe: tc.pipe, Stdout: out, Opts: opts(t, "--timeout", "2s", "HIT")})
+			if _, err := pw.Write(in); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			if tc.pipe {
+				select {
+				case <-out.wrote:
+				case <-time.After(4500 * time.Millisecond):
+					t.Fatal("no output within 4.5s")
+				}
+				if el := time.Since(start); el < 1800*time.Millisecond {
+					t.Fatalf("output after %v, want about 2s", el)
+				}
+				check(t, out.String(), tc.want)
+			} else {
+				select {
+				case <-out.wrote:
+					t.Fatalf("output before input ended: %q", out.String())
+				case <-time.After(3 * time.Second):
+				}
+			}
+			pw.Close()
+			r := wait(t, ch, 2*time.Second)
+			if r.err != nil || !r.matched {
+				t.Fatalf("matched %v err %v", r.matched, r.err)
+			}
+			check(t, out.String(), tc.want)
+		})
 	}
 }

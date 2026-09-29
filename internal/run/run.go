@@ -12,6 +12,7 @@ import (
 	"httpgrep/internal/engine"
 	"httpgrep/internal/match"
 	"httpgrep/internal/output"
+	"httpgrep/internal/pcap"
 )
 
 // Config 是 Run 的参数。
@@ -95,26 +96,75 @@ func Run(cfg Config) (matched bool, st engine.Stats, err error) {
 	}
 	var d dispatcher = &single{e: engine.New(ecfg), free: rd.free}
 
-	var (
-		clock time.Time // 抓包时钟：所有包时间戳的最大值
-		seg   decode.Segment
-	)
-	for b := range rd.out {
-		for _, r := range b.recs {
-			if r.ts.After(clock) {
-				clock = r.ts
-			}
-			// 引擎要求时间单调不减：时间戳变小的包按当前时钟处理
-			if decode.Decode(h.link, b.buf[r.off:r.off+r.n], r.origLen, &seg) == decode.OK {
-				d.segment(b, &seg, clock)
-			}
-		}
-		end := b.err
-		d.flush(b, clock)
-		if end != nil {
-			break
+	l := loop{link: h.link, d: d}
+	var tick <-chan time.Time
+	if cfg.Pipe {
+		t := time.NewTicker(idleCheck)
+		defer t.Stop()
+		tick = t.C
+	}
+	for done := false; !done; {
+		select {
+		case b := <-rd.out:
+			done = l.batch(b)
+		case <-tick:
+			l.idle()
 		}
 	}
-	st = d.finish(clock)
+	st = d.finish(l.clock)
 	return out.matched, st, out.failed()
+}
+
+// 管道输入的真实时间兜底：每 idleCheck 检查一次，超过 idleAfter 没有新包时，
+// 时钟从最后一个包起按真实经过的时间往前推。
+const (
+	idleCheck = 200 * time.Millisecond
+	idleAfter = time.Second
+)
+
+// loop 是主循环的状态。
+type loop struct {
+	link    pcap.LinkType
+	d       dispatcher
+	seg     decode.Segment
+	clock   time.Time // 抓包时钟：所有包时间戳的最大值，管道输入时还会按真实时间往前推
+	lastTS  time.Time // 所有包时间戳的最大值
+	lastRcv time.Time // 收到最近一批包的真实时间；零值表示还没收到包
+}
+
+// batch 处理一批包，返回输入是否已经结束。
+func (l *loop) batch(b *batch) (end bool) {
+	for _, r := range b.recs {
+		if r.ts.After(l.lastTS) {
+			l.lastTS = r.ts
+		}
+		if r.ts.After(l.clock) {
+			l.clock = r.ts
+		}
+		// 引擎要求时间单调不减：时间戳变小的包按当前时钟处理
+		if decode.Decode(l.link, b.buf[r.off:r.off+r.n], r.origLen, &l.seg) == decode.OK {
+			l.d.segment(b, &l.seg, l.clock)
+		}
+	}
+	if len(b.recs) > 0 {
+		l.lastRcv = time.Now()
+	}
+	end = b.err != nil
+	l.d.flush(b, l.clock)
+	return end
+}
+
+// idle 是管道输入的定时检查。
+func (l *loop) idle() {
+	if l.lastRcv.IsZero() {
+		return
+	}
+	since := time.Since(l.lastRcv)
+	if since <= idleAfter {
+		return
+	}
+	if c := l.lastTS.Add(since); c.After(l.clock) {
+		l.clock = c
+	}
+	l.d.advance(l.clock)
 }
