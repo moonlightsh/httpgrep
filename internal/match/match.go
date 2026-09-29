@@ -4,6 +4,7 @@ package match
 import (
 	"bytes"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -59,6 +60,51 @@ type CompileError struct {
 
 func (e *CompileError) Error() string {
 	return "match: invalid pattern " + strconv.Quote(e.Pattern) + ": " + e.Err
+}
+
+// Highlight 返回一行里所有命中的 [起, 止) 区间，按起点排序、互不重叠。
+// line 不含 \n；行尾的 \r 由调用方去掉。
+func (m *Matcher) Highlight(line []byte) [][2]int {
+	if m.anyEmpty {
+		if len(line) == 0 {
+			return nil
+		}
+		return [][2]int{{0, len(line)}}
+	}
+	if m.re != nil {
+		var out [][2]int
+		for _, loc := range m.re.FindAllIndex(line, -1) {
+			if loc[1] > loc[0] {
+				out = append(out, [2]int{loc[0], loc[1]})
+			}
+		}
+		return out
+	}
+	// 字面匹配：找所有关键词的所有出现位置，重叠的合并。
+	var ranges [][2]int
+	for _, p := range m.patterns {
+		for i := 0; i+len(p) <= len(line); {
+			j := bytes.Index(line[i:], p)
+			if j < 0 {
+				break
+			}
+			ranges = append(ranges, [2]int{i + j, i + j + len(p)})
+			i += j + 1
+		}
+	}
+	sort.Slice(ranges, func(a, b int) bool { return ranges[a][0] < ranges[b][0] })
+	var out [][2]int
+	for _, r := range ranges {
+		if n := len(out); n > 0 && r[0] < out[n-1][1] {
+			// 重叠：延长或跳过。
+			if r[1] > out[n-1][1] {
+				out[n-1][1] = r[1]
+			}
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // NewScanner 创建一个新的扫描器。

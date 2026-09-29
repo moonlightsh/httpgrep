@@ -1,6 +1,7 @@
 package match_test
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -195,5 +196,50 @@ func TestEmptyRegexPatternMatchesEverything(t *testing.T) {
 	s.Write([]byte("\n"))
 	if !s.Matched() {
 		t.Fatal("empty regex should match empty line")
+	}
+}
+
+// Highlight 返回一行里所有命中的 [起, 止) 区间，按起点排序、互不重叠。
+func TestHighlightLiteral(t *testing.T) {
+	m, _ := match.Compile([]string{"ab"}, false)
+	got := m.Highlight([]byte("abxabxab"))
+	want := [][2]int{{0, 2}, {3, 5}, {6, 8}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+
+	// 空关键词：整行都是命中区间。
+	m2, _ := match.Compile([]string{""}, false)
+	got2 := m2.Highlight([]byte("abc"))
+	want2 := [][2]int{{0, 3}}
+	if !reflect.DeepEqual(got2, want2) {
+		t.Fatalf("empty pattern: got %v want %v", got2, want2)
+	}
+
+	// 重叠的区间合并：关键词 ab 和 bc 在 abc 里重叠。
+	m3, _ := match.Compile([]string{"ab", "bc"}, false)
+	got3 := m3.Highlight([]byte("abc"))
+	want3 := [][2]int{{0, 3}}
+	if !reflect.DeepEqual(got3, want3) {
+		t.Fatalf("overlapping: got %v want %v", got3, want3)
+	}
+}
+
+// 正则模式用 FindAllIndex，丢弃长度为 0 的区间。
+func TestHighlightRegex(t *testing.T) {
+	m, _ := match.Compile([]string{`\d+`, `x*`}, true)
+	got := m.Highlight([]byte("a12b345c"))
+	// \d+ 命中 12 和 345；x* 命中空区间（丢弃）以及非重叠的空串。
+	want := [][2]int{{1, 3}, {4, 7}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+
+	// 空正则关键词：整行。
+	m2, _ := match.Compile([]string{""}, true)
+	got2 := m2.Highlight([]byte("abc"))
+	want2 := [][2]int{{0, 3}}
+	if !reflect.DeepEqual(got2, want2) {
+		t.Fatalf("empty regex: got %v want %v", got2, want2)
 	}
 }
