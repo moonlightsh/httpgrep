@@ -438,11 +438,6 @@ func TestTTYColors(t *testing.T) {
 			t.Errorf("Highlight 收到的行不正确\n得到: %q\n期望: %q", gotLines, wantLines)
 		}
 		want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
-			"ab\x1b[01;31mt\x1b[m\x1b[01;31m \x1b[m\x1b[01;31mt\x1b[m\r\n" +
-			"no \x1b[01;31mt\x1b[m\x1b[01;31m \x1b[m\x1b[01;31mt\x1b[m here\n"
-		_ = want
-		// 上面区间是编的，实际期望按规则算：行是 "abhit"（去 \r\n），命中 [2,5)。
-		want = "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
 			"ab\x1b[01;31mhit\x1b[m\r\n" +
 			"no \x1b[01;31mhit\x1b[m here\n"
 		if got != want {
@@ -464,8 +459,6 @@ func TestTTYColors(t *testing.T) {
 			Messages: []output.Message{{Pieces: []output.Piece{{Data: []byte("xx hit yy")}}}}}
 		got := string(render(t, output.Options{Location: tz, TTY: true, Highlight: hl}, b))
 		want := "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
-			"xx xx\x1b[01;31mhit\x1b[m yy" // 注意 hl 固定返回 [2,5)
-		want = "\x1b[35m1970-01-01 08:00:00.000 1.1.1.1:1 -> 2.2.2.2:2 complete\x1b[m\n" +
 			"xx \x1b[01;31mhit\x1b[m yy\n"
 		if got != want {
 			t.Errorf("末行高亮不正确\n得到: %q\n期望: %q", got, want)
