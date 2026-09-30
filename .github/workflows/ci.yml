@@ -43,7 +43,20 @@ jobs:
       - name: go build
         run: go build ./...
       - name: go test
-        run: go test -race ./...
+        id: test
+        shell: bash
+        run: go test -race ./... 2>&1 | tee "$RUNNER_TEMP/test.log"
+      # 把失败的用例和断言行汇成一条注解，在检查页面上直接可见，不必翻日志。
+      - name: annotate test failures
+        if: failure() && steps.test.outcome == 'failure'
+        shell: bash
+        run: |
+          msg=$(grep -E -- '--- FAIL|FAIL\s|_test\.go:[0-9]+:|panic:' \
+            "$RUNNER_TEMP/test.log" | head -60 || true)
+          msg=${msg//'%'/'%25'}
+          msg=${msg//$'\r'/'%0D'}
+          msg=${msg//$'\n'/'%0A'}
+          echo "::error title=go test failed::${msg:-see log}"
 
   cross-build:
     runs-on: ubuntu-latest
