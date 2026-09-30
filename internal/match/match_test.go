@@ -570,28 +570,25 @@ func TestZeroAllocPerBreakCycle(t *testing.T) {
 	}
 }
 
-// Write+Break 和 Reset 循环零内存增长（含 tiny 分配，用 TotalAlloc 观察）。
+// Write+Break 和 Reset 循环不分配内存。AllocsPerRun 按 MemStats.Mallocs 计数，含 tiny 分配，
+// 按次数取平均：每轮都分配时平均值至少为 1；测试框架或运行时的其他协程偶尔分配一次，
+// 平均后是 0，不会误报（直接比较 TotalAlloc 时，CI 上曾被别处的 16 字节分配弄失败）。
 func TestBreakResetNoMemoryGrowth(t *testing.T) {
 	m, _ := match.Compile([]string{"keyword"}, false) // maxLen=7，fastTail 候选 6 字节
 	s := m.NewScanner()
 	chunk := []byte("some line without kw\n")
 	s.Write(chunk)
 	s.Break()
-	runtime.GC()
-	var before runtime.MemStats
-	runtime.ReadMemStats(&before)
-	for i := 0; i < 1000; i++ {
+	allocs := testing.AllocsPerRun(1000, func() {
 		s.Write(chunk)
 		s.Break()
 		s.Reset()
-	}
-	var after runtime.MemStats
-	runtime.ReadMemStats(&after)
+	})
 	if s.Matched() {
 		t.Fatal("test data must not match, otherwise the early return is measured")
 	}
-	if grew := after.TotalAlloc - before.TotalAlloc; grew != 0 {
-		t.Fatalf("Write/Break/Reset cycle must not allocate anything, allocated %d bytes", grew)
+	if allocs != 0 {
+		t.Fatalf("Write/Break/Reset cycle must not allocate, got %v allocs per cycle", allocs)
 	}
 }
 
