@@ -3,7 +3,7 @@
 #
 # 用法：scripts/build-release.sh <版本号> [输出目录，默认仓库根目录下的 dist]
 #
-# 产物（每个包里只有一个 httpgrep 可执行文件，放在同名目录下）：
+# 产物（每个包里是 httpgrep 可执行文件和 LICENSE，放在同名目录下）：
 #   httpgrep-<版本号>-linux-x86_64.tar.gz
 #   httpgrep-<版本号>-linux-arm64.tar.gz
 #   httpgrep-<版本号>-mac-arm64.tar.gz
@@ -47,6 +47,7 @@ for t in "${targets[@]}"; do
   CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch go build -trimpath \
     -ldflags "-s -w -X main.version=$version" \
     -o "$out/$name/httpgrep" ./cmd/httpgrep
+  cp LICENSE "$out/$name/"
   tar -C "$out" -czf "$out/$name.tar.gz" "$name"
   rm -rf "${out:?}/$name"
   archives+=("$name.tar.gz")

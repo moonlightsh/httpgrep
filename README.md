@@ -251,3 +251,7 @@ Chinese.
 GitHub Actions runs formatting, vet, build and race-enabled tests on Linux
 and macOS for every push. When a release is published, it builds the four
 platform archives and `SHA256SUMS` and attaches them to the release.
+
+## License
+
+[MIT](LICENSE)
