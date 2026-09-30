@@ -1,0 +1,45 @@
+name: Release
+
+# 发布（Release）published 时：先跑测试，再交叉编译四个平台的二进制，上传到这个 Release。
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # 发布构建不用缓存，避免被其他分支写入的缓存污染产物。
+          cache: false
+      - name: go test
+        run: go test -race ./...
+      # tag 名只经环境变量传给 shell，不直接拼进脚本，避免注入。
+      - name: build release binaries
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+        run: bash scripts/build-release.sh "$VERSION" dist
+      - name: smoke test linux-x86_64
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          pkg="httpgrep-$VERSION-linux-x86_64"
+          tar -xzf "dist/$pkg.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/$pkg/httpgrep" --version
+      - name: upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$VERSION" --clobber \
+            dist/*.tar.gz dist/SHA256SUMS
